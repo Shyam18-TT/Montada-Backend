@@ -20,7 +20,12 @@ class RegisterView(generics.CreateAPIView):
     permission_classes = [permissions.AllowAny]
 
     def create(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
+        # Set username from email automatically
+        data = request.data.copy()
+        if 'email' in data and ('username' not in data or not data.get('username')):
+            data['username'] = data['email']
+        
+        serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
         

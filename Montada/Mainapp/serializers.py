@@ -5,9 +5,7 @@ from .models import User
 
 
 class UserRegistrationSerializer(serializers.ModelSerializer):
-    """
-    Serializer for user registration
-    """
+    
     password = serializers.CharField(
         write_only=True,
         required=True,
@@ -24,6 +22,7 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
         fields = ('id', 'username', 'email', 'password', 'password2', 
                   'first_name', 'last_name', 'phone_number', 'date_of_birth')
         extra_kwargs = {
+            'username': {'required': False},
             'first_name': {'required': False},
             'last_name': {'required': False},
             'phone_number': {'required': False},
@@ -39,14 +38,15 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         validated_data.pop('password2')
+        # Ensure username is set from email if not provided
+        if 'username' not in validated_data or not validated_data.get('username'):
+            validated_data['username'] = validated_data['email']
         user = User.objects.create_user(**validated_data)
         return user
 
 
 class UserLoginSerializer(serializers.Serializer):
-    """
-    Serializer for user login
-    """
+    
     email = serializers.EmailField(required=True)
     password = serializers.CharField(
         write_only=True,
