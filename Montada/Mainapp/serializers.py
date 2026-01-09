@@ -11,15 +11,10 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
         required=True,
         validators=[validate_password]
     )
-    password2 = serializers.CharField(
-        write_only=True,
-        required=True,
-        label='Confirm Password'
-    )
 
     class Meta:
         model = User
-        fields = ('id', 'username', 'email', 'password', 'password2', 
+        fields = ('id', 'username', 'email', 'password', 
                   'name', 'phone_number', 'date_of_birth')
         extra_kwargs = {
             'username': {'required': False},
@@ -28,15 +23,7 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
             'date_of_birth': {'required': False},
         }
 
-    def validate(self, attrs):
-        if attrs['password'] != attrs['password2']:
-            raise serializers.ValidationError(
-                {"password": "Password fields didn't match."}
-            )
-        return attrs
-
     def create(self, validated_data):
-        validated_data.pop('password2')
         # Ensure username is set from email if not provided
         if 'username' not in validated_data or not validated_data.get('username'):
             validated_data['username'] = validated_data['email']
