@@ -20,11 +20,10 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ('id', 'username', 'email', 'password', 'password2', 
-                  'first_name', 'last_name', 'phone_number', 'date_of_birth')
+                  'name', 'phone_number', 'date_of_birth')
         extra_kwargs = {
             'username': {'required': False},
-            'first_name': {'required': False},
-            'last_name': {'required': False},
+            'name': {'required': False},
             'phone_number': {'required': False},
             'date_of_birth': {'required': False},
         }
@@ -83,7 +82,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
     """
     class Meta:
         model = User
-        fields = ('id', 'username', 'email', 'first_name', 'last_name',
+        fields = ('id', 'username', 'email', 'name',
                   'phone_number', 'profile_picture', 'date_of_birth',
                   'is_verified', 'created_at', 'updated_at')
         read_only_fields = ('id', 'email', 'is_verified', 'created_at', 'updated_at')

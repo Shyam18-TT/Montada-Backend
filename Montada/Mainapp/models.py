@@ -8,6 +8,7 @@ class User(AbstractUser):
     Custom User model extending Django's AbstractUser
     """
     email = models.EmailField(_('email address'), unique=True)
+    name = models.CharField(_('full name'), max_length=255, blank=True, null=True)
     phone_number = models.CharField(max_length=15, blank=True, null=True)
     profile_picture = models.ImageField(upload_to='profile_pictures/', blank=True, null=True)
     date_of_birth = models.DateField(blank=True, null=True)
