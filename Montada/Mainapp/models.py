@@ -7,11 +7,26 @@ class User(AbstractUser):
     """
     Custom User model extending Django's AbstractUser
     """
+    USER_TYPE_CHOICES = [
+        ('trader', 'Trader'),
+        ('analyst', 'Analyst'),
+    ]
+    
     email = models.EmailField(_('email address'), unique=True)
     name = models.CharField(_('full name'), max_length=255, blank=True, null=True)
     phone_number = models.CharField(max_length=15, blank=True, null=True)
     profile_picture = models.ImageField(upload_to='profile_pictures/', blank=True, null=True)
     date_of_birth = models.DateField(blank=True, null=True)
+    user_type = models.CharField(
+        max_length=10,
+        choices=USER_TYPE_CHOICES,
+        default='trader',
+        help_text='Whether the user is a trader or analyst'
+    )
+    is_subscribed = models.BooleanField(
+        default=False,
+        help_text='Subscription status of the user'
+    )
     is_verified = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

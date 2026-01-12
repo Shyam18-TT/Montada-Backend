@@ -15,12 +15,15 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ('id', 'username', 'email', 'password', 
-                  'name', 'phone_number', 'date_of_birth')
+                  'name', 'phone_number', 'date_of_birth', 
+                  'user_type', 'is_subscribed')
         extra_kwargs = {
             'username': {'required': False},
             'name': {'required': False},
             'phone_number': {'required': False},
             'date_of_birth': {'required': False},
+            'user_type': {'required': True},
+            'is_subscribed': {'required': False},
         }
 
     def create(self, validated_data):
@@ -71,7 +74,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
         model = User
         fields = ('id', 'username', 'email', 'name',
                   'phone_number', 'profile_picture', 'date_of_birth',
-                  'is_verified', 'created_at', 'updated_at')
+                  'user_type', 'is_subscribed', 'is_verified', 
+                  'created_at', 'updated_at')
         read_only_fields = ('id', 'email', 'is_verified', 'created_at', 'updated_at')
 
 
