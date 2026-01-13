@@ -79,10 +79,18 @@ WSGI_APPLICATION = 'Montada.wsgi.application'
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
-    }
+        'default': {
+        'ENGINE': 'mssql',
+        'NAME': 'MontadaApp',
+        'USER': 'MontadaUser',
+        'PASSWORD': 'A7f#Q9mL@2xR!K8Z',
+        'HOST': '3.76.105.23',
+        'PORT': '1433',
+        'OPTIONS': {
+            'driver': 'ODBC Driver 17 for SQL Server',
+        },
+       
+    },
 }
 
 
