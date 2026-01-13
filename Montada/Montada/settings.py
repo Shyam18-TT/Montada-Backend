@@ -89,6 +89,7 @@ DATABASES = {
 
         'OPTIONS': {
             'driver': 'ODBC Driver 18 for SQL Server',
+            'Encrypt': 'no',   # 🔥 THIS LINE FIXES IT
             'TrustServerCertificate': 'yes',
         },
        
