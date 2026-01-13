@@ -86,6 +86,11 @@ DATABASES = {
         'PASSWORD': 'A7f#Q9mL@2xR!K8Z',
         'HOST': '3.76.105.23',
         'PORT': '1433',
+
+        'OPTIONS': {
+            'driver': 'ODBC Driver 18 for SQL Server',
+            'TrustServerCertificate': 'yes',
+        },
        
     },
 }
