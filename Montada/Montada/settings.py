@@ -174,3 +174,16 @@ SIMPLE_JWT = {
 # Media files configuration
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
+
+# Email configuration
+# Configure these settings with your email provider credentials
+EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+EMAIL_HOST = 'smtp.gmail.com'  # Change to your SMTP server
+EMAIL_PORT = 587
+EMAIL_USE_TLS = True
+EMAIL_HOST_USER = 'montadaapp129@gmail.com'  # Your email address
+EMAIL_HOST_PASSWORD = 'dklhezbtaohzylnm'  # Your email password or app-specific password
+# DEFAULT_FROM_EMAIL = ''  # Default sender email address
+
+# For Gmail, you may need to use an App Password instead of your regular password
+# For other providers, adjust EMAIL_HOST, EMAIL_PORT, EMAIL_USE_TLS/EMAIL_USE_SSL accordingly

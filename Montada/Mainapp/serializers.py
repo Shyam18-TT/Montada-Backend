@@ -110,3 +110,114 @@ class ChangePasswordSerializer(serializers.Serializer):
         user.save()
         return user
 
+
+class ForgotPasswordSerializer(serializers.Serializer):
+    """
+    Serializer for forgot password - sends OTP to email
+    """
+    email = serializers.EmailField(required=True)
+    
+    def validate_email(self, value):
+        """Check if user with this email exists"""
+        from .models import User
+        try:
+            user = User.objects.get(email=value)
+            if not user.is_active:
+                raise serializers.ValidationError("User account is disabled.")
+        except User.DoesNotExist:
+            # Don't reveal if email exists or not for security
+            pass
+        return value
+
+
+class VerifyOTPSerializer(serializers.Serializer):
+    """
+    Serializer for verifying OTP
+    """
+    email = serializers.EmailField(required=True)
+    otp = serializers.CharField(required=True, max_length=6, min_length=6)
+    
+    def validate(self, attrs):
+        from .models import PasswordResetOTP
+        email = attrs.get('email')
+        otp = attrs.get('otp')
+        
+        try:
+            otp_obj = PasswordResetOTP.objects.filter(
+                email=email,
+                otp=otp,
+                is_used=False
+            ).order_by('-created_at').first()
+            
+            if not otp_obj:
+                raise serializers.ValidationError(
+                    {"otp": "Invalid OTP or email."}
+                )
+            
+            if not otp_obj.is_valid():
+                raise serializers.ValidationError(
+                    {"otp": "OTP has expired. Please request a new one."}
+                )
+            
+            attrs['otp_obj'] = otp_obj
+            return attrs
+        except Exception as e:
+            raise serializers.ValidationError(
+                {"otp": "Invalid OTP or email."}
+            )
+
+
+class ResetPasswordSerializer(serializers.Serializer):
+    """
+    Serializer for resetting password with OTP
+    """
+    email = serializers.EmailField(required=True)
+    otp = serializers.CharField(required=True, max_length=6, min_length=6)
+    new_password = serializers.CharField(
+        required=True,
+        write_only=True,
+        validators=[validate_password]
+    )
+    
+    def validate(self, attrs):
+        from .models import PasswordResetOTP, User
+        
+        
+        email = attrs.get('email')
+        otp = attrs.get('otp')
+        
+        # Verify OTP
+        try:
+            otp_obj = PasswordResetOTP.objects.filter(
+                email=email,
+                otp=otp,
+                is_used=False
+            ).order_by('-created_at').first()
+            
+            if not otp_obj:
+                raise serializers.ValidationError(
+                    {"otp": "Invalid OTP or email."}
+                )
+            
+            if not otp_obj.is_valid():
+                raise serializers.ValidationError(
+                    {"otp": "OTP has expired. Please request a new one."}
+                )
+            
+            # Check if user exists
+            try:
+                user = User.objects.get(email=email)
+                attrs['user'] = user
+                attrs['otp_obj'] = otp_obj
+            except User.DoesNotExist:
+                raise serializers.ValidationError(
+                    {"email": "User with this email does not exist."}
+                )
+            
+            return attrs
+        except serializers.ValidationError:
+            raise
+        except Exception as e:
+            raise serializers.ValidationError(
+                {"otp": "Invalid OTP or email."}
+            )

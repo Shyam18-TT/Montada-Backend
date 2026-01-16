@@ -1,2 +1,17 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Django migrations (ignore except __init__.py)
+**/migrations/*.py
+!**/migrations/__init__.py
+
+# SQLite (if any)
+*.sqlite3
+
+# Environment
 .env
-env
+venv/
+.env/
+env/

@@ -1,6 +1,9 @@
 from django.db import models
 from django.contrib.auth.models import AbstractUser
 from django.utils.translation import gettext_lazy as _
+from django.utils import timezone
+from datetime import timedelta
+import random
 
 
 class User(AbstractUser):
@@ -41,3 +44,35 @@ class User(AbstractUser):
 
     def __str__(self):
         return self.email
+
+
+class PasswordResetOTP(models.Model):
+    """
+    Model to store OTP codes for password reset
+    """
+    email = models.EmailField()
+    otp = models.CharField(max_length=6)
+    created_at = models.DateTimeField(auto_now_add=True)
+    is_used = models.BooleanField(default=False)
+    
+    class Meta:
+        verbose_name = 'Password Reset OTP'
+        verbose_name_plural = 'Password Reset OTPs'
+        ordering = ['-created_at']
+    
+    def __str__(self):
+        return f"OTP for {self.email}"
+    
+    @staticmethod
+    def generate_otp():
+        """Generate a 6-digit OTP"""
+        return str(random.randint(100000, 999999))
+    
+    def is_expired(self, expiry_minutes=10):
+        """Check if OTP has expired (default 10 minutes)"""
+        expiry_time = self.created_at + timedelta(minutes=expiry_minutes)
+        return timezone.now() > expiry_time
+    
+    def is_valid(self):
+        """Check if OTP is valid (not used and not expired)"""
+        return not self.is_used and not self.is_expired()
