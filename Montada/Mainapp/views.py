@@ -12,9 +12,10 @@ from .serializers import (
     ChangePasswordSerializer,
     ForgotPasswordSerializer,
     VerifyOTPSerializer,
-    ResetPasswordSerializer
+    ResetPasswordSerializer,
+    EmailVerificationSerializer
 )
-from .models import PasswordResetOTP
+from .models import PasswordResetOTP, EmailVerificationOTP
 
 User = get_user_model()
 
@@ -35,16 +36,52 @@ class RegisterView(generics.CreateAPIView):
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
         
-        # Generate JWT tokens
-        refresh = RefreshToken.for_user(user)
+        # Ensure user is not verified initially
+        user.is_verified = False
+        user.save()
+        
+        # Generate OTP for email verification
+        otp = EmailVerificationOTP.generate_otp()
+        
+        # Invalidate previous OTPs for this email
+        EmailVerificationOTP.objects.filter(email=user.email, is_used=False).update(is_used=True)
+        
+        # Create new OTP record
+        otp_obj = EmailVerificationOTP.objects.create(email=user.email, otp=otp)
+        
+        # Send email with OTP
+        subject = 'Email Verification OTP - Montada'
+        message = f'''
+Hello {user.name or user.username},
+
+Welcome to Montada! Please verify your email address to complete your registration.
+
+Your verification OTP code is: {otp}
+
+This OTP will expire in 10 minutes.
+
+If you did not create an account with us, please ignore this email.
+
+Best regards,
+Montada Team
+        '''
+        
+        try:
+            send_mail(
+                subject,
+                message,
+                settings.EMAIL_HOST_USER if hasattr(settings, 'EMAIL_HOST_USER') else 'noreply@montada.com',
+                [user.email],
+                fail_silently=False,
+            )
+        except Exception as e:
+            # Log the error in production, but still allow registration
+            # The user can request a new OTP later
+            pass
         
         return Response({
-            'tokens': {
-                'refresh': str(refresh),
-                'access': str(refresh.access_token),
-            },
-            'user': UserProfileSerializer(user).data,
-            'message': 'User registered successfully'
+            'message': 'Registration successful. Please check your email for verification OTP to complete registration.',
+            'email': user.email
         }, status=status.HTTP_201_CREATED)
 
 
@@ -237,3 +274,110 @@ def reset_password_view(request):
         }, status=status.HTTP_200_OK)
     
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['POST'])
+@permission_classes([permissions.AllowAny])
+def verify_email_view(request):
+    """
+    API endpoint for verifying email with OTP
+    """
+    serializer = EmailVerificationSerializer(data=request.data)
+    
+    if serializer.is_valid():
+        user = serializer.validated_data['user']
+        otp_obj = serializer.validated_data['otp_obj']
+        
+        # Mark email as verified
+        user.is_verified = True
+        user.save()
+        
+        # Mark OTP as used
+        otp_obj.is_used = True
+        otp_obj.save()
+        
+        # Invalidate all other OTPs for this email
+        EmailVerificationOTP.objects.filter(email=user.email, is_used=False).update(is_used=True)
+        
+        # Generate JWT tokens after email verification
+        refresh = RefreshToken.for_user(user)
+        
+        return Response({
+            'message': 'Email verified successfully.',
+            'tokens': {
+                'refresh': str(refresh),
+                'access': str(refresh.access_token),
+            },
+            'user': UserProfileSerializer(user).data
+        }, status=status.HTTP_200_OK)
+    
+    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+@api_view(['POST'])
+@permission_classes([permissions.AllowAny])
+def resend_verification_otp_view(request):
+    """
+    API endpoint for resending email verification OTP
+    """
+    email = request.data.get('email')
+    
+    if not email:
+        return Response({
+            'error': 'Email is required.'
+        }, status=status.HTTP_400_BAD_REQUEST)
+    
+    try:
+        user = User.objects.get(email=email)
+    except User.DoesNotExist:
+        return Response({
+            'error': 'User with this email does not exist.'
+        }, status=status.HTTP_404_NOT_FOUND)
+    
+    if user.is_verified:
+        return Response({
+            'message': 'Email is already verified.'
+        }, status=status.HTTP_200_OK)
+    
+    # Generate new OTP
+    otp = EmailVerificationOTP.generate_otp()
+    
+    # Invalidate previous OTPs for this email
+    EmailVerificationOTP.objects.filter(email=user.email, is_used=False).update(is_used=True)
+    
+    # Create new OTP record
+    otp_obj = EmailVerificationOTP.objects.create(email=user.email, otp=otp)
+    
+    # Send email with OTP
+    subject = 'Email Verification OTP - Montada'
+    message = f'''
+Hello {user.name or user.username},
+
+You have requested a new verification code for your Montada account.
+
+Your verification OTP code is: {otp}
+
+This OTP will expire in 10 minutes.
+
+If you did not request this, please ignore this email.
+
+Best regards,
+Montada Team
+    '''
+    
+    try:
+        send_mail(
+            subject,
+            message,
+            settings.EMAIL_HOST_USER if hasattr(settings, 'EMAIL_HOST_USER') else 'noreply@montada.com',
+            [user.email],
+            fail_silently=False,
+        )
+        
+        return Response({
+            'message': 'Verification OTP has been sent to your email address.'
+        }, status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({
+            'error': 'Failed to send email. Please try again later.'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

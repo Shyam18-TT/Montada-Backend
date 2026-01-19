@@ -8,7 +8,9 @@ from .views import (
     logout_view,
     forgot_password_view,
     verify_otp_view,
-    reset_password_view
+    reset_password_view,
+    verify_email_view,
+    resend_verification_otp_view
 )
 
 app_name = 'Mainapp'
@@ -23,5 +25,7 @@ urlpatterns = [
     path('forgot-password/', forgot_password_view, name='forgot_password'),
     path('verify-otp/', verify_otp_view, name='verify_otp'),
     path('reset-password/', reset_password_view, name='reset_password'),
+    path('verify-email/', verify_email_view, name='verify_email'),
+    path('resend-verification-otp/', resend_verification_otp_view, name='resend_verification_otp'),
 ]
 
