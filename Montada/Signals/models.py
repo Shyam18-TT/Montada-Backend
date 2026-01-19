@@ -1,17 +1,80 @@
 from django.db import models
 from django.conf import settings
 
+class AssetClass(models.Model):
+    """
+    Example:
+    - Forex
+    - Commodities
+    - Indices
+    - Crypto
+    """
 
+    name = models.CharField(
+        max_length=50,
+        unique=True
+    )
+
+    description = models.TextField(
+        blank=True,
+        null=True
+    )
+
+    is_active = models.BooleanField(default=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Asset Class"
+        verbose_name_plural = "Asset Classes"
+        ordering = ['name']
+
+    def __str__(self):
+        return self.name
+
+
+class Instrument(models.Model):
+    """
+    Example:
+    Forex      -> EUR/USD, GBP/USD
+    Commodity  -> XAU/USD, CL
+    Indices    -> NAS100, US30
+    Crypto     -> BTC/USD, ETH/USD
+    """
+
+    asset_class = models.ForeignKey(
+        AssetClass,
+        on_delete=models.CASCADE,
+        related_name='instruments'
+    )
+
+    symbol = models.CharField(
+        max_length=20,
+        help_text="e.g. EUR/USD, XAU/USD, NAS100"
+    )
+
+    name = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True,
+        help_text="Optional full name"
+    )
+
+    is_active = models.BooleanField(default=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('asset_class', 'symbol')
+        ordering = ['asset_class__name', 'symbol']
+
+    def __str__(self):
+        return f"{self.symbol} ({self.asset_class.name})"
+        
 class TradingSignal(models.Model):
     # -------------------------
     # ENUM / CHOICES
     # -------------------------
-    class AssetClass(models.TextChoices):
-        FOREX = 'FOREX', 'Forex'
-        COMMODITY = 'COMMODITY', 'Commodity'
-        INDICES = 'INDICES', 'Indices'
-        CRYPTO = 'CRYPTO', 'Crypto'
-
     class Direction(models.TextChoices):
         BUY = 'BUY', 'Buy'
         SELL = 'SELL', 'Sell'
@@ -34,14 +97,18 @@ class TradingSignal(models.Model):
         related_name='posted_signals'
     )
 
-    asset_class = models.CharField(
-        max_length=20,
-        choices=AssetClass.choices
+    asset_class = models.ForeignKey(
+        AssetClass,
+        on_delete=models.CASCADE,
+        related_name='trading_signals',
+        help_text="Asset class for this trading signal"
     )
 
-    instrument = models.CharField(
-        max_length=20,
-        help_text="e.g. EUR/USD, XAU/USD, NAS100, BTC/USD"
+    instrument = models.ForeignKey(
+        Instrument,
+        on_delete=models.CASCADE,
+        related_name='trading_signals',
+        help_text="Instrument for this trading signal"
     )
 
     direction = models.CharField(
@@ -90,8 +157,16 @@ class TradingSignal(models.Model):
     # VALIDATION
     # -------------------------
     def clean(self):
-        if self.confidence_level > 100:
+        """Validate that instrument belongs to the selected asset_class and confidence level"""
+        if self.asset_class and self.instrument:
+            if self.instrument.asset_class != self.asset_class:
+                raise ValueError(
+                    f"Instrument '{self.instrument.symbol}' does not belong to "
+                    f"asset class '{self.asset_class.name}'"
+                )
+        if self.confidence_level and self.confidence_level > 100:
             raise ValueError("Confidence level cannot exceed 100%")
 
     def __str__(self):
-        return f"{self.instrument} | {self.direction} | {self.timeframe}"
+        instrument_symbol = self.instrument.symbol if self.instrument else "N/A"
+        return f"{instrument_symbol} | {self.direction} | {self.timeframe}"

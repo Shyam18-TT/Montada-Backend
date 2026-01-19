@@ -1,5 +1,23 @@
 from django.contrib import admin
-from .models import TradingSignal
+from .models import TradingSignal, AssetClass, Instrument
+
+
+@admin.register(AssetClass)
+class AssetClassAdmin(admin.ModelAdmin):
+    list_display = ('id', 'name', 'description', 'is_active', 'created_at')
+    list_filter = ('is_active', 'created_at')
+    search_fields = ('name', 'description')
+    readonly_fields = ('created_at',)
+    ordering = ('name',)
+
+
+@admin.register(Instrument)
+class InstrumentAdmin(admin.ModelAdmin):
+    list_display = ('id', 'symbol', 'name', 'asset_class', 'is_active', 'created_at')
+    list_filter = ('asset_class', 'is_active', 'created_at')
+    search_fields = ('symbol', 'name', 'asset_class__name')
+    readonly_fields = ('created_at',)
+    ordering = ('asset_class__name', 'symbol')
 
 
 @admin.register(TradingSignal)
@@ -10,7 +28,7 @@ class TradingSignalAdmin(admin.ModelAdmin):
         'confidence_level', 'is_active', 'created_at'
     )
     list_filter = ('asset_class', 'direction', 'timeframe', 'is_active', 'created_at')
-    search_fields = ('instrument', 'analyst__email', 'analyst__name', 'analyst_note')
+    search_fields = ('instrument__symbol', 'instrument__name', 'analyst__email', 'analyst__name', 'analyst_note')
     readonly_fields = ('created_at', 'updated_at')
     ordering = ('-created_at',)
     
