@@ -28,11 +28,20 @@ class InstrumentNestedSerializer(serializers.ModelSerializer):
     """
     Simplified serializer for instruments when nested within asset classes
     Returns only id and name for active instruments
+    Uses symbol if name is null
     """
+    name = serializers.SerializerMethodField()
+    
     class Meta:
         model = Instrument
         fields = ('id', 'name')
         read_only_fields = ('id',)
+    
+    def get_name(self, obj):
+        """
+        Return name if available, otherwise return symbol
+        """
+        return obj.name if obj.name else obj.symbol
 
 
 class AssetClassWithInstrumentsSerializer(serializers.ModelSerializer):
