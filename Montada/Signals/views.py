@@ -83,10 +83,12 @@ class InstrumentListView(generics.ListAPIView):
 class AssetClassWithInstrumentsView(generics.ListAPIView):
     """
     API endpoint to get all asset classes with their related instruments in a single response
+    No pagination - returns all results at once
     """
     queryset = AssetClass.objects.filter(is_active=True).prefetch_related('instruments')
     serializer_class = AssetClassWithInstrumentsSerializer
     permission_classes = [permissions.IsAuthenticated]
+    pagination_class = None  # Disable pagination for this view
     
     def get_queryset(self):
         """
