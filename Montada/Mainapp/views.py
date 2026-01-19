@@ -19,6 +19,12 @@ from .models import PasswordResetOTP, EmailVerificationOTP
 
 User = get_user_model()
 
+# Import Subscription model for free trial creation
+try:
+    from Subscriptions.models import Subscription
+except ImportError:
+    Subscription = None
+
 
 class RegisterView(generics.CreateAPIView):
 
@@ -29,9 +35,84 @@ class RegisterView(generics.CreateAPIView):
     def create(self, request, *args, **kwargs):
         # Set username from email automatically
         data = request.data.copy()
-        if 'email' in data and ('username' not in data or not data.get('username')):
-            data['username'] = data['email']
+        email = data.get('email')
         
+        if not email:
+            return Response({
+                'error': 'Email is required.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        if 'username' not in data or not data.get('username'):
+            data['username'] = email
+        
+        # Check if user with this email already exists
+        try:
+            existing_user = User.objects.get(email=email)
+            
+            # If user is already verified, return error
+            if existing_user.is_verified:
+                return Response({
+                    'error': 'A user with this email already exists.',
+                    'detail': 'Username/email already exists. Please login instead.'
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # User exists but is not verified - update details and resend OTP
+            serializer = self.get_serializer(existing_user, data=data, partial=True)
+            serializer.is_valid(raise_exception=True)
+            
+            # Update user fields (including password if provided)
+            user = serializer.save()
+            user.is_verified = False
+            user.save()
+            
+            # Generate new OTP for email verification
+            otp = EmailVerificationOTP.generate_otp()
+            
+            # Invalidate previous OTPs for this email
+            EmailVerificationOTP.objects.filter(email=user.email, is_used=False).update(is_used=True)
+            
+            # Create new OTP record
+            otp_obj = EmailVerificationOTP.objects.create(email=user.email, otp=otp)
+            
+            # Send email with OTP
+            subject = 'Email Verification OTP - Montada'
+            message = f'''
+Hello {user.name or user.username},
+
+You have requested to update your registration details. Please verify your email address to complete your registration.
+
+Your verification OTP code is: {otp}
+
+This OTP will expire in 10 minutes.
+
+If you did not request this, please ignore this email.
+
+Best regards,
+Montada Team
+            '''
+            
+            try:
+                send_mail(
+                    subject,
+                    message,
+                    settings.EMAIL_HOST_USER if hasattr(settings, 'EMAIL_HOST_USER') else 'noreply@montada.com',
+                    [user.email],
+                    fail_silently=False,
+                )
+            except Exception as e:
+                # Log the error in production, but still allow registration
+                pass
+            
+            return Response({
+                'message': 'Registration details updated. Please check your email for verification OTP to complete registration.',
+                'email': user.email
+            }, status=status.HTTP_200_OK)
+            
+        except User.DoesNotExist:
+            # User doesn't exist - create new user
+            pass
+        
+        # Create new user
         serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
         user = serializer.save()
@@ -298,6 +379,14 @@ def verify_email_view(request):
         
         # Invalidate all other OTPs for this email
         EmailVerificationOTP.objects.filter(email=user.email, is_used=False).update(is_used=True)
+
+         # Create 7-day free trial subscription for new user
+        if Subscription:
+            try:
+                Subscription.create_free_trial(user)
+            except Exception as e:
+                # Log error but don't fail registration
+                pass
         
         # Generate JWT tokens after email verification
         refresh = RefreshToken.for_user(user)
@@ -376,6 +465,72 @@ Montada Team
         
         return Response({
             'message': 'Verification OTP has been sent to your email address.'
+        }, status=status.HTTP_200_OK)
+    except Exception as e:
+        return Response({
+            'error': 'Failed to send email. Please try again later.'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+@permission_classes([permissions.AllowAny])
+def resend_password_reset_otp_view(request):
+    """
+    API endpoint for resending password reset OTP
+    """
+    email = request.data.get('email')
+    
+    if not email:
+        return Response({
+            'error': 'Email is required.'
+        }, status=status.HTTP_400_BAD_REQUEST)
+    
+    # Check if user exists (but don't reveal if they don't for security)
+    try:
+        user = User.objects.get(email=email)
+    except User.DoesNotExist:
+        # Return success message even if user doesn't exist (security best practice)
+        return Response({
+            'message': 'If an account exists with this email, an OTP has been sent.'
+        }, status=status.HTTP_200_OK)
+    
+    # Generate new OTP
+    otp = PasswordResetOTP.generate_otp()
+    
+    # Invalidate previous OTPs for this email
+    PasswordResetOTP.objects.filter(email=email, is_used=False).update(is_used=True)
+    
+    # Create new OTP record
+    otp_obj = PasswordResetOTP.objects.create(email=email, otp=otp)
+    
+    # Send email with OTP
+    subject = 'Password Reset OTP - Montada'
+    message = f'''
+Hello {user.name or user.username},
+
+You have requested a new password reset code for your Montada account.
+
+Your OTP code is: {otp}
+
+This OTP will expire in 10 minutes.
+
+If you did not request this password reset, please ignore this email.
+
+Best regards,
+Montada Team
+    '''
+    
+    try:
+        send_mail(
+            subject,
+            message,
+            settings.DEFAULT_FROM_EMAIL if hasattr(settings, 'DEFAULT_FROM_EMAIL') else 'noreply@montada.com',
+            [email],
+            fail_silently=False,
+        )
+        
+        return Response({
+            'message': 'Password reset OTP has been sent to your email address.'
         }, status=status.HTTP_200_OK)
     except Exception as e:
         return Response({

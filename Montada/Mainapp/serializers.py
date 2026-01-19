@@ -8,8 +8,9 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
     
     password = serializers.CharField(
         write_only=True,
-        required=True,
-        validators=[validate_password]
+        required=False,
+        validators=[validate_password],
+        allow_blank=True
     )
 
     class Meta:
@@ -26,12 +27,36 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
             'is_subscribed': {'required': False},
         }
 
+    def validate(self, attrs):
+        # Password is required for new user creation
+        # For updates (when instance exists), password is optional
+        if not self.instance and not attrs.get('password'):
+            raise serializers.ValidationError({
+                'password': 'Password is required for registration.'
+            })
+        return attrs
+
     def create(self, validated_data):
         # Ensure username is set from email if not provided
         if 'username' not in validated_data or not validated_data.get('username'):
             validated_data['username'] = validated_data['email']
         user = User.objects.create_user(**validated_data)
         return user
+    
+    def update(self, instance, validated_data):
+        # Handle password separately
+        password = validated_data.pop('password', None)
+        
+        # Update other fields
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        
+        # Update password if provided
+        if password:
+            instance.set_password(password)
+        
+        instance.save()
+        return instance
 
 
 class UserLoginSerializer(serializers.Serializer):

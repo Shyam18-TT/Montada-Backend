@@ -10,22 +10,28 @@ from .views import (
     verify_otp_view,
     reset_password_view,
     verify_email_view,
-    resend_verification_otp_view
+    resend_verification_otp_view,
+    resend_password_reset_otp_view
 )
 
 app_name = 'Mainapp'
 
 urlpatterns = [
     path('register/', RegisterView.as_view(), name='register'),
+    path('verify-email/', verify_email_view, name='verify_email'),
+    path('resend-verification-otp/', resend_verification_otp_view, name='resend_verification_otp'),
+    
     path('login/', login_view, name='login'),
     path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
     path('profile/', UserProfileView.as_view(), name='profile'),
     path('change-password/', ChangePasswordView.as_view(), name='change_password'),
     path('logout/', logout_view, name='logout'),
+
     path('forgot-password/', forgot_password_view, name='forgot_password'),
     path('verify-otp/', verify_otp_view, name='verify_otp'),
     path('reset-password/', reset_password_view, name='reset_password'),
-    path('verify-email/', verify_email_view, name='verify_email'),
-    path('resend-verification-otp/', resend_verification_otp_view, name='resend_verification_otp'),
+    path('resend-password-reset-otp/', resend_password_reset_otp_view, name='resend_password_reset_otp'),
+
+   
 ]
 
