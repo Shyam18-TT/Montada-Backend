@@ -97,3 +97,63 @@ class AssetClassWithInstrumentsView(generics.ListAPIView):
         return AssetClass.objects.filter(
             is_active=True
         ).prefetch_related('instruments').order_by('name')
+
+
+class AnalystSignalListView(generics.ListAPIView):
+    """
+    API endpoint for analysts to view all signals created by them
+    Only analyst users can access this endpoint
+    Returns all signals created by the authenticated analyst user
+    """
+    serializer_class = TradingSignalSerializer
+    permission_classes = [permissions.IsAuthenticated, IsAnalystPermission]
+    
+    def get_queryset(self):
+        """
+        Filter signals to only return those created by the current analyst user
+        """
+        if not self.request.user.is_authenticated or self.request.user.user_type != 'analyst':
+            return TradingSignal.objects.none()
+        
+        return TradingSignal.objects.filter(
+            analyst=self.request.user
+        ).select_related(
+            'analyst', 'asset_class', 'instrument'
+        ).order_by('-created_at')
+
+
+class AnalystSignalUpdateView(generics.RetrieveUpdateAPIView):
+    """
+    API endpoint for analysts to retrieve and update a specific signal
+    Only the analyst who created the signal can edit it
+    """
+    serializer_class = TradingSignalSerializer
+    permission_classes = [permissions.IsAuthenticated, IsAnalystPermission]
+    
+    def get_queryset(self):
+        """
+        Filter signals to only return those created by the current analyst user
+        """
+        if not self.request.user.is_authenticated or self.request.user.user_type != 'analyst':
+            return TradingSignal.objects.none()
+        
+        return TradingSignal.objects.filter(
+            analyst=self.request.user
+        ).select_related(
+            'analyst', 'asset_class', 'instrument'
+        )
+    
+    def update(self, request, *args, **kwargs):
+        """
+        Handle signal update with proper response
+        """
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        
+        return Response({
+            'message': 'Trading signal updated successfully.',
+            'signal': serializer.data
+        }, status=status.HTTP_200_OK)
