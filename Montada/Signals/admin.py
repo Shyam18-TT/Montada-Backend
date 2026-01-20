@@ -25,11 +25,11 @@ class TradingSignalAdmin(admin.ModelAdmin):
     list_display = (
         'id', 'analyst', 'instrument', 'asset_class', 'direction',
         'entry_price', 'stop_loss', 'take_profit', 'timeframe',
-        'confidence_level', 'is_active', 'created_at'
+        'confidence_level', 'status', 'is_active', 'deleted_at', 'created_at'
     )
-    list_filter = ('asset_class', 'direction', 'timeframe', 'is_active', 'created_at')
+    list_filter = ('asset_class', 'direction', 'timeframe', 'status', 'is_active', 'deleted_at', 'created_at')
     search_fields = ('instrument__symbol', 'instrument__name', 'analyst__email', 'analyst__name', 'analyst_note')
-    readonly_fields = ('created_at', 'updated_at')
+    readonly_fields = ('created_at', 'updated_at', 'deleted_at')
     ordering = ('-created_at',)
     
     fieldsets = (
@@ -42,8 +42,11 @@ class TradingSignalAdmin(admin.ModelAdmin):
                 'entry_price', 'stop_loss', 'take_profit', 'confidence_level'
             )
         }),
+        ('Status Information', {
+            'fields': ('status', 'is_active', 'deleted_at')
+        }),
         ('Additional Information', {
-            'fields': ('analyst_note', 'is_active')
+            'fields': ('analyst_note',)
         }),
         ('Timestamps', {
             'fields': ('created_at', 'updated_at')

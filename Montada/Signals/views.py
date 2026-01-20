@@ -39,7 +39,7 @@ class CreateTradingSignalView(generics.CreateAPIView):
     API endpoint for analysts to create trading signals
     Only analyst users can post signals
     """
-    queryset = TradingSignal.objects.all()
+    queryset = TradingSignal.active.all()
     serializer_class = TradingSignalSerializer
     permission_classes = [permissions.IsAuthenticated, IsAnalystPermission]
     
@@ -124,11 +124,12 @@ class AnalystSignalListView(generics.ListAPIView):
     def get_queryset(self):
         """
         Filter signals to only return those created by the current analyst user
+        Excludes soft-deleted signals
         """
         if not self.request.user.is_authenticated or self.request.user.user_type != 'analyst':
-            return TradingSignal.objects.none()
+            return TradingSignal.active.none()
         
-        return TradingSignal.objects.filter(
+        return TradingSignal.active.filter(
             analyst=self.request.user
         ).select_related(
             'analyst', 'asset_class', 'instrument'
@@ -146,11 +147,12 @@ class AnalystSignalUpdateView(generics.RetrieveUpdateAPIView):
     def get_queryset(self):
         """
         Filter signals to only return those created by the current analyst user
+        Excludes soft-deleted signals
         """
         if not self.request.user.is_authenticated or self.request.user.user_type != 'analyst':
-            return TradingSignal.objects.none()
+            return TradingSignal.active.none()
         
-        return TradingSignal.objects.filter(
+        return TradingSignal.active.filter(
             analyst=self.request.user
         ).select_related(
             'analyst', 'asset_class', 'instrument'
@@ -169,4 +171,38 @@ class AnalystSignalUpdateView(generics.RetrieveUpdateAPIView):
         return Response({
             'message': 'Trading signal updated successfully.',
             'signal': serializer.data
+        }, status=status.HTTP_200_OK)
+
+
+class AnalystSignalSoftDeleteView(generics.RetrieveAPIView):
+    """
+    API endpoint for analysts to soft delete a specific signal
+    Only the analyst who created the signal can delete it
+    """
+    serializer_class = TradingSignalSerializer
+    permission_classes = [permissions.IsAuthenticated, IsAnalystPermission]
+    
+    def get_queryset(self):
+        """
+        Filter signals to only return those created by the current analyst user
+        Excludes already soft-deleted signals
+        """
+        if not self.request.user.is_authenticated or self.request.user.user_type != 'analyst':
+            return TradingSignal.active.none()
+        
+        return TradingSignal.active.filter(
+            analyst=self.request.user
+        ).select_related(
+            'analyst', 'asset_class', 'instrument'
+        )
+    
+    def delete(self, request, *args, **kwargs):
+        """
+        Soft delete the signal by setting deleted_at timestamp
+        """
+        instance = self.get_object()
+        instance.soft_delete()
+        
+        return Response({
+            'message': 'Trading signal deleted successfully.'
         }, status=status.HTTP_200_OK)

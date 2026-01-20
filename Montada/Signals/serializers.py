@@ -92,7 +92,7 @@ class TradingSignalSerializer(serializers.ModelSerializer):
             'instrument', 'instrument_symbol', 'instrument_name',
             'direction', 'entry_price', 'stop_loss', 'take_profit',
             'timeframe', 'confidence_level', 'analyst_note',
-            'is_active', 'created_at', 'updated_at'
+            'status', 'is_active', 'created_at', 'updated_at'
         )
         read_only_fields = ('id', 'analyst', 'created_at', 'updated_at')
     
