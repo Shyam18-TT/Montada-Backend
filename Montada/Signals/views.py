@@ -1,6 +1,7 @@
 from rest_framework import status, generics, permissions
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
+from rest_framework.pagination import PageNumberPagination
 from .models import TradingSignal, AssetClass, Instrument
 from .serializers import (
     TradingSignalSerializer,
@@ -21,6 +22,16 @@ class IsAnalystPermission(permissions.BasePermission):
         
         # Check if user is an analyst
         return request.user.user_type == 'analyst'
+
+
+class AnalystSignalPagination(PageNumberPagination):
+    """
+    Custom pagination for analyst signals list
+    Returns 10 signals per page
+    """
+    page_size = 10
+    page_size_query_param = 'page_size'
+    max_page_size = 100
 
 
 class CreateTradingSignalView(generics.CreateAPIView):
@@ -104,9 +115,11 @@ class AnalystSignalListView(generics.ListAPIView):
     API endpoint for analysts to view all signals created by them
     Only analyst users can access this endpoint
     Returns all signals created by the authenticated analyst user
+    Paginated to 10 signals per page
     """
     serializer_class = TradingSignalSerializer
     permission_classes = [permissions.IsAuthenticated, IsAnalystPermission]
+    pagination_class = AnalystSignalPagination
     
     def get_queryset(self):
         """
