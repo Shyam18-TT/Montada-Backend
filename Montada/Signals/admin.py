@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import TradingSignal, AssetClass, Instrument
+from .models import TradingSignal, AssetClass, Instrument, Timeframe
 
 
 @admin.register(AssetClass)
@@ -18,6 +18,15 @@ class InstrumentAdmin(admin.ModelAdmin):
     search_fields = ('symbol', 'name', 'asset_class__name')
     readonly_fields = ('created_at',)
     ordering = ('asset_class__name', 'symbol')
+
+
+@admin.register(Timeframe)
+class TimeframeAdmin(admin.ModelAdmin):
+    list_display = ('id', 'code', 'name', 'is_active', 'created_at')
+    list_filter = ('is_active', 'created_at')
+    search_fields = ('code', 'name')
+    readonly_fields = ('created_at',)
+    ordering = ('code',)
 
 
 @admin.register(TradingSignal)
