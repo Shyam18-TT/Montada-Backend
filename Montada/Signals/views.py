@@ -2,12 +2,13 @@ from rest_framework import status, generics, permissions
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
-from .models import TradingSignal, AssetClass, Instrument
+from .models import TradingSignal, AssetClass, Instrument, Timeframe
 from .serializers import (
     TradingSignalSerializer,
     AssetClassSerializer,
     InstrumentSerializer,
-    AssetClassWithInstrumentsSerializer
+    AssetClassWithInstrumentsSerializer,
+    TimeframeSerializer
 )
 
 
@@ -91,6 +92,15 @@ class InstrumentListView(generics.ListAPIView):
         return queryset
 
 
+class TimeframeListView(generics.ListAPIView):
+    """
+    API endpoint to list all active timeframes
+    """
+    queryset = Timeframe.objects.filter(is_active=True)
+    serializer_class = TimeframeSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+
 class AssetClassWithInstrumentsView(generics.ListAPIView):
     """
     API endpoint to get all asset classes with their related instruments in a single response
@@ -132,7 +142,7 @@ class AnalystSignalListView(generics.ListAPIView):
         return TradingSignal.active.filter(
             analyst=self.request.user
         ).select_related(
-            'analyst', 'asset_class', 'instrument'
+            'analyst', 'asset_class', 'instrument', 'timeframe'
         ).order_by('-created_at')
 
 
@@ -155,7 +165,7 @@ class AnalystSignalUpdateView(generics.RetrieveUpdateAPIView):
         return TradingSignal.active.filter(
             analyst=self.request.user
         ).select_related(
-            'analyst', 'asset_class', 'instrument'
+            'analyst', 'asset_class', 'instrument', 'timeframe'
         )
     
     def update(self, request, *args, **kwargs):
@@ -193,7 +203,7 @@ class AnalystSignalSoftDeleteView(generics.RetrieveAPIView):
         return TradingSignal.active.filter(
             analyst=self.request.user
         ).select_related(
-            'analyst', 'asset_class', 'instrument'
+            'analyst', 'asset_class', 'instrument', 'timeframe'
         )
     
     def delete(self, request, *args, **kwargs):

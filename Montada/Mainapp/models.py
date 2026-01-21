@@ -4,12 +4,15 @@ from django.utils.translation import gettext_lazy as _
 from django.utils import timezone
 from datetime import timedelta
 import random
+import uuid
 
 
 class User(AbstractUser):
     """
     Custom User model extending Django's AbstractUser
     """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    
     USER_TYPE_CHOICES = [
         ('trader', 'Trader'),
         ('analyst', 'Analyst'),
@@ -50,6 +53,7 @@ class PasswordResetOTP(models.Model):
     """
     Model to store OTP codes for password reset
     """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     email = models.EmailField()
     otp = models.CharField(max_length=6)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -82,6 +86,7 @@ class EmailVerificationOTP(models.Model):
     """
     Model to store OTP codes for email verification
     """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     email = models.EmailField()
     otp = models.CharField(max_length=6)
     created_at = models.DateTimeField(auto_now_add=True)

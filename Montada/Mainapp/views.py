@@ -257,8 +257,8 @@ def forgot_password_view(request):
         except User.DoesNotExist:
             # Return success message even if user doesn't exist (security best practice)
             return Response({
-                'message': 'If an account exists with this email, an OTP has been sent.'
-            }, status=status.HTTP_200_OK)
+                'message': 'User email not exists. Please register with the email provided!'
+            }, status=status.HTTP_400_BAD_REQUEST)
         
         # Generate OTP
         otp = PasswordResetOTP.generate_otp()

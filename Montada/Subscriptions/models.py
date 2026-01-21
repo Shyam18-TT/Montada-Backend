@@ -2,6 +2,7 @@ from django.db import models
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from datetime import timedelta
+import uuid
 
 User = get_user_model()
 
@@ -10,6 +11,8 @@ class Subscription(models.Model):
     """
     Model to manage user subscriptions
     """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    
     PLAN_CHOICES = [
         ('free_trial', 'Free Trial'),
         ('monthly', 'Monthly'),

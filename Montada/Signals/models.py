@@ -1,6 +1,7 @@
 from django.db import models
 from django.conf import settings
 from django.utils import timezone
+import uuid
 
 
 class ActiveSignalManager(models.Manager):
@@ -19,6 +20,7 @@ class AssetClass(models.Model):
     - Indices
     - Crypto
     """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
     name = models.CharField(
         max_length=50,
@@ -51,6 +53,7 @@ class Instrument(models.Model):
     Indices    -> NAS100, US30
     Crypto     -> BTC/USD, ETH/USD
     """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
     asset_class = models.ForeignKey(
         AssetClass,
@@ -80,27 +83,69 @@ class Instrument(models.Model):
 
     def __str__(self):
         return f"{self.symbol} ({self.asset_class.name})"
-        
+
+
+class Timeframe(models.Model):
+    """
+    Trading timeframes for signals
+    Example:
+    - M1 (1 minute)
+    - M5 (5 minutes)
+    - M15 (15 minutes)
+    - M30 (30 minutes)
+    - H1 (1 hour)
+    - H4 (4 hours)
+    - D1 (1 day)
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    code = models.CharField(
+        max_length=5,
+        unique=True,
+        help_text="Timeframe code (e.g. M1, M5, H1, D1)"
+    )
+
+    name = models.CharField(
+        max_length=50,
+        help_text="Display name for the timeframe"
+    )
+
+    description = models.TextField(
+        blank=True,
+        null=True,
+        help_text="Optional description of the timeframe"
+    )
+
+    is_active = models.BooleanField(default=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Timeframe"
+        verbose_name_plural = "Timeframes"
+        ordering = ['code']
+
+    def __str__(self):
+        return self.code
+
+
 class TradingSignal(models.Model):
+    # -------------------------
+    # PRIMARY KEY
+    # -------------------------
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    
     # -------------------------
     # ENUM / CHOICES
     # -------------------------
     class Direction(models.TextChoices):
         BUY = 'BUY', 'Buy'
         SELL = 'SELL', 'Sell'
-
-    class Timeframe(models.TextChoices):
-        M1 = 'M1', 'M1'
-        M5 = 'M5', 'M5'
-        M15 = 'M15', 'M15'
-        M30 = 'M30', 'M30'
-        H1 = 'H1', 'H1'
-        H4 = 'H4', 'H4'
-        D1 = 'D1', 'D1'
     
     class Status(models.TextChoices):
         OPEN = 'OPEN', 'Open'
         CLOSED = 'CLOSED', 'Closed'
+        DRAFT = 'DRAFT','Draft'
 
     # -------------------------
     # CORE FIELDS
@@ -145,9 +190,11 @@ class TradingSignal(models.Model):
         decimal_places=5
     )
 
-    timeframe = models.CharField(
-        max_length=5,
-        choices=Timeframe.choices
+    timeframe = models.ForeignKey(
+        Timeframe,
+        on_delete=models.CASCADE,
+        related_name='trading_signals',
+        help_text="Timeframe for this trading signal"
     )
 
     confidence_level = models.PositiveSmallIntegerField(
@@ -215,4 +262,5 @@ class TradingSignal(models.Model):
 
     def __str__(self):
         instrument_symbol = self.instrument.symbol if self.instrument else "N/A"
-        return f"{instrument_symbol} | {self.direction} | {self.timeframe}"
+        timeframe_code = self.timeframe.code if self.timeframe else "N/A"
+        return f"{instrument_symbol} | {self.direction} | {timeframe_code}"

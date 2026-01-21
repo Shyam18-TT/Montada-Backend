@@ -6,7 +6,8 @@ from .views import (
     AssetClassWithInstrumentsView,
     AnalystSignalListView,
     AnalystSignalUpdateView,
-    AnalystSignalSoftDeleteView
+    AnalystSignalSoftDeleteView,
+    TimeframeListView
 )
 
 app_name = 'Signals'
@@ -18,6 +19,7 @@ urlpatterns = [
     path('delete-my-signals/<int:pk>/', AnalystSignalSoftDeleteView.as_view(), name='analyst_signal_delete'),
     path('asset-classes/', AssetClassListView.as_view(), name='asset_classes'),
     path('instruments/', InstrumentListView.as_view(), name='instruments'),
+    path('timeframes/', TimeframeListView.as_view(), name='timeframes'),
     path('assets-instruments/', AssetClassWithInstrumentsView.as_view(), name='assets_instruments'),
 ]
 

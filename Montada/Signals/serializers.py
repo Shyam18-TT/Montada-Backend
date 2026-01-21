@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import TradingSignal, AssetClass, Instrument
+from .models import TradingSignal, AssetClass, Instrument, Timeframe
 
 
 class AssetClassSerializer(serializers.ModelSerializer):
@@ -21,6 +21,16 @@ class InstrumentSerializer(serializers.ModelSerializer):
     class Meta:
         model = Instrument
         fields = ('id', 'asset_class', 'asset_class_name', 'symbol', 'name', 'is_active', 'created_at')
+        read_only_fields = ('id', 'created_at')
+
+
+class TimeframeSerializer(serializers.ModelSerializer):
+    """
+    Serializer for Timeframe model
+    """
+    class Meta:
+        model = Timeframe
+        fields = ('id', 'code', 'name', 'description', 'is_active', 'created_at')
         read_only_fields = ('id', 'created_at')
 
 
@@ -73,6 +83,8 @@ class TradingSignalSerializer(serializers.ModelSerializer):
     asset_class_name = serializers.CharField(source='asset_class.name', read_only=True)
     instrument_symbol = serializers.CharField(source='instrument.symbol', read_only=True)
     instrument_name = serializers.CharField(source='instrument.name', read_only=True)
+    timeframe_code = serializers.CharField(source='timeframe.code', read_only=True)
+    timeframe_name = serializers.CharField(source='timeframe.name', read_only=True)
     
     # Accept IDs from frontend
     asset_class = serializers.PrimaryKeyRelatedField(
@@ -83,6 +95,10 @@ class TradingSignalSerializer(serializers.ModelSerializer):
         queryset=Instrument.objects.filter(is_active=True),
         required=True
     )
+    timeframe = serializers.PrimaryKeyRelatedField(
+        queryset=Timeframe.objects.filter(is_active=True),
+        required=True
+    )
     
     class Meta:
         model = TradingSignal
@@ -91,7 +107,8 @@ class TradingSignalSerializer(serializers.ModelSerializer):
             'asset_class', 'asset_class_name',
             'instrument', 'instrument_symbol', 'instrument_name',
             'direction', 'entry_price', 'stop_loss', 'take_profit',
-            'timeframe', 'confidence_level', 'analyst_note',
+            'timeframe', 'timeframe_code', 'timeframe_name',
+            'confidence_level', 'analyst_note',
             'status', 'is_active', 'created_at', 'updated_at'
         )
         read_only_fields = ('id', 'analyst', 'created_at', 'updated_at')
