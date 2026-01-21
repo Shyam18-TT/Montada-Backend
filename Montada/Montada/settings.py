@@ -97,6 +97,14 @@ DATABASES = {
     },
 }
 
+CSRF_TRUSTED_ORIGINS = [
+    "https://uat.themontada.com",
+    "https://www.uat.themontada.com",
+]
+
+CSRF_COOKIE_SECURE = True
+SESSION_COOKIE_SECURE = True
+
 
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
