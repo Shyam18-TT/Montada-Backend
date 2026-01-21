@@ -8,7 +8,8 @@ from .serializers import (
     AssetClassSerializer,
     InstrumentSerializer,
     AssetClassWithInstrumentsSerializer,
-    TimeframeSerializer
+    TimeframeSerializer,
+    TimeframeSimpleSerializer
 )
 
 
@@ -95,10 +96,12 @@ class InstrumentListView(generics.ListAPIView):
 class TimeframeListView(generics.ListAPIView):
     """
     API endpoint to list all active timeframes
+    Returns only id, code, and name without pagination
     """
     queryset = Timeframe.objects.filter(is_active=True)
-    serializer_class = TimeframeSerializer
+    serializer_class = TimeframeSimpleSerializer
     permission_classes = [permissions.IsAuthenticated]
+    pagination_class = None  # Disable pagination
 
 
 class AssetClassWithInstrumentsView(generics.ListAPIView):

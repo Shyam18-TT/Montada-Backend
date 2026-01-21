@@ -34,6 +34,17 @@ class TimeframeSerializer(serializers.ModelSerializer):
         read_only_fields = ('id', 'created_at')
 
 
+class TimeframeSimpleSerializer(serializers.ModelSerializer):
+    """
+    Simplified serializer for Timeframe model
+    Returns only id, code, and name
+    """
+    class Meta:
+        model = Timeframe
+        fields = ('id', 'code', 'name')
+        read_only_fields = ('id',)
+
+
 class InstrumentNestedSerializer(serializers.ModelSerializer):
     """
     Simplified serializer for instruments when nested within asset classes
