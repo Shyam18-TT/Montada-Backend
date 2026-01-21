@@ -138,12 +138,19 @@ class AnalystSignalListView(generics.ListAPIView):
         """
         if not self.request.user.is_authenticated or self.request.user.user_type != 'analyst':
             return TradingSignal.active.none()
-        
-        return TradingSignal.active.filter(
+
+        queryset = TradingSignal.active.filter(
             analyst=self.request.user
         ).select_related(
             'analyst', 'asset_class', 'instrument', 'timeframe'
-        ).order_by('-created_at')
+        )
+
+        # Optional filter by status query parameter: ?status=OPEN/CLOSED/DRAFT
+        status_param = self.request.query_params.get('status')
+        if status_param:
+            queryset = queryset.filter(status=status_param)
+
+        return queryset.order_by('-created_at')
 
 
 class AnalystSignalUpdateView(generics.RetrieveUpdateAPIView):
