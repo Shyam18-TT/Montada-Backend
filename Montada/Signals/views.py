@@ -192,6 +192,38 @@ class AnalystSignalUpdateView(generics.RetrieveUpdateAPIView):
             'message': 'Trading signal updated successfully.',
             'signal': serializer.data
         }, status=status.HTTP_200_OK)
+    
+    def partial_update(self, request, *args, **kwargs):
+        """
+        Handle PATCH request to update signal status
+        Allows updating only the status field
+        """
+        instance = self.get_object()
+        
+        # Validate that status is provided and is a valid choice
+        new_status = request.data.get('status')
+        if not new_status:
+            return Response({
+                'error': 'Status field is required.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Validate status value
+        valid_statuses = [choice[0] for choice in TradingSignal.Status.choices]
+        if new_status not in valid_statuses:
+            return Response({
+                'error': f'Invalid status. Must be one of: {", ".join(valid_statuses)}'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Update only the status field
+        instance.status = new_status
+        instance.save(update_fields=['status'])
+        
+        # Return updated signal data
+        serializer = self.get_serializer(instance)
+        return Response({
+            'message': 'Signal status updated successfully.',
+            'signal': serializer.data
+        }, status=status.HTTP_200_OK)
 
 
 class AnalystSignalSoftDeleteView(generics.RetrieveAPIView):
