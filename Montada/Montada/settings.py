@@ -25,7 +25,15 @@ SECRET_KEY = 'django-insecure-q$zsfembchk%)jfss=7a)e%_)yfv377x_=2%3wg3!a=&s2%gn6
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['*','https://app.themontada.com/','https://uat.themontada.com']
+# Hostnames only (no https:// or trailing slash). '*' allows all.
+ALLOWED_HOSTS = [
+    "*",
+    "localhost",
+    "127.0.0.1",
+    "app.themontada.com",
+    "uat.themontada.com",
+    "www.uat.themontada.com",
+]
 
 
 # Application definition
@@ -60,6 +68,7 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
+# CORS: allow localhost on any port + your web origins (no trailing slashes)
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://localhost:5000",
@@ -67,10 +76,22 @@ CORS_ALLOWED_ORIGINS = [
     "http://127.0.0.1:3000",
     "http://127.0.0.1:5000",
     "http://127.0.0.1:8080",
+    "https://app.themontada.com",
+    "https://uat.themontada.com",
 ]
-
-
-CORS_ALLOW_ALL_ORIGINS = True
+# Allow any localhost / 127.0.0.1 port (e.g. 5173, 4200, 3001)
+CORS_ALLOWED_ORIGINS_REGEX = r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
+# Required if frontend sends cookies or Authorization header
+CORS_ALLOW_CREDENTIALS = True
+# Allow common headers and methods
+CORS_ALLOW_HEADERS = [
+    "accept",
+    "accept-encoding",
+    "authorization",
+    "content-type",
+    "origin",
+    "x-requested-with",
+]
 
 ROOT_URLCONF = 'Montada.urls'
 
