@@ -31,7 +31,5 @@ urlpatterns = [
     path('verify-otp/', verify_otp_view, name='verify_otp'),
     path('reset-password/', reset_password_view, name='reset_password'),
     path('resend-password-reset-otp/', resend_password_reset_otp_view, name='resend_password_reset_otp'),
-
-   
 ]
 
