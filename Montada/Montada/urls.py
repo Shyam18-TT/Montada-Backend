@@ -24,6 +24,7 @@ urlpatterns = [
     path('api/auth/', include('Mainapp.urls')),
     path('api/subscriptions/', include('Subscriptions.urls')),
     path('api/signals/', include('Signals.urls')),
+    path('api/followers/', include('Followers.urls')),
 ]
 
 # Serve media files in development
