@@ -24,7 +24,6 @@ User = get_user_model()
 
 
 class FollowRequestView(APIView):
-    """Send a follow request to a user. Body: { "user_id": "<uuid>" }"""
     permission_classes = [IsAuthenticated]
 
     def post(self, request):

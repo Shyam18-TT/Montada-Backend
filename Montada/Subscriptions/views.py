@@ -110,6 +110,19 @@ def check_subscription_status_view(request):
     
     try:
         subscription = Subscription.objects.get(user=user)
+        
+        # If end_date has passed, mark as Expired and return
+        if subscription.end_date and subscription.end_date < timezone.now():
+            if subscription.status != 'expired':
+                subscription.status = 'expired'
+                subscription.save()
+                user.is_subscribed = False
+                user.save()
+            return Response({
+                'has_active_subscription': False,
+                'subscription': SubscriptionSerializer(subscription).data
+            }, status=status.HTTP_200_OK)
+        
         is_active = subscription.is_active()
         
         # Update user's is_subscribed status based on subscription
