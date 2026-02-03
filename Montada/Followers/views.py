@@ -1,13 +1,20 @@
-from rest_framework import status
+from rest_framework import status, generics
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework.pagination import PageNumberPagination
 from django.shortcuts import get_object_or_404
 from django.contrib.auth import get_user_model
 from django.db.models import Q, Count
 from django.utils import timezone
 
 from .models import Follow, Mute
+
+try:
+    from Subscriptions.models import Subscription
+except ImportError:
+    Subscription = None
+
 from .serializers import (
     FollowSerializer,
     FollowRequestSerializer,
@@ -15,6 +22,7 @@ from .serializers import (
     MuteSerializer,
     MuteActionSerializer,
     UserMinimalSerializer,
+    FollowerListItemSerializer,
 )
 
 User = get_user_model()
@@ -24,9 +32,29 @@ User = get_user_model()
 
 
 class FollowRequestView(APIView):
+    """Follow a user (direct follow, no analyst acceptance). Only allowed for users with an active subscription."""
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        # Only users with an active subscription can follow
+        if Subscription is None:
+            return Response(
+                {"error": "Subscription module not available."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        try:
+            subscription = Subscription.objects.get(user=request.user)
+        except Subscription.DoesNotExist:
+            return Response(
+                {"error": "Follow is only allowed for users with an active subscription."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if not subscription.is_active():
+            return Response(
+                {"error": "Follow is only allowed for users with an active subscription."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         serializer = FollowRequestSerializer(data=request.data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -48,27 +76,28 @@ class FollowRequestView(APIView):
 
         existing = Follow.objects.filter(follower=request.user, followed=target).first()
         if existing:
-            if existing.status == Follow.Status.PENDING:
-                return Response(
-                    {"message": "Follow request already sent.", "follow": FollowSerializer(existing).data},
-                    status=status.HTTP_200_OK,
-                )
             if existing.status == Follow.Status.ACCEPTED and existing.is_active:
                 return Response(
                     {"message": "You are already following this user.", "follow": FollowSerializer(existing).data},
                     status=status.HTTP_200_OK,
                 )
+            if existing.status == Follow.Status.PENDING:
+                existing.accept()
+                return Response(
+                    {"message": "You are now following this user.", "follow": FollowSerializer(existing).data},
+                    status=status.HTTP_200_OK,
+                )
             if existing.status == Follow.Status.REJECTED or (existing.status == Follow.Status.ACCEPTED and not existing.is_active):
-                existing.status = Follow.Status.PENDING
-                existing.is_active = False
+                existing.status = Follow.Status.ACCEPTED
+                existing.is_active = True
+                existing.accepted_at = timezone.now()
                 existing.requested_at = timezone.now()
-                existing.accepted_at = None
                 existing.rejected_at = None
                 existing.unfollowed_at = None
-                existing.save(update_fields=["status", "is_active", "requested_at", "accepted_at", "rejected_at", "unfollowed_at"])
+                existing.save(update_fields=["status", "is_active", "accepted_at", "requested_at", "rejected_at", "unfollowed_at"])
                 return Response(
-                    {"message": "Follow request sent.", "follow": FollowSerializer(existing).data},
-                    status=status.HTTP_201_CREATED,
+                    {"message": "You are now following this user.", "follow": FollowSerializer(existing).data},
+                    status=status.HTTP_200_OK,
                 )
             if existing.status == Follow.Status.BLOCKED:
                 return Response(
@@ -79,11 +108,13 @@ class FollowRequestView(APIView):
         follow = Follow.objects.create(
             follower=request.user,
             followed=target,
-            status=Follow.Status.PENDING,
-            is_active=False,
+            status=Follow.Status.ACCEPTED,
+            is_active=True,
         )
+        follow.accepted_at = timezone.now()
+        follow.save(update_fields=["accepted_at"])
         return Response(
-            {"message": "Follow request sent.", "follow": FollowSerializer(follow).data},
+            {"message": "You are now following this user.", "follow": FollowSerializer(follow).data},
             status=status.HTTP_201_CREATED,
         )
 
@@ -264,21 +295,60 @@ class UnmuteUserView(APIView):
 # ---------- Lists ----------
 
 
-class FollowersListView(APIView):
-    """List users who follow you (accepted and active)."""
-    permission_classes = [IsAuthenticated]
+class FollowersPageNumberPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = "page_size"
+    max_page_size = 100
 
-    def get(self, request):
-        qs = Follow.objects.filter(
-            followed=request.user,
-            status=Follow.Status.ACCEPTED,
-            is_active=True,
-        ).select_related("follower").order_by("-accepted_at")
-        users = [f.follower for f in qs]
-        return Response({
-            "count": len(users),
-            "followers": UserMinimalSerializer(users, many=True).data,
-        })
+
+class FollowersListView(generics.ListAPIView):
+    """
+    List users who follow you (accepted and active). Uses DRF pagination: ?page=1&page_size=20.
+    Query params:
+      - category: 'all' (default) | 'basic' | 'premium'
+        - all: all followers
+        - basic: followers on trial or not subscribed
+        - premium: followers with an active paid plan (monthly/yearly)
+      - search: optional string to filter by follower's name, username, or email (case-insensitive).
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = FollowerListItemSerializer
+    pagination_class = FollowersPageNumberPagination
+
+    def get_queryset(self):
+        now = timezone.now()
+        qs = (
+            Follow.objects.filter(
+                followed=self.request.user,
+                status=Follow.Status.ACCEPTED,
+                is_active=True,
+            )
+            .select_related("follower")
+            .order_by("-accepted_at")
+        )
+
+        # Category filter: all | basic | premium
+        category = (self.request.query_params.get("category") or "all").strip().lower()
+        premium_filter = Q(
+            follower__subscription__status="active",
+            follower__subscription__end_date__gte=now,
+            follower__subscription__plan_type__in=["monthly", "yearly"],
+        )
+        if category == "premium":
+            qs = qs.filter(premium_filter)
+        elif category == "basic":
+            qs = qs.exclude(premium_filter)
+
+        # Search: filter by follower name, username, or email
+        search = (self.request.query_params.get("search") or "").strip()
+        if search:
+            qs = qs.filter(
+                Q(follower__name__icontains=search)
+                | Q(follower__username__icontains=search)
+                | Q(follower__email__icontains=search)
+            )
+
+        return qs
 
 
 class FollowingListView(APIView):

@@ -12,6 +12,16 @@ class UserMinimalSerializer(serializers.ModelSerializer):
         fields = ("id", "username", "email", "name", "profile_picture", "user_type")
 
 
+class FollowerListItemSerializer(serializers.ModelSerializer):
+    """Serializes a Follow instance as its follower (User) for paginated list. Used with Follow queryset."""
+    class Meta:
+        model = Follow
+        fields = ()
+
+    def to_representation(self, instance):
+        return UserMinimalSerializer(instance.follower).data
+
+
 class FollowSerializer(serializers.ModelSerializer):
     follower_detail = UserMinimalSerializer(source="follower", read_only=True)
     followed_detail = UserMinimalSerializer(source="followed", read_only=True)
