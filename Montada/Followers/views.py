@@ -5,6 +5,7 @@ from rest_framework.views import APIView
 from rest_framework.pagination import PageNumberPagination
 from django.shortcuts import get_object_or_404
 from django.contrib.auth import get_user_model
+from datetime import timedelta
 from django.db.models import Q, Count
 from django.utils import timezone
 
@@ -301,15 +302,32 @@ class FollowersPageNumberPagination(PageNumberPagination):
     max_page_size = 100
 
 
+def _base_followers_queryset(user):
+    """Accepted, active follows where user is the followed (people who follow user)."""
+    return Follow.objects.filter(
+        followed=user,
+        status=Follow.Status.ACCEPTED,
+        is_active=True,
+    )
+
+
+def _premium_followers_filter(now):
+    """Q filter for followers with an active paid plan (monthly/yearly)."""
+    return Q(
+        follower__subscription__status="active",
+        follower__subscription__end_date__gte=now,
+        follower__subscription__plan_type__in=["monthly", "yearly"],
+    )
+
+
 class FollowersListView(generics.ListAPIView):
     """
     List users who follow you (accepted and active). Uses DRF pagination: ?page=1&page_size=20.
+    Response includes: count, followers_count, premium_followers_count, basic_followers_count,
+    followers_this_week_count, next, previous, results.
     Query params:
       - category: 'all' (default) | 'basic' | 'premium'
-        - all: all followers
-        - basic: followers on trial or not subscribed
-        - premium: followers with an active paid plan (monthly/yearly)
-      - search: optional string to filter by follower's name, username, or email (case-insensitive).
+      - search: optional string to filter by follower's name, username, or email.
     """
     permission_classes = [IsAuthenticated]
     serializer_class = FollowerListItemSerializer
@@ -318,28 +336,18 @@ class FollowersListView(generics.ListAPIView):
     def get_queryset(self):
         now = timezone.now()
         qs = (
-            Follow.objects.filter(
-                followed=self.request.user,
-                status=Follow.Status.ACCEPTED,
-                is_active=True,
-            )
+            _base_followers_queryset(self.request.user)
             .select_related("follower")
             .order_by("-accepted_at")
         )
 
-        # Category filter: all | basic | premium
         category = (self.request.query_params.get("category") or "all").strip().lower()
-        premium_filter = Q(
-            follower__subscription__status="active",
-            follower__subscription__end_date__gte=now,
-            follower__subscription__plan_type__in=["monthly", "yearly"],
-        )
+        premium_filter = _premium_followers_filter(now)
         if category == "premium":
             qs = qs.filter(premium_filter)
         elif category == "basic":
             qs = qs.exclude(premium_filter)
 
-        # Search: filter by follower name, username, or email
         search = (self.request.query_params.get("search") or "").strip()
         if search:
             qs = qs.filter(
@@ -349,6 +357,19 @@ class FollowersListView(generics.ListAPIView):
             )
 
         return qs
+
+    def list(self, request, *args, **kwargs):
+        now = timezone.now()
+        week_ago = now - timedelta(days=7)
+        base_qs = _base_followers_queryset(request.user)
+        premium_filter = _premium_followers_filter(now)
+
+        response = super().list(request, *args, **kwargs)
+        response.data["followers_count"] = base_qs.count()
+        response.data["premium_followers_count"] = base_qs.filter(premium_filter).count()
+        response.data["basic_followers_count"] = base_qs.exclude(premium_filter).count()
+        response.data["followers_this_week_count"] = base_qs.filter(accepted_at__gte=week_ago).count()
+        return response
 
 
 class FollowingListView(APIView):
