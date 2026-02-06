@@ -464,19 +464,27 @@ class AnalystsListView(APIView):
         for i, user in enumerate(analysts):
             data[i]["followers_count"] = getattr(user, "followers_count", 0)
             data[i]["signals_count"] = getattr(user, "signals_count", 0)
+
+        # Always set is_following so the requester knows whether they follow each analyst
+        analyst_ids = [u.id for u in analysts]
+        follow_sent = (
+            Follow.objects.filter(
+                follower=request.user,
+                followed_id__in=analyst_ids,
+            ).select_related("followed")
+            if analyst_ids
+            else []
+        )
+        follow_sent_map = {f.followed_id: f for f in follow_sent}
+        for i, user in enumerate(analysts):
+            f = follow_sent_map.get(user.id)
+            data[i]["is_following"] = f is not None and f.status == Follow.Status.ACCEPTED and f.is_active
+
         if include_status and analysts:
-            analyst_ids = [u.id for u in analysts]
-            follow_sent = {
-                f.followed_id: f
-                for f in Follow.objects.filter(
-                    follower=request.user,
-                    followed_id__in=analyst_ids,
-                ).select_related("followed")
-            }
             result = []
             for i, user in enumerate(analysts):
                 row = dict(data[i])
-                f = follow_sent.get(user.id)
+                f = follow_sent_map.get(user.id)
                 if not f:
                     row["follow_status"] = {"is_following": False, "is_pending_sent": False, "is_blocked_by_them": False}
                 else:
