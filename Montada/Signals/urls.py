@@ -7,7 +7,8 @@ from .views import (
     AnalystSignalListView,
     AnalystSignalUpdateView,
     AnalystSignalSoftDeleteView,
-    TimeframeListView
+    TimeframeListView,
+    TraderSignalListView,
 )
 
 app_name = 'Signals'
@@ -21,5 +22,7 @@ urlpatterns = [
     path('instruments/', InstrumentListView.as_view(), name='instruments'),
     path('timeframes/', TimeframeListView.as_view(), name='timeframes'),
     path('assets-instruments/', AssetClassWithInstrumentsView.as_view(), name='assets_instruments'),
+
+    path('view-signals/', TraderSignalListView.as_view(), name='trader_signals_list'),
 ]
 

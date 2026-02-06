@@ -9,7 +9,7 @@ class UserMinimalSerializer(serializers.ModelSerializer):
     """Minimal user for followers/following lists to avoid circular import."""
     class Meta:
         model = User
-        fields = ("id", "username", "email", "name", "profile_picture", "user_type")
+        fields = ("id", "username", "email", "name", "profile_picture", "user_type", "created_at")
 
 
 class FollowerListItemSerializer(serializers.ModelSerializer):

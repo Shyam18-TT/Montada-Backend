@@ -1,7 +1,11 @@
+from django.utils import timezone
 from rest_framework import status, generics, permissions
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
+
+from Subscriptions.models import Subscription
+from Followers.models import Follow
 from .models import TradingSignal, AssetClass, Instrument, Timeframe
 from .serializers import (
     TradingSignalSerializer,
@@ -258,3 +262,80 @@ class AnalystSignalSoftDeleteView(generics.RetrieveAPIView):
         return Response({
             'message': 'Trading signal deleted successfully.'
         }, status=status.HTTP_200_OK)
+
+
+
+
+class TraderSignalListView(generics.ListAPIView):
+    """
+    API endpoint for traders to view signals from analysts they follow.
+    - Active subscription: all signals from followed analysts.
+    - Expired subscription: only signals created on or before subscription end_date,
+      plus message to subscribe for new signals.
+    - No subscription: no signals, with message.
+    """
+    serializer_class = TradingSignalSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    pagination_class = AnalystSignalPagination
+
+    def _get_subscription_status(self, user):
+        """
+        Return (is_active, end_date).
+        is_active: True if subscription is active (before end_date).
+        end_date: subscription end_date or None if no subscription.
+        """
+        try:
+            subscription = Subscription.objects.get(user=user)
+            return (subscription.is_active(), subscription.end_date)
+        except Subscription.DoesNotExist:
+            return (False, None)
+
+    def get_queryset(self):
+        """
+        Return signals from analysts the trader follows.
+        Active subscription: all such signals.
+        Expired subscription: only signals with created_at <= subscription.end_date.
+        No subscription: none.
+        """
+        if not self.request.user.is_authenticated:
+            return TradingSignal.active.none()
+
+        user = self.request.user
+        is_active, end_date = self._get_subscription_status(user)
+
+        # Analysts the trader is following (accepted and active follow)
+        following_analyst_ids = Follow.objects.filter(
+            follower=user,
+            status=Follow.Status.ACCEPTED,
+            is_active=True,
+        ).values_list('followed_id', flat=True)
+
+        queryset = TradingSignal.active.filter(
+            analyst_id__in=following_analyst_ids
+        ).select_related(
+            'analyst', 'asset_class', 'instrument', 'timeframe'
+        )
+
+        if not is_active:
+            if end_date is None:
+                return TradingSignal.active.none()
+            # Expired: only signals created on or before subscription end_date
+            queryset = queryset.filter(created_at__lte=end_date)
+
+        status_param = self.request.query_params.get('status')
+        if status_param:
+            queryset = queryset.filter(status=status_param)
+
+        return queryset.order_by('-created_at')
+
+    def list(self, request, *args, **kwargs):
+        """
+        Return paginated signals. For expired (or missing) subscription, add message
+        to subscribe for new signals.
+        """
+        response = super().list(request, *args, **kwargs)
+        is_active, _ = self._get_subscription_status(request.user)
+        if not is_active:
+            response.data['message'] = 'To view new signals you have to subscribe.'
+        return response
+
