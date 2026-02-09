@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import TradingSignal, AssetClass, Instrument, Timeframe
+from .models import TradingSignal, AssetClass, Instrument, Timeframe, AppliedSignal
 
 
 class AssetClassSerializer(serializers.ModelSerializer):
@@ -161,4 +161,24 @@ class TradingSignalSerializer(serializers.ModelSerializer):
                 })
         
         return attrs
+
+
+class ApplySignalSerializer(serializers.Serializer):
+    """
+    Serializer for trader to apply a signal (POST body).
+    """
+    signal = serializers.UUIDField(required=True)
+    note = serializers.CharField(required=False, allow_blank=True, max_length=500)
+
+
+class AppliedSignalSerializer(serializers.ModelSerializer):
+    """
+    Serializer for AppliedSignal (list/detail response).
+    """
+    signal = TradingSignalSerializer(read_only=True)
+
+    class Meta:
+        model = AppliedSignal
+        fields = ('id', 'signal', 'applied_at', 'note')
+        read_only_fields = ('id', 'applied_at')
 

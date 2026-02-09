@@ -6,14 +6,16 @@ from rest_framework.pagination import PageNumberPagination
 
 from Subscriptions.models import Subscription
 from Followers.models import Follow
-from .models import TradingSignal, AssetClass, Instrument, Timeframe
+from .models import TradingSignal, AssetClass, Instrument, Timeframe, AppliedSignal
 from .serializers import (
     TradingSignalSerializer,
     AssetClassSerializer,
     InstrumentSerializer,
     AssetClassWithInstrumentsSerializer,
     TimeframeSerializer,
-    TimeframeSimpleSerializer
+    TimeframeSimpleSerializer,
+    ApplySignalSerializer,
+    AppliedSignalSerializer,
 )
 
 
@@ -338,4 +340,104 @@ class TraderSignalListView(generics.ListAPIView):
         if not is_active:
             response.data['message'] = 'To view new signals you have to subscribe.'
         return response
+
+
+def _get_trader_visible_signals_queryset(user):
+    """
+    Return queryset of signals the trader is allowed to see (and thus apply).
+    Same rules as TraderSignalListView: follow + subscription.
+    """
+    is_active, end_date = _get_subscription_status_for_trader(user)
+    following_analyst_ids = Follow.objects.filter(
+        follower=user,
+        status=Follow.Status.ACCEPTED,
+        is_active=True,
+    ).values_list('followed_id', flat=True)
+
+    queryset = TradingSignal.active.filter(
+        analyst_id__in=following_analyst_ids
+    ).select_related('analyst', 'asset_class', 'instrument', 'timeframe')
+
+    if not is_active:
+        if end_date is None:
+            return TradingSignal.active.none()
+        queryset = queryset.filter(created_at__lte=end_date)
+
+    return queryset
+
+
+def _get_subscription_status_for_trader(user):
+    """Return (is_active, end_date) for the user's subscription."""
+    try:
+        subscription = Subscription.objects.get(user=user)
+        return (subscription.is_active(), subscription.end_date)
+    except Subscription.DoesNotExist:
+        return (False, None)
+
+
+class TraderApplySignalView(generics.GenericAPIView):
+    """
+    API endpoint for traders to apply (take) a signal.
+    POST with { "signal": "<uuid>", "note": "optional" }.
+    Trader must follow the analyst, have subscription access to the signal,
+    and the signal must be OPEN. Each signal can be applied only once per trader.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = ApplySignalSerializer
+
+    def post(self, request, *args, **kwargs):
+        serializer = ApplySignalSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        signal_id = serializer.validated_data['signal']
+        note = serializer.validated_data.get('note') or ''
+
+        allowed_signals = _get_trader_visible_signals_queryset(request.user)
+        try:
+            signal = allowed_signals.get(id=signal_id)
+        except TradingSignal.DoesNotExist:
+            return Response(
+                {'error': 'Signal not found or you do not have access to apply it.'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        if signal.status != TradingSignal.Status.OPEN:
+            return Response(
+                {'error': 'Only OPEN signals can be applied.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if AppliedSignal.objects.filter(trader=request.user, signal=signal).exists():
+            return Response(
+                {'error': 'You have already applied this signal.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        applied = AppliedSignal.objects.create(
+            trader=request.user,
+            signal=signal,
+            note=note or None
+        )
+        out_serializer = AppliedSignalSerializer(applied)
+        return Response(
+            {
+                'message': 'Signal applied successfully.',
+                'applied_signal': out_serializer.data
+            },
+            status=status.HTTP_201_CREATED
+        )
+
+
+class TraderAppliedSignalsListView(generics.ListAPIView):
+    """
+    API endpoint for traders to list signals they have applied.
+    """
+    serializer_class = AppliedSignalSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    pagination_class = AnalystSignalPagination
+
+    def get_queryset(self):
+        return AppliedSignal.objects.filter(
+            trader=self.request.user
+        ).select_related('signal', 'signal__analyst', 'signal__asset_class', 'signal__instrument', 'signal__timeframe').order_by('-applied_at')
 

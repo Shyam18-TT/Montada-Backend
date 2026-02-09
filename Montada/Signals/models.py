@@ -264,3 +264,41 @@ class TradingSignal(models.Model):
         instrument_symbol = self.instrument.symbol if self.instrument else "N/A"
         timeframe_code = self.timeframe.code if self.timeframe else "N/A"
         return f"{instrument_symbol} | {self.direction} | {timeframe_code}"
+
+
+class AppliedSignal(models.Model):
+    """
+    Records when a trader applies (takes) a trading signal.
+    One trader can apply a signal only once; one signal can be applied by many traders.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    trader = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='applied_signals'
+    )
+
+    signal = models.ForeignKey(
+        TradingSignal,
+        on_delete=models.CASCADE,
+        related_name='applications'
+    )
+
+    applied_at = models.DateTimeField(auto_now_add=True)
+
+    note = models.TextField(blank=True, null=True, help_text="Optional note when applying the signal")
+
+    class Meta:
+        verbose_name = "Applied Signal"
+        verbose_name_plural = "Applied Signals"
+        ordering = ['-applied_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['trader', 'signal'],
+                name='unique_trader_signal_application'
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.trader} applied {self.signal}"
