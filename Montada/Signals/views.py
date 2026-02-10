@@ -7,6 +7,11 @@ from rest_framework.pagination import PageNumberPagination
 from Subscriptions.models import Subscription
 from Followers.models import Follow
 from .models import TradingSignal, AssetClass, Instrument, Timeframe, AppliedSignal
+
+try:
+    from Mainapp.models import ActivityLog
+except ImportError:
+    ActivityLog = None
 from .serializers import (
     TradingSignalSerializer,
     AssetClassSerializer,
@@ -17,6 +22,35 @@ from .serializers import (
     ApplySignalSerializer,
     AppliedSignalSerializer,
 )
+
+
+def _log_signal_closed(user, signal):
+    """Create an ActivityLog entry when an analyst closes a signal (win/loss/neutral)."""
+    if not ActivityLog:
+        return
+    instrument_symbol = signal.instrument.symbol if signal.instrument else "N/A"
+    subtitle = f"{instrument_symbol} {signal.direction}"
+    if signal.is_win:
+        log_type = ActivityLog.ActivityType.TAKE_PROFIT
+        title = "Closed signal as win"
+        icon = "trending-up"
+    elif signal.is_loss:
+        log_type = ActivityLog.ActivityType.STOP_LOSS
+        title = "Closed signal as loss"
+        icon = "trending-down"
+    else:
+        log_type = ActivityLog.ActivityType.GENERAL
+        title = "Closed signal (neutral)"
+        icon = "minus"
+    ActivityLog.objects.create(
+        user=user,
+        type=log_type,
+        title=title,
+        subtitle=subtitle[:255],
+        icon=icon,
+        entity_type=ActivityLog.EntityType.SIGNAL,
+        metadata={"signal_id": str(signal.id), "instrument": instrument_symbol, "direction": signal.direction},
+    )
 
 
 class IsAnalystPermission(permissions.BasePermission):
@@ -65,7 +99,19 @@ class CreateTradingSignalView(generics.CreateAPIView):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
-        
+        signal = serializer.instance
+        if ActivityLog and signal:
+            instrument_symbol = signal.instrument.symbol if signal.instrument else "N/A"
+            subtitle = f"{instrument_symbol} {signal.direction}"
+            ActivityLog.objects.create(
+                user=request.user,
+                type=ActivityLog.ActivityType.GENERAL,
+                title="Posted a new signal",
+                subtitle=subtitle[:255],
+                icon="chart-up",
+                entity_type=ActivityLog.EntityType.SIGNAL,
+                metadata={"signal_id": str(signal.id), "instrument": instrument_symbol, "direction": signal.direction},
+            )
         return Response({
             'message': 'Trading signal created successfully.',
             'signal': serializer.data
@@ -190,10 +236,12 @@ class AnalystSignalUpdateView(generics.RetrieveUpdateAPIView):
         """
         partial = kwargs.pop('partial', False)
         instance = self.get_object()
+        old_status = instance.status
         serializer = self.get_serializer(instance, data=request.data, partial=partial)
         serializer.is_valid(raise_exception=True)
         self.perform_update(serializer)
-        
+        if ActivityLog and old_status != TradingSignal.Status.CLOSED and instance.status == TradingSignal.Status.CLOSED:
+            _log_signal_closed(request.user, instance)
         return Response({
             'message': 'Trading signal updated successfully.',
             'signal': serializer.data
@@ -201,33 +249,25 @@ class AnalystSignalUpdateView(generics.RetrieveUpdateAPIView):
     
     def partial_update(self, request, *args, **kwargs):
         """
-        Handle PATCH request to update signal status
-        Allows updating only the status field
+        Handle PATCH request to update signal (e.g. status and outcome).
+        When setting status to CLOSED, exactly one of is_win, is_loss, or is_neutral must be true.
         """
         instance = self.get_object()
-        
-        # Validate that status is provided and is a valid choice
-        new_status = request.data.get('status')
-        if not new_status:
+        old_status = instance.status
+        # Allow only status and outcome fields for PATCH
+        allowed = {'status', 'is_win', 'is_loss', 'is_neutral'}
+        data = {k: request.data[k] for k in allowed if k in request.data}
+        if not data:
             return Response({
-                'error': 'Status field is required.'
+                'error': 'Provide at least one of: status, is_win, is_loss, is_neutral.'
             }, status=status.HTTP_400_BAD_REQUEST)
-        
-        # Validate status value
-        valid_statuses = [choice[0] for choice in TradingSignal.Status.choices]
-        if new_status not in valid_statuses:
-            return Response({
-                'error': f'Invalid status. Must be one of: {", ".join(valid_statuses)}'
-            }, status=status.HTTP_400_BAD_REQUEST)
-        
-        # Update only the status field
-        instance.status = new_status
-        instance.save(update_fields=['status'])
-        
-        # Return updated signal data
-        serializer = self.get_serializer(instance)
+        serializer = self.get_serializer(instance, data=data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        if ActivityLog and old_status != TradingSignal.Status.CLOSED and instance.status == TradingSignal.Status.CLOSED:
+            _log_signal_closed(request.user, instance)
         return Response({
-            'message': 'Signal status updated successfully.',
+            'message': 'Signal updated successfully.',
             'signal': serializer.data
         }, status=status.HTTP_200_OK)
 

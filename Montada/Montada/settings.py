@@ -55,6 +55,7 @@ INSTALLED_APPS = [
     'Subscriptions',
     'Signals',
     'Followers',
+    'Dashboard',
 ]
 
 MIDDLEWARE = [

@@ -224,6 +224,10 @@ class TradingSignal(models.Model):
         help_text="Timestamp when signal was soft deleted"
     )
 
+    is_win = models.BooleanField(null=True, blank=True)
+    is_loss = models.BooleanField(null=True, blank=True)
+    is_neutral = models.BooleanField(null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     

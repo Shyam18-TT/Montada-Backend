@@ -12,6 +12,11 @@ from django.utils import timezone
 from .models import Follow, Mute
 
 try:
+    from Mainapp.models import ActivityLog
+except ImportError:
+    ActivityLog = None
+
+try:
     from Subscriptions.models import Subscription
 except ImportError:
     Subscription = None
@@ -84,6 +89,27 @@ class FollowRequestView(APIView):
                 )
             if existing.status == Follow.Status.PENDING:
                 existing.accept()
+                if ActivityLog:
+                    other_name = (target.name or target.email or str(target.id))[:255]
+                    self_name = (request.user.name or request.user.email or str(request.user.id))[:255]
+                    ActivityLog.objects.create(
+                        user=request.user,
+                        type=ActivityLog.ActivityType.FOLLOW,
+                        title=f"Started following {other_name}",
+                        subtitle=None,
+                        icon="user-add",
+                        entity_type=ActivityLog.EntityType.USER,
+                        metadata={"followed_id": str(target.id)},
+                    )
+                    ActivityLog.objects.create(
+                        user=target,
+                        type=ActivityLog.ActivityType.FOLLOW,
+                        title=f"{self_name} started following you",
+                        subtitle=None,
+                        icon="user",
+                        entity_type=ActivityLog.EntityType.USER,
+                        metadata={"follower_id": str(request.user.id)},
+                    )
                 return Response(
                     {"message": "You are now following this user.", "follow": FollowSerializer(existing).data},
                     status=status.HTTP_200_OK,
@@ -96,6 +122,27 @@ class FollowRequestView(APIView):
                 existing.rejected_at = None
                 existing.unfollowed_at = None
                 existing.save(update_fields=["status", "is_active", "accepted_at", "requested_at", "rejected_at", "unfollowed_at"])
+                if ActivityLog:
+                    other_name = (target.name or target.email or str(target.id))[:255]
+                    self_name = (request.user.name or request.user.email or str(request.user.id))[:255]
+                    ActivityLog.objects.create(
+                        user=request.user,
+                        type=ActivityLog.ActivityType.FOLLOW,
+                        title=f"Started following {other_name}",
+                        subtitle=None,
+                        icon="user-add",
+                        entity_type=ActivityLog.EntityType.USER,
+                        metadata={"followed_id": str(target.id)},
+                    )
+                    ActivityLog.objects.create(
+                        user=target,
+                        type=ActivityLog.ActivityType.FOLLOW,
+                        title=f"{self_name} started following you",
+                        subtitle=None,
+                        icon="user",
+                        entity_type=ActivityLog.EntityType.USER,
+                        metadata={"follower_id": str(request.user.id)},
+                    )
                 return Response(
                     {"message": "You are now following this user.", "follow": FollowSerializer(existing).data},
                     status=status.HTTP_200_OK,
@@ -114,6 +161,27 @@ class FollowRequestView(APIView):
         )
         follow.accepted_at = timezone.now()
         follow.save(update_fields=["accepted_at"])
+        if ActivityLog:
+            other_name = (target.name or target.email or str(target.id))[:255]
+            self_name = (request.user.name or request.user.email or str(request.user.id))[:255]
+            ActivityLog.objects.create(
+                user=request.user,
+                type=ActivityLog.ActivityType.FOLLOW,
+                title=f"Started following {other_name}",
+                subtitle=None,
+                icon="user-add",
+                entity_type=ActivityLog.EntityType.USER,
+                metadata={"followed_id": str(target.id)},
+            )
+            ActivityLog.objects.create(
+                user=target,
+                type=ActivityLog.ActivityType.FOLLOW,
+                title=f"{self_name} started following you",
+                subtitle=None,
+                icon="user",
+                entity_type=ActivityLog.EntityType.USER,
+                metadata={"follower_id": str(request.user.id)},
+            )
         return Response(
             {"message": "You are now following this user.", "follow": FollowSerializer(follow).data},
             status=status.HTTP_201_CREATED,
@@ -140,6 +208,27 @@ class FollowAcceptView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         follow.accept()
+        if ActivityLog:
+            follower_name = (follow.follower.name or follow.follower.email or str(follow.follower.id))[:255]
+            followed_name = (follow.followed.name or follow.followed.email or str(follow.followed.id))[:255]
+            ActivityLog.objects.create(
+                user=request.user,
+                type=ActivityLog.ActivityType.FOLLOW,
+                title=f"Accepted follow from {follower_name}",
+                subtitle=None,
+                icon="user-check",
+                entity_type=ActivityLog.EntityType.USER,
+                metadata={"follower_id": str(follow.follower_id)},
+            )
+            ActivityLog.objects.create(
+                user=follow.follower,
+                type=ActivityLog.ActivityType.FOLLOW,
+                title=f"Your follow request was accepted by {followed_name}",
+                subtitle=None,
+                icon="user-check",
+                entity_type=ActivityLog.EntityType.USER,
+                metadata={"followed_id": str(follow.followed_id)},
+            )
         return Response(
             {"message": "Follow request accepted.", "follow": FollowSerializer(follow).data},
             status=status.HTTP_200_OK,
@@ -166,6 +255,17 @@ class FollowRejectView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         follow.reject()
+        if ActivityLog:
+            follower_name = (follow.follower.name or follow.follower.email or str(follow.follower.id))[:255]
+            ActivityLog.objects.create(
+                user=request.user,
+                type=ActivityLog.ActivityType.FOLLOW,
+                title=f"Rejected follow from {follower_name}",
+                subtitle=None,
+                icon="user-x",
+                entity_type=ActivityLog.EntityType.USER,
+                metadata={"follower_id": str(follow.follower_id)},
+            )
         return Response(
             {"message": "Follow request rejected.", "follow": FollowSerializer(follow).data},
             status=status.HTTP_200_OK,
@@ -192,7 +292,19 @@ class UnfollowView(APIView):
                 {"error": "You are not following this user."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        unfollowed_user = follow.followed
         follow.unfollow()
+        if ActivityLog:
+            other_name = (unfollowed_user.name or unfollowed_user.email or str(unfollowed_user.id))[:255]
+            ActivityLog.objects.create(
+                user=request.user,
+                type=ActivityLog.ActivityType.FOLLOW,
+                title=f"Unfollowed {other_name}",
+                subtitle=None,
+                icon="user-minus",
+                entity_type=ActivityLog.EntityType.USER,
+                metadata={"unfollowed_id": str(unfollowed_user.id)},
+            )
         return Response(
             {"message": "Unfollowed.", "follow": FollowSerializer(follow).data},
             status=status.HTTP_200_OK,
@@ -221,6 +333,17 @@ class BlockUserView(APIView):
         )
         if not created:
             follow.block()
+        if ActivityLog:
+            target_name = (target.name or target.email or str(target.id))[:255]
+            ActivityLog.objects.create(
+                user=request.user,
+                type=ActivityLog.ActivityType.GENERAL,
+                title=f"Blocked user {target_name}",
+                subtitle=None,
+                icon="user-block",
+                entity_type=ActivityLog.EntityType.USER,
+                metadata={"blocked_id": str(target.id)},
+            )
         return Response(
             {"message": "User blocked.", "follow": FollowSerializer(follow).data},
             status=status.HTTP_200_OK,
@@ -338,6 +461,7 @@ class FollowersListView(generics.ListAPIView):
         qs = (
             _base_followers_queryset(self.request.user)
             .select_related("follower")
+            .annotate(applied_signals_count=Count("follower__applied_signals"))
             .order_by("-accepted_at")
         )
 

@@ -120,7 +120,8 @@ class TradingSignalSerializer(serializers.ModelSerializer):
             'direction', 'entry_price', 'stop_loss', 'take_profit',
             'timeframe', 'timeframe_code', 'timeframe_name',
             'confidence_level', 'analyst_note',
-            'status', 'is_active', 'created_at', 'updated_at'
+            'status', 'is_win', 'is_loss', 'is_neutral',
+            'is_active', 'created_at', 'updated_at'
         )
         read_only_fields = ('id', 'analyst', 'created_at', 'updated_at')
     
@@ -159,7 +160,25 @@ class TradingSignalSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({
                     'instrument': f'Instrument "{instrument.symbol}" does not belong to asset class "{asset_class.name}".'
                 })
-        
+
+        # When closing a signal, require exactly one of is_win, is_loss, or is_neutral to be True
+        final_status = attrs.get('status', getattr(self.instance, 'status', None))
+        if final_status == TradingSignal.Status.CLOSED:
+            final_is_win = attrs.get('is_win') if 'is_win' in attrs else getattr(self.instance, 'is_win', None)
+            final_is_loss = attrs.get('is_loss') if 'is_loss' in attrs else getattr(self.instance, 'is_loss', None)
+            final_is_neutral = attrs.get('is_neutral') if 'is_neutral' in attrs else getattr(self.instance, 'is_neutral', None)
+            if sum([final_is_win is True, final_is_loss is True, final_is_neutral is True]) != 1:
+                raise serializers.ValidationError({
+                    'is_win': 'When closing a signal, set exactly one of is_win, is_loss, or is_neutral to true.'
+                })
+            # Normalize so the other two are False when saving
+            if final_is_win is True:
+                attrs['is_win'], attrs['is_loss'], attrs['is_neutral'] = True, False, False
+            elif final_is_loss is True:
+                attrs['is_win'], attrs['is_loss'], attrs['is_neutral'] = False, True, False
+            else:
+                attrs['is_win'], attrs['is_loss'], attrs['is_neutral'] = False, False, True
+
         return attrs
 
 

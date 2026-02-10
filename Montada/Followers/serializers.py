@@ -19,7 +19,9 @@ class FollowerListItemSerializer(serializers.ModelSerializer):
         fields = ()
 
     def to_representation(self, instance):
-        return UserMinimalSerializer(instance.follower).data
+        data = UserMinimalSerializer(instance.follower).data
+        data["applied_signals_count"] = getattr(instance, "applied_signals_count", 0)
+        return data
 
 
 class FollowSerializer(serializers.ModelSerializer):

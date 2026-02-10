@@ -113,3 +113,85 @@ class EmailVerificationOTP(models.Model):
     def is_valid(self):
         """Check if OTP is valid (not used and not expired)"""
         return not self.is_used and not self.is_expired()
+
+
+class ActivityLog(models.Model):
+    class ActivityType(models.TextChoices):
+        FOLLOW = "FOLLOW", "Follow"
+        SIGNAL_APPLIED = "SIGNAL_APPLIED", "Signal Applied"
+        TAKE_PROFIT = "TAKE_PROFIT", "Take Profit"
+        STOP_LOSS = "STOP_LOSS", "Stop Loss"
+        GENERAL = "GENERAL", "General"
+
+    class EntityType(models.TextChoices):
+        USER = "USER", "User"
+        SIGNAL = "SIGNAL", "Signal"
+        PAIR = "PAIR", "Trading Pair"
+        SYSTEM = "SYSTEM", "System"
+
+    # Owner of the activity feed
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="activity_logs"
+    )
+
+    # Activity info
+    type = models.CharField(
+        max_length=30,
+        choices=ActivityType.choices
+    )
+
+    title = models.CharField(
+        max_length=255,
+        help_text="Main text shown in the activity widget"
+    )
+
+    subtitle = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True
+    )
+
+    # UI helpers
+    icon = models.CharField(
+        max_length=50,
+        blank=True,
+        null=True,
+        help_text="Icon key used by frontend (e.g. user, chart-up)"
+    )
+
+    # Optional relation info
+    entity_type = models.CharField(
+        max_length=30,
+        choices=EntityType.choices,
+        blank=True,
+        null=True
+    )
+
+    entity_id = models.BigIntegerField(
+        blank=True,
+        null=True
+    )
+
+    # Flexible extra data
+    metadata = models.JSONField(
+        blank=True,
+        null=True
+    )
+
+    created_at = models.DateTimeField(
+        auto_now_add=True
+    )
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["user", "-created_at"]),
+            models.Index(fields=["type"]),
+        ]
+
+    def __str__(self):
+        return f"{self.user} - {self.type} - {self.title}"
