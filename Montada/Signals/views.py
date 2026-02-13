@@ -384,9 +384,9 @@ class TraderSignalListView(generics.ListAPIView):
         if 'results' in response.data and response.data['results']:
             signal_ids = [signal['id'] for signal in response.data['results']]
             
-            # Get applied signals for current user
+            # Get applied signals for current user (convert to str for comparison with serialized id)
             applied_signal_ids = set(
-                AppliedSignal.objects.filter(
+                str(sid) for sid in AppliedSignal.objects.filter(
                     trader=request.user,
                     signal_id__in=signal_ids
                 ).values_list('signal_id', flat=True)
