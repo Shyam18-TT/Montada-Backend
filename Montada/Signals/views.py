@@ -355,7 +355,7 @@ class TraderSignalListView(generics.ListAPIView):
         queryset = TradingSignal.active.filter(
             analyst_id__in=following_analyst_ids
         ).select_related(
-            'analyst', 'asset_class', 'instrument', 'timeframe'
+            'analyst', 'asset_class', 'instrument', 'timeframe', 
         )
 
         if not is_active:
@@ -373,12 +373,29 @@ class TraderSignalListView(generics.ListAPIView):
     def list(self, request, *args, **kwargs):
         """
         Return paginated signals. For expired (or missing) subscription, add message
-        to subscribe for new signals.
+        to subscribe for new signals. Also adds is_applied field to each signal.
         """
         response = super().list(request, *args, **kwargs)
         is_active, _ = self._get_subscription_status(request.user)
         if not is_active:
             response.data['message'] = 'To view new signals you have to subscribe.'
+        
+        # Add is_applied field to each signal in results
+        if 'results' in response.data and response.data['results']:
+            signal_ids = [signal['id'] for signal in response.data['results']]
+            
+            # Get applied signals for current user
+            applied_signal_ids = set(
+                AppliedSignal.objects.filter(
+                    trader=request.user,
+                    signal_id__in=signal_ids
+                ).values_list('signal_id', flat=True)
+            )
+            
+            # Add is_applied field to each signal
+            for signal in response.data['results']:
+                signal['is_applied'] = str(signal['id']) in applied_signal_ids
+        
         return response
 
 
