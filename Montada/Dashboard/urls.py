@@ -15,6 +15,7 @@ urlpatterns = [
 
     # Polls (active list with options and vote counts)
     path('polls/active/', views.ActivePollsListView.as_view(), name='active_polls_list'),
+    path('polls/vote/', views.PollVoteView.as_view(), name='poll_vote'),
 ]
 
 # Serve media files in development

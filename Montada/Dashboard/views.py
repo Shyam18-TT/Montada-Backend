@@ -1,3 +1,4 @@
+import uuid
 from datetime import timedelta
 from calendar import monthrange
 
@@ -304,3 +305,132 @@ class ActivePollsListView(APIView):
             })
 
         return Response({'polls': result}, status=status.HTTP_200_OK)
+
+
+class PollVoteView(APIView):
+    """
+    POST: Submit a vote for one question in a poll.
+    Body: { "poll_id": "<uuid>", "question_id": "<uuid>", "option_ids": ["<uuid>"] }
+    - Single question and its option(s) per request; not all questions need to be answered.
+    - Single-choice: option_ids must contain exactly one option.
+    - Multiple-choice: option_ids may contain one or more options.
+    - User can vote only once per question (no re-voting for that question).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from .models import Poll, PollQuestion, PollResponse
+
+        poll_id = request.data.get('poll_id')
+        question_id = request.data.get('question_id')
+        option_ids = request.data.get('option_ids')
+
+        if not poll_id:
+            return Response(
+                {'error': 'poll_id is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not question_id:
+            return Response(
+                {'error': 'question_id is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not option_ids or not isinstance(option_ids, list):
+            return Response(
+                {'error': 'option_ids must be a non-empty list.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        now = timezone.now()
+        try:
+            poll = Poll.objects.get(id=poll_id)
+        except (Poll.DoesNotExist, ValueError):
+            return Response(
+                {'error': 'Poll not found.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if not poll.is_active:
+            return Response(
+                {'error': 'This poll is not active.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if poll.start_date and poll.start_date > now:
+            return Response(
+                {'error': 'This poll has not started yet.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if poll.end_date and poll.end_date < now:
+            return Response(
+                {'error': 'This poll has ended.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            q_uuid = uuid.UUID(str(question_id)) if isinstance(question_id, str) else question_id
+        except (ValueError, TypeError):
+            return Response(
+                {'error': 'Invalid question_id.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            question = PollQuestion.objects.get(id=q_uuid, poll=poll)
+        except PollQuestion.DoesNotExist:
+            return Response(
+                {'error': 'Question not found or does not belong to this poll.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # User can vote only once per question
+        if PollResponse.objects.filter(question=question, user=request.user).exists():
+            return Response(
+                {'error': 'You have already voted for this question.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        valid_option_ids = {opt.id for opt in question.options.all()}
+        if question.question_type == 'single' and len(option_ids) != 1:
+            return Response(
+                {'error': 'This question allows only one option (single choice).'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        to_create = []
+        seen_options = set()
+        for oid in option_ids:
+            try:
+                o_uuid = uuid.UUID(str(oid)) if isinstance(oid, str) else oid
+            except (ValueError, TypeError):
+                return Response(
+                    {'error': f'Invalid option_id: {oid}.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if o_uuid not in valid_option_ids:
+                return Response(
+                    {'error': 'One or more option_ids are not valid for this question.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if o_uuid in seen_options:
+                continue
+            seen_options.add(o_uuid)
+            to_create.append(
+                PollResponse(
+                    poll=poll,
+                    question=question,
+                    option_id=o_uuid,
+                    user=request.user,
+                )
+            )
+
+        if not to_create:
+            return Response(
+                {'error': 'At least one valid option must be provided.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        PollResponse.objects.bulk_create(to_create)
+        return Response(
+            {'message': 'Vote recorded successfully.'},
+            status=status.HTTP_201_CREATED,
+        )
