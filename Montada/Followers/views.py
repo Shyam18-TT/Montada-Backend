@@ -6,10 +6,16 @@ from rest_framework.pagination import PageNumberPagination
 from django.shortcuts import get_object_or_404
 from django.contrib.auth import get_user_model
 from datetime import timedelta
-from django.db.models import Q, Count
+from django.db.models import Q, Count, OuterRef, Subquery
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from .models import Follow, Mute
+
+try:
+    from Signals.models import TradingSignal
+except ImportError:
+    TradingSignal = None
 
 try:
     from Mainapp.models import ActivityLog, UserNotification
@@ -579,20 +585,45 @@ class AnalystsListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        qs = (
-            User.objects.filter(user_type="analyst", is_active=True)
-            .annotate(
-                followers_count=Count(
-                    "received_follow_requests",
-                    filter=Q(
-                        received_follow_requests__status=Follow.Status.ACCEPTED,
-                        received_follow_requests__is_active=True,
-                    ),
-                ),
-                signals_count=Count("posted_signals"),
+        # Subquery: count accepted+active follows per analyst (avoid JOIN duplication)
+        followers_subq = (
+            Follow.objects.filter(
+                followed_id=OuterRef("pk"),
+                status=Follow.Status.ACCEPTED,
+                is_active=True,
             )
-            .order_by("-date_joined")
+            .values("followed_id")
+            .annotate(c=Count("id"))
+            .values("c")
         )
+        # Subquery: count only non–soft-deleted signals per analyst
+        if TradingSignal is not None:
+            signals_subq = (
+                TradingSignal.active.filter(analyst_id=OuterRef("pk"))
+                .values("analyst_id")
+                .annotate(c=Count("id"))
+                .values("c")
+            )
+            qs = (
+                User.objects.filter(user_type="analyst", is_active=True)
+                .annotate(
+                    followers_count=Coalesce(Subquery(followers_subq), 0),
+                    signals_count=Coalesce(Subquery(signals_subq), 0),
+                )
+                .order_by("-date_joined")
+            )
+        else:
+            qs = (
+                User.objects.filter(user_type="analyst", is_active=True)
+                .annotate(
+                    followers_count=Coalesce(Subquery(followers_subq), 0),
+                    signals_count=Count(
+                        "posted_signals",
+                        filter=Q(posted_signals__deleted_at__isnull=True),
+                    ),
+                )
+                .order_by("-date_joined")
+            )
         search = request.query_params.get("search", "").strip()
         if search:
             qs = qs.filter(
