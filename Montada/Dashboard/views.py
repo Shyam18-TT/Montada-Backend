@@ -259,7 +259,7 @@ class ActivePollsListView(APIView):
         from .models import Poll, PollQuestion, PollOption
 
         now = timezone.now()
-        options_with_votes = PollOption.objects.annotate(vote_count=Count('pollresponse_set'))
+        options_with_votes = PollOption.objects.annotate(vote_count=Count('responses'))
         questions_ordered = PollQuestion.objects.order_by('order').prefetch_related(
             Prefetch('options', queryset=options_with_votes)
         )

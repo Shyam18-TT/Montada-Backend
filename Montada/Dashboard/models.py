@@ -66,9 +66,9 @@ class PollOption(models.Model):
     
 class PollResponse(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    poll = models.ForeignKey(Poll, on_delete=models.CASCADE)
-    question = models.ForeignKey(PollQuestion, on_delete=models.CASCADE)
-    option = models.ForeignKey(PollOption, on_delete=models.CASCADE)
+    poll = models.ForeignKey(Poll, on_delete=models.CASCADE, related_name="responses")
+    question = models.ForeignKey(PollQuestion, on_delete=models.CASCADE, related_name="responses")
+    option = models.ForeignKey(PollOption, on_delete=models.CASCADE, related_name="responses")
 
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
