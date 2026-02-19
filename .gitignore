@@ -16,4 +16,4 @@ venv/
 .env/
 env/
 
-settings.py
+Montada/Montada/settings.py
