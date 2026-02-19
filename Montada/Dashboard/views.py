@@ -1,7 +1,7 @@
 from datetime import timedelta
 from calendar import monthrange
 
-from django.db.models import Avg, Q
+from django.db.models import Avg, Count, Q
 from django.utils import timezone
 from rest_framework import status, generics
 from rest_framework.pagination import PageNumberPagination
@@ -11,7 +11,7 @@ from rest_framework.views import APIView
 
 from Mainapp.models import ActivityLog
 from Followers.models import Follow
-from Signals.models import TradingSignal
+from Signals.models import TradingSignal, AssetClass, Timeframe
 from Signals.views import IsAnalystPermission
 
 from .serializers import ActivityLogSerializer
@@ -163,7 +163,10 @@ class AnalyticsGraphView(APIView):
         return Response(self._get_growthrate_data(request.user), status=status.HTTP_200_OK)
 
     def _get_winrate_data(self, user):
-        """Last 6 months: win rate per month (closed signals in that month)."""
+        """Last 6 months: win rate per month (closed signals in that month).
+        Also returns signals_by_asset_class (percentage per asset class) and
+        signals_by_timeframe (count per timeframe) for all signals posted by the analyst.
+        """
         signals_base = TradingSignal.active.filter(analyst=user, status=TradingSignal.Status.CLOSED)
         result = []
         for start, end, year, month, label in _last_six_months_ranges():
@@ -181,7 +184,47 @@ class AnalyticsGraphView(APIView):
                 'loss_count': losses,
                 'total_closed': total,
             })
-        return {'type': 'winrate', 'data': result}
+
+        # All signals posted by the analyst (for breakdowns)
+        analyst_signals = TradingSignal.active.filter(analyst=user)
+        total_signals = analyst_signals.count()
+
+        # Counts per asset_class (for lookup)
+        by_asset_counts = dict(
+            analyst_signals.values('asset_class_id').annotate(count=Count('id')).values_list('asset_class_id', 'count')
+        )
+        # All active asset classes: include every one with count 0 if no signals
+        all_asset_classes = AssetClass.objects.filter(is_active=True).order_by('name')
+        signals_by_asset_class = [
+            {
+                'asset_class': ac.name,
+                'count': by_asset_counts.get(ac.id, 0),
+                'percentage': round((by_asset_counts.get(ac.id, 0) / total_signals) * 100, 2) if total_signals else 0,
+            }
+            for ac in all_asset_classes
+        ]
+
+        # Counts per timeframe (for lookup)
+        by_timeframe_counts = dict(
+            analyst_signals.values('timeframe_id').annotate(count=Count('id')).values_list('timeframe_id', 'count')
+        )
+        # All active timeframes: include every one with count 0 if no signals
+        all_timeframes = Timeframe.objects.filter(is_active=True).order_by('code')
+        signals_by_timeframe = [
+            {
+                'timeframe_code': tf.code,
+                'timeframe_name': tf.name or tf.code,
+                'count': by_timeframe_counts.get(tf.id, 0),
+            }
+            for tf in all_timeframes
+        ]
+
+        return {
+            'type': 'winrate',
+            'data': result,
+            'signals_by_asset_class': signals_by_asset_class,
+            'signals_by_timeframe': signals_by_timeframe,
+        }
 
     def _get_growthrate_data(self, user):
         """Last 6 months: cumulative followers count at end of each month."""
