@@ -1,6 +1,7 @@
 from rest_framework import status, generics, permissions
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
+from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth import get_user_model
 from django.core.mail import send_mail
@@ -199,21 +200,34 @@ class UserProfileView(generics.RetrieveUpdateAPIView):
         return self.request.user
 
 
-class ChangePasswordView(generics.UpdateAPIView):
+class ChangePasswordView(APIView):
     """
-    API endpoint for changing password
+    Change password for the authenticated user.
+    Requires old_password to verify identity; then sets new_password.
+    POST/PUT body: { "old_password": "...", "new_password": "...", "new_password2": "..." }
     """
-    serializer_class = ChangePasswordSerializer
     permission_classes = [permissions.IsAuthenticated]
 
-    def update(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data, context={'request': request})
+    def post(self, request):
+        return self._change_password(request)
+
+    def put(self, request):
+        return self._change_password(request)
+
+    def patch(self, request):
+        return self._change_password(request)
+
+    def _change_password(self, request):
+        serializer = ChangePasswordSerializer(
+            data=request.data,
+            context={'request': request},
+        )
         serializer.is_valid(raise_exception=True)
         serializer.save()
-        
-        return Response({
-            'message': 'Password changed successfully'
-        }, status=status.HTTP_200_OK)
+        return Response(
+            {'message': 'Password changed successfully.'},
+            status=status.HTTP_200_OK,
+        )
 
 
 @api_view(['POST'])
