@@ -12,6 +12,9 @@ urlpatterns = [
 
     # Analytics
     path('analytics/graphs/', views.AnalyticsGraphView.as_view(), name='analytics_graphs'),
+
+    # Polls (active list with options and vote counts)
+    path('polls/active/', views.ActivePollsListView.as_view(), name='active_polls_list'),
 ]
 
 # Serve media files in development

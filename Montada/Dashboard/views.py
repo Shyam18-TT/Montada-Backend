@@ -245,3 +245,62 @@ class AnalyticsGraphView(APIView):
                 'followers_count': count,
             })
         return {'type': 'growthrate', 'data': result}
+
+
+class ActivePollsListView(APIView):
+    """
+    GET: List active polls with their questions, options, and vote count per option in one response.
+    Polls are active when is_active=True and current time is within start_date/end_date if set.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from django.db.models import Prefetch
+        from .models import Poll, PollQuestion, PollOption
+
+        now = timezone.now()
+        options_with_votes = PollOption.objects.annotate(vote_count=Count('pollresponse_set'))
+        questions_ordered = PollQuestion.objects.order_by('order').prefetch_related(
+            Prefetch('options', queryset=options_with_votes)
+        )
+        polls_qs = (
+            Poll.objects.filter(is_active=True)
+            .filter(
+                Q(start_date__isnull=True) | Q(start_date__lte=now),
+                Q(end_date__isnull=True) | Q(end_date__gte=now),
+            )
+            .prefetch_related(Prefetch('questions', queryset=questions_ordered))
+            .order_by('-created_at')
+        )
+
+        result = []
+        for poll in polls_qs:
+            questions_data = []
+            for q in poll.questions.all():
+                options_data = [
+                    {
+                        'id': str(opt.id),
+                        'option_text': opt.option_text,
+                        'vote_count': getattr(opt, 'vote_count', 0),
+                    }
+                    for opt in q.options.all()
+                ]
+                questions_data.append({
+                    'id': str(q.id),
+                    'question_text': q.question_text,
+                    'question_type': q.question_type,
+                    'order': q.order,
+                    'options': options_data,
+                })
+            result.append({
+                'id': str(poll.id),
+                'title': poll.title,
+                'description': poll.description or '',
+                'allow_multiple_answers': poll.allow_multiple_answers,
+                'start_date': poll.start_date.isoformat() if poll.start_date else None,
+                'end_date': poll.end_date.isoformat() if poll.end_date else None,
+                'created_at': poll.created_at.isoformat(),
+                'questions': questions_data,
+            })
+
+        return Response({'polls': result}, status=status.HTTP_200_OK)
