@@ -6,8 +6,8 @@ from rest_framework.pagination import PageNumberPagination
 from django.shortcuts import get_object_or_404
 from django.contrib.auth import get_user_model
 from datetime import timedelta
-from django.db.models import Q, Count, OuterRef, Subquery
-from django.db.models.functions import Coalesce
+from django.db.models import Q, Count, OuterRef, Subquery, F, Value, FloatField, ExpressionWrapper
+from django.db.models.functions import Coalesce, NullIf
 from django.utils import timezone
 
 from .models import Follow, Mute
@@ -581,11 +581,26 @@ class MutedListView(APIView):
 
 
 class AnalystsListView(APIView):
-    """List analysts for traders. Query params: search (optional), include_status (optional, 1 to add follow status per analyst). Includes followers_count and signals_count per analyst."""
+    """
+    List analysts for traders.
+    Query params:
+      - search (optional): filter by name/email/username
+      - include_status (optional, 1/true/yes): add follow_status per analyst
+      - sort: followers | signals | winrate | top
+        - followers: top followed analysts (default)
+        - signals: top by signals posted
+        - winrate: top by win rate (closed signals only)
+        - top: top analysts by combined score (win rate + signals count + followers count)
+    """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        # Subquery: count accepted+active follows per analyst (avoid JOIN duplication)
+        sort = request.query_params.get("sort", "").strip().lower() or "followers"
+        valid_sorts = ("followers", "signals", "winrate", "top")
+        if sort not in valid_sorts:
+            sort = "followers"
+
+        # Subquery: count accepted+active follows per analyst
         followers_subq = (
             Follow.objects.filter(
                 followed_id=OuterRef("pk"),
@@ -604,13 +619,35 @@ class AnalystsListView(APIView):
                 .annotate(c=Count("id"))
                 .values("c")
             )
+            # Wins/losses for closed, non-deleted signals (for winrate and top sort)
+            wins_filter = Q(
+                posted_signals__deleted_at__isnull=True,
+                posted_signals__status=TradingSignal.Status.CLOSED,
+                posted_signals__is_win=True,
+            )
+            losses_filter = Q(
+                posted_signals__deleted_at__isnull=True,
+                posted_signals__status=TradingSignal.Status.CLOSED,
+                posted_signals__is_loss=True,
+            )
             qs = (
                 User.objects.filter(user_type="analyst", is_active=True)
                 .annotate(
                     followers_count=Coalesce(Subquery(followers_subq), 0),
                     signals_count=Coalesce(Subquery(signals_subq), 0),
+                    wins=Count("posted_signals", filter=wins_filter),
+                    losses=Count("posted_signals", filter=losses_filter),
                 )
-                .order_by("-date_joined")
+                .annotate(
+                    win_rate_pct=Coalesce(
+                        ExpressionWrapper(
+                            F("wins") * 100.0 / NullIf(F("wins") + F("losses"), Value(0)),
+                            output_field=FloatField(),
+                        ),
+                        Value(0),
+                        output_field=FloatField(),
+                    )
+                )
             )
         else:
             qs = (
@@ -622,8 +659,29 @@ class AnalystsListView(APIView):
                         filter=Q(posted_signals__deleted_at__isnull=True),
                     ),
                 )
-                .order_by("-date_joined")
             )
+
+        # Combined score for sort=top: win rate (weighted) + signals count + followers count
+        if sort == "top" and TradingSignal is not None:
+            qs = qs.annotate(
+                top_score=ExpressionWrapper(
+                    (F("win_rate_pct") * 2) + F("signals_count") + F("followers_count"),
+                    output_field=FloatField(),
+                )
+            )
+
+        # Apply ordering
+        if sort == "followers":
+            qs = qs.order_by("-followers_count", "-date_joined")
+        elif sort == "signals":
+            qs = qs.order_by("-signals_count", "-date_joined")
+        elif sort == "winrate" and TradingSignal is not None:
+            qs = qs.order_by("-win_rate_pct", "-followers_count", "-date_joined")
+        elif sort == "top" and TradingSignal is not None:
+            qs = qs.order_by("-top_score", "-date_joined")
+        else:
+            qs = qs.order_by("-date_joined")
+
         search = request.query_params.get("search", "").strip()
         if search:
             qs = qs.filter(
@@ -637,6 +695,9 @@ class AnalystsListView(APIView):
         for i, user in enumerate(analysts):
             data[i]["followers_count"] = getattr(user, "followers_count", 0)
             data[i]["signals_count"] = getattr(user, "signals_count", 0)
+            # Win rate 0–100 (only when TradingSignal and wins/losses annotated)
+            win_pct = getattr(user, "win_rate_pct", None)
+            data[i]["win_rate_percentage"] = round(float(win_pct), 2) if win_pct is not None else None
 
         # Always set is_following so the requester knows whether they follow each analyst
         analyst_ids = [u.id for u in analysts]
