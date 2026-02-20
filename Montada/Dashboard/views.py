@@ -257,7 +257,7 @@ class ActivePollsListView(APIView):
 
     def get(self, request):
         from django.db.models import Prefetch
-        from .models import Poll, PollQuestion, PollOption
+        from .models import Poll, PollQuestion, PollOption, PollResponse
 
         now = timezone.now()
         options_with_votes = PollOption.objects.annotate(vote_count=Count('responses'))
@@ -274,17 +274,28 @@ class ActivePollsListView(APIView):
             .order_by('-created_at')
         )
 
+        # Question ids the current user (request.user) has voted on in these active polls
+        voted_question_ids = set(
+            PollResponse.objects.filter(
+                user=request.user,
+                question__poll__in=polls_qs,
+            ).values_list('question_id', flat=True)
+        )
+
         result = []
         for poll in polls_qs:
             questions_data = []
             for q in poll.questions.all():
+                opts = list(q.options.all())
+                total_votes = sum(getattr(opt, 'vote_count', 0) for opt in opts)
                 options_data = [
                     {
                         'id': str(opt.id),
                         'option_text': opt.option_text,
                         'vote_count': getattr(opt, 'vote_count', 0),
+                        'vote_percentage': round((getattr(opt, 'vote_count', 0) / total_votes) * 100, 2) if total_votes else 0,
                     }
-                    for opt in q.options.all()
+                    for opt in opts
                 ]
                 questions_data.append({
                     'id': str(q.id),
@@ -292,6 +303,7 @@ class ActivePollsListView(APIView):
                     'question_type': q.question_type,
                     'order': q.order,
                     'options': options_data,
+                    'is_voted': q.id in voted_question_ids,
                 })
             result.append({
                 'id': str(poll.id),
