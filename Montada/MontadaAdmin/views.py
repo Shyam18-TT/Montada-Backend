@@ -4,7 +4,8 @@ Admin dashboard views: stats cards with date range and percentage change.
 from calendar import monthrange
 from datetime import timedelta, datetime
 from django.utils import timezone
-from django.db.models import Count
+from django.db.models import Count, Q, OuterRef, Subquery
+from django.db.models.functions import Coalesce
 from rest_framework import status
 from rest_framework.permissions import IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
@@ -28,6 +29,11 @@ try:
     from Signals.models import AssetClass
 except ImportError:
     AssetClass = None
+
+try:
+    from Followers.models import Follow
+except ImportError:
+    Follow = None
 
 
 def _parse_date_range(request):
@@ -371,5 +377,92 @@ class AdminDashboardGraphsView(APIView):
                 "signals_per_day": signals_per_day,
                 "signals_by_asset_class": signals_by_asset_class,
             },
+            status=status.HTTP_200_OK,
+        )
+
+
+class TopAnalystLeaderboardView(APIView):
+    """
+    GET: Top analyst leaderboard for admin dashboard, ordered by win rate (desc).
+    Returns for each analyst: id, name, email, total_signals, followers, win_rate (overall %).
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request):
+        if Follow is None or TradingSignal is None:
+            return Response(
+                {"leaderboard": []},
+                status=status.HTTP_200_OK,
+            )
+
+        followers_subq = (
+            Follow.objects.filter(
+                followed_id=OuterRef("pk"),
+                status=Follow.Status.ACCEPTED,
+                is_active=True,
+            )
+            .values("followed_id")
+            .annotate(c=Count("id"))
+            .values("c")
+        )
+        signals_subq = (
+            TradingSignal.active.filter(analyst_id=OuterRef("pk"))
+            .values("analyst_id")
+            .annotate(c=Count("id"))
+            .values("c")
+        )
+        wins_subq = (
+            TradingSignal.active.filter(
+                analyst_id=OuterRef("pk"),
+                status=TradingSignal.Status.CLOSED,
+                is_win=True,
+            )
+            .values("analyst_id")
+            .annotate(c=Count("id"))
+            .values("c")
+        )
+        losses_subq = (
+            TradingSignal.active.filter(
+                analyst_id=OuterRef("pk"),
+                status=TradingSignal.Status.CLOSED,
+                is_loss=True,
+            )
+            .values("analyst_id")
+            .annotate(c=Count("id"))
+            .values("c")
+        )
+
+        analysts = (
+            User.objects.filter(user_type="analyst", is_active=True)
+            .annotate(
+                followers_count=Coalesce(Subquery(followers_subq), 0),
+                total_signals=Coalesce(Subquery(signals_subq), 0),
+                wins=Coalesce(Subquery(wins_subq), 0),
+                losses=Coalesce(Subquery(losses_subq), 0),
+            )
+        )
+
+        # Build list with win_rate and sort by win_rate desc (then by total_signals desc as tiebreaker)
+        rows = []
+        for a in analysts:
+            wins = getattr(a, "wins", 0) or 0
+            losses = getattr(a, "losses", 0) or 0
+            total_outcome = wins + losses
+            win_rate = round((wins / total_outcome) * 100, 2) if total_outcome else 0
+            rows.append({
+                "analyst_id": str(a.id),
+                "name": a.name or a.email or str(a.id),
+                "email": a.email,
+                "total_signals": getattr(a, "total_signals", 0) or 0,
+                "followers": getattr(a, "followers_count", 0) or 0,
+                "win_rate": win_rate,
+                "_sort_key": (win_rate, getattr(a, "total_signals", 0) or 0),
+            })
+        rows.sort(key=lambda x: x["_sort_key"], reverse=True)
+        for r in rows:
+            del r["_sort_key"]
+
+        return Response(
+            {"leaderboard": rows},
             status=status.HTTP_200_OK,
         )
