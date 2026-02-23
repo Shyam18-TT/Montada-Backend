@@ -1,8 +1,10 @@
 """
 Admin dashboard views: stats cards with date range and percentage change.
 """
-from datetime import timedelta
+from calendar import monthrange
+from datetime import timedelta, datetime
 from django.utils import timezone
+from django.db.models import Count
 from rest_framework import status
 from rest_framework.permissions import IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
@@ -21,6 +23,11 @@ try:
     from Subscriptions.models import Subscription
 except ImportError:
     Subscription = None
+
+try:
+    from Signals.models import AssetClass
+except ImportError:
+    AssetClass = None
 
 
 def _parse_date_range(request):
@@ -257,6 +264,112 @@ class AdminDashboardStatsView(APIView):
                     "win_rate": win_rate,
                     "win_rate_increase_pct": win_rate_increase_pct,
                 },
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+def _last_six_months_ranges():
+    """Yield (start, end, year, month, label) for the last 6 calendar months (oldest first)."""
+    now = timezone.now()
+    for i in range(5, -1, -1):
+        year = now.year
+        month = now.month - i
+        while month <= 0:
+            month += 12
+            year -= 1
+        last_day = monthrange(year, month)[1]
+        start = timezone.make_aware(datetime(year, month, 1))
+        end = timezone.make_aware(datetime(year, month, last_day, 23, 59, 59, 999999))
+        if end > now:
+            end = now
+        label = f"{year}-{month:02d}"
+        yield start, end, year, month, label
+
+
+class AdminDashboardGraphsView(APIView):
+    """
+    GET: Graph data for admin dashboard.
+    Returns:
+    1. user_growth: last 6 months - new analysts and new traders per month.
+    2. signals_per_day: last 7 days - total signals created and win signals (closed as win) per day.
+    3. signals_by_asset_class: pie chart - count of signals per asset class.
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request):
+        now = timezone.now()
+
+        # 1. User growth (analyst, trader) last 6 months
+        user_growth = []
+        for start, end, year, month, label in _last_six_months_ranges():
+            analysts = User.objects.filter(
+                user_type="analyst",
+                created_at__gte=start,
+                created_at__lte=end,
+            ).count()
+            traders = User.objects.filter(
+                user_type="trader",
+                created_at__gte=start,
+                created_at__lte=end,
+            ).count()
+            user_growth.append({
+                "month": label,
+                "year": year,
+                "month_number": month,
+                "analysts": analysts,
+                "traders": traders,
+            })
+
+        # 2. Signals per day (last 7 days): total created and win (closed as win) per day
+        signals_per_day = []
+        for i in range(6, -1, -1):  # 7 days ago .. yesterday, today
+            day_end = now - timedelta(days=i)
+            day_start = day_end.replace(hour=0, minute=0, second=0, microsecond=0)
+            day_end = day_start + timedelta(days=1) - timedelta(microseconds=1)
+            if day_end > now:
+                day_end = now
+            label = day_start.date().isoformat()
+            if TradingSignal is not None:
+                total = TradingSignal.active.filter(
+                    created_at__gte=day_start,
+                    created_at__lte=day_end,
+                ).count()
+                win = TradingSignal.active.filter(
+                    status=TradingSignal.Status.CLOSED,
+                    is_win=True,
+                    updated_at__gte=day_start,
+                    updated_at__lte=day_end,
+                ).count()
+            else:
+                total = 0
+                win = 0
+            signals_per_day.append({
+                "date": label,
+                "total": total,
+                "win": win,
+            })
+
+        # 3. Signals by asset class (pie chart)
+        if TradingSignal is not None and AssetClass is not None:
+            by_asset = dict(
+                TradingSignal.active.values("asset_class_id")
+                .annotate(count=Count("id"))
+                .values_list("asset_class_id", "count")
+            )
+            all_assets = AssetClass.objects.filter(is_active=True).order_by("name")
+            signals_by_asset_class = [
+                {"asset_class": ac.name, "count": by_asset.get(ac.id, 0)}
+                for ac in all_assets
+            ]
+        else:
+            signals_by_asset_class = []
+
+        return Response(
+            {
+                "user_growth": user_growth,
+                "signals_per_day": signals_per_day,
+                "signals_by_asset_class": signals_by_asset_class,
             },
             status=status.HTTP_200_OK,
         )
