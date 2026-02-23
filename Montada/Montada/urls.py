@@ -25,7 +25,8 @@ urlpatterns = [
     path('api/subscriptions/', include('Subscriptions.urls')),
     path('api/signals/', include('Signals.urls')),
     path('api/followers/', include('Followers.urls')),
-    path('api/dashboard/', include('Dashboard.urls'))
+    path('api/dashboard/', include('Dashboard.urls')),
+    path('api/admin/', include('MontadaAdmin.urls')),
 ]
 
 # Serve media files in development

@@ -56,6 +56,7 @@ INSTALLED_APPS = [
     'Signals',
     'Followers',
     'Dashboard',
+    'MontadaAdmin'
 ]
 
 MIDDLEWARE = [
