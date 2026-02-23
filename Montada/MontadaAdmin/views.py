@@ -94,6 +94,49 @@ def _pct_change(current, previous):
     return round(((current - previous) / previous) * 100, 2)
 
 
+def _win_rate_for_period(start, end):
+    """Return win rate % (wins / (wins+losses)) for closed signals in [start, end], or 0 if no outcomes."""
+    if TradingSignal is None:
+        return 0
+    qs = TradingSignal.active.filter(
+        status=TradingSignal.Status.CLOSED,
+        updated_at__gte=start,
+        updated_at__lte=end,
+    )
+    wins = qs.filter(is_win=True).count()
+    losses = qs.filter(is_loss=True).count()
+    total = wins + losses
+    if total == 0:
+        return 0
+    return round((wins / total) * 100, 2)
+
+
+class WinRateByPeriodView(APIView):
+    """
+    GET: Win rate (percentage) for last 24 hours, last 7 days, and last 30 days.
+    Win rate = (wins / (wins + losses)) * 100 for signals closed in each period.
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request):
+        now = timezone.now()
+        last_24h_end = now
+        last_24h_start = now - timedelta(hours=24)
+        last_7d_end = now
+        last_7d_start = now - timedelta(days=7)
+        last_30d_end = now
+        last_30d_start = now - timedelta(days=30)
+
+        return Response(
+            {
+                "win_rate_last_24_hours": _win_rate_for_period(last_24h_start, last_24h_end),
+                "win_rate_last_7_days": _win_rate_for_period(last_7d_start, last_7d_end),
+                "win_rate_last_30_days": _win_rate_for_period(last_30d_start, last_30d_end),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 class AdminDashboardStatsView(APIView):
     """
     GET: Stats for admin dashboard with date range and increase percentage.
