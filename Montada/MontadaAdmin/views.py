@@ -46,7 +46,13 @@ try:
 except ImportError:
     AppliedSignal = None
 
-from .serializers import AdminAnalystListSerializer, AdminTraderListSerializer, AdminLoginSerializer
+from .serializers import (
+    AdminAnalystListSerializer,
+    AdminTraderListSerializer,
+    AdminLoginSerializer,
+    AdminCreateAnalystSerializer,
+    AdminCreateTraderSerializer,
+)
 
 
 class AdminLoginView(APIView):
@@ -92,6 +98,72 @@ class AdminLoginView(APIView):
                 },
             },
             status=status.HTTP_200_OK,
+        )
+
+
+class AdminCreateAnalystView(APIView):
+    """
+    POST: Create an analyst from admin. Body: email, password, name (optional), phone_number (optional), is_verified (optional).
+    Admin only.
+    """
+    permission_classes = [IsAdminUser]
+
+    def post(self, request):
+        serializer = AdminCreateAnalystSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        user = serializer.save()
+        return Response(
+            {
+                "message": "Analyst created successfully.",
+                "user": {
+                    "id": str(user.id),
+                    "email": user.email,
+                    "name": user.name or "",
+                    "user_type": user.user_type,
+                    "is_verified": user.is_verified,
+                },
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class AdminCreateTraderView(APIView):
+    """
+    POST: Create a trader from admin. Body: email, password, name (optional), phone_number (optional),
+    is_verified (optional), subscription_plan (basic | free_trial | premium), trial_days (optional, default 7),
+    premium_plan (monthly | yearly, optional when subscription_plan=premium). Admin only.
+    """
+    permission_classes = [IsAdminUser]
+
+    def post(self, request):
+        serializer = AdminCreateTraderSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        user = serializer.save()
+        subscription_label = "basic"
+        try:
+            sub = user.subscription
+        except Exception:
+            sub = None
+        if sub:
+            if sub.plan_type == "free_trial" or sub.is_trial:
+                subscription_label = "free_trial"
+            else:
+                subscription_label = "premium"
+        return Response(
+            {
+                "message": "Trader created successfully.",
+                "user": {
+                    "id": str(user.id),
+                    "email": user.email,
+                    "name": user.name or "",
+                    "user_type": user.user_type,
+                    "is_verified": user.is_verified,
+                    "subscription": subscription_label,
+                },
+            },
+            status=status.HTTP_201_CREATED,
         )
 
 

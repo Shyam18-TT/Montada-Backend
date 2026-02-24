@@ -1,8 +1,9 @@
 """
-Serializers for admin list views (analysts, traders) and admin login.
+Serializers for admin list views (analysts, traders), admin login, and admin create user.
 """
 from rest_framework import serializers
 from django.contrib.auth import authenticate, get_user_model
+from django.contrib.auth.password_validation import validate_password
 
 User = get_user_model()
 
@@ -25,6 +26,104 @@ class AdminLoginSerializer(serializers.Serializer):
             raise serializers.ValidationError("User account is disabled.")
         attrs["user"] = user
         return attrs
+
+
+class AdminCreateAnalystSerializer(serializers.Serializer):
+    """Create analyst from admin; requires email and password."""
+    email = serializers.EmailField(required=True)
+    password = serializers.CharField(required=True, write_only=True, validators=[validate_password], style={"input_type": "password"})
+    name = serializers.CharField(required=False, allow_blank=True, default="")
+    phone_number = serializers.CharField(required=False, allow_blank=True, default="")
+    is_verified = serializers.BooleanField(required=False, default=False)
+
+    def validate_email(self, value):
+        if User.objects.filter(email__iexact=value).exists():
+            raise serializers.ValidationError("A user with this email already exists.")
+        return value
+
+    def create(self, validated_data):
+        validated_data.setdefault("username", validated_data["email"])
+        validated_data["user_type"] = "analyst"
+        validated_data["is_subscribed"] = False
+        user = User.objects.create_user(**validated_data)
+        return user
+
+
+class AdminCreateTraderSerializer(serializers.Serializer):
+    """Create trader from admin; requires email, password, and subscription_plan (basic | free_trial | premium)."""
+    email = serializers.EmailField(required=True)
+    password = serializers.CharField(required=True, write_only=True, validators=[validate_password], style={"input_type": "password"})
+    name = serializers.CharField(required=False, allow_blank=True, default="")
+    phone_number = serializers.CharField(required=False, allow_blank=True, default="")
+    is_verified = serializers.BooleanField(required=False, default=False)
+    subscription_plan = serializers.ChoiceField(
+        choices=[("basic", "Basic"), ("free_trial", "Free Trial"), ("premium", "Premium")],
+        required=True,
+    )
+    trial_days = serializers.IntegerField(required=False, default=7, min_value=1, max_value=365)
+    premium_plan = serializers.ChoiceField(
+        choices=[("monthly", "Monthly"), ("yearly", "Yearly")],
+        required=False,
+        default="monthly",
+    )
+
+    def validate_email(self, value):
+        if User.objects.filter(email__iexact=value).exists():
+            raise serializers.ValidationError("A user with this email already exists.")
+        return value
+
+    def create(self, validated_data):
+        from django.utils import timezone
+        from datetime import timedelta
+
+        subscription_plan = validated_data.pop("subscription_plan")
+        trial_days = validated_data.pop("trial_days", 7)
+        premium_plan = validated_data.pop("premium_plan", "monthly")
+
+        validated_data.setdefault("username", validated_data["email"])
+        validated_data["user_type"] = "trader"
+        validated_data["is_subscribed"] = subscription_plan != "basic"
+        user = User.objects.create_user(**validated_data)
+
+        if subscription_plan == "basic":
+            pass  # no Subscription record; is_subscribed already False
+        elif subscription_plan == "free_trial":
+            try:
+                from Subscriptions.models import Subscription
+                end_date = timezone.now() + timedelta(days=trial_days)
+                Subscription.objects.create(
+                    user=user,
+                    plan_type="free_trial",
+                    status="active",
+                    end_date=end_date,
+                    is_trial=True,
+                )
+                user.is_subscribed = True
+                user.save()
+            except Exception:
+                pass
+        else:  # premium
+            try:
+                from Subscriptions.models import Subscription
+                if premium_plan == "yearly":
+                    end_date = timezone.now() + timedelta(days=365)
+                    plan_type = "yearly"
+                else:
+                    end_date = timezone.now() + timedelta(days=30)
+                    plan_type = "monthly"
+                Subscription.objects.create(
+                    user=user,
+                    plan_type=plan_type,
+                    status="active",
+                    end_date=end_date,
+                    is_trial=False,
+                )
+                user.is_subscribed = True
+                user.save()
+            except Exception:
+                pass
+
+        return user
 
 
 class AdminAnalystListSerializer(serializers.ModelSerializer):
