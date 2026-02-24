@@ -1,10 +1,30 @@
 """
-Serializers for admin list views (analysts, traders).
+Serializers for admin list views (analysts, traders) and admin login.
 """
 from rest_framework import serializers
-from django.contrib.auth import get_user_model
+from django.contrib.auth import authenticate, get_user_model
 
 User = get_user_model()
+
+
+class AdminLoginSerializer(serializers.Serializer):
+    """Email and password for admin login; validates credentials and sets user."""
+    email = serializers.EmailField(required=True, write_only=True)
+    password = serializers.CharField(required=True, write_only=True, style={"input_type": "password"})
+
+    def validate(self, attrs):
+        email = attrs.get("email")
+        password = attrs.get("password")
+        if not email or not password:
+            raise serializers.ValidationError("Email and password are required.")
+        request = self.context.get("request")
+        user = authenticate(request=request, username=email, password=password)
+        if not user:
+            raise serializers.ValidationError("Invalid email or password.")
+        if not user.is_active:
+            raise serializers.ValidationError("User account is disabled.")
+        attrs["user"] = user
+        return attrs
 
 
 class AdminAnalystListSerializer(serializers.ModelSerializer):

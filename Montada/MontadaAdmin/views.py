@@ -8,13 +8,18 @@ from django.db.models import Count, Q, OuterRef, Subquery
 from django.db.models.functions import Coalesce
 from rest_framework import status, generics
 from rest_framework.pagination import PageNumberPagination
-from rest_framework.permissions import IsAdminUser, IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from django.contrib.auth import get_user_model
+from django.contrib.auth import authenticate, get_user_model
 
 User = get_user_model()
+
+try:
+    from rest_framework_simplejwt.tokens import RefreshToken
+except ImportError:
+    RefreshToken = None
 
 try:
     from Signals.models import TradingSignal
@@ -41,7 +46,53 @@ try:
 except ImportError:
     AppliedSignal = None
 
-from .serializers import AdminAnalystListSerializer, AdminTraderListSerializer
+from .serializers import AdminAnalystListSerializer, AdminTraderListSerializer, AdminLoginSerializer
+
+
+class AdminLoginView(APIView):
+    """
+    POST: Admin-only login. Accepts email and password.
+    Only users with is_staff or is_superuser can log in. Returns JWT tokens.
+    Body: { "email": "...", "password": "..." }
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = AdminLoginSerializer(data=request.data, context={"request": request})
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        user = serializer.validated_data["user"]
+        if not (user.is_staff or user.is_superuser):
+            return Response(
+                {"error": "Admin access only. Your account does not have staff privileges."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        if RefreshToken is None:
+            return Response(
+                {"error": "JWT is not configured."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        refresh = RefreshToken.for_user(user)
+        return Response(
+            {
+                "message": "Admin login successful.",
+                "user": {
+                    "id": str(user.id),
+                    "email": user.email,
+                    "name": user.name or "",
+                    "is_staff": user.is_staff,
+                    "is_superuser": user.is_superuser,
+                },
+                "tokens": {
+                    "refresh": str(refresh),
+                    "access": str(refresh.access_token),
+                },
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class AdminPageNumberPagination(PageNumberPagination):

@@ -1,5 +1,6 @@
 from django.urls import path
 from .views import (
+    AdminLoginView,
     AdminDashboardStatsView,
     WinRateByPeriodView,
     AdminDashboardGraphsView,
@@ -11,6 +12,7 @@ from .views import (
 app_name = "MontadaAdmin"
 
 urlpatterns = [
+    path("login/", AdminLoginView.as_view(), name="admin_login"),
     path("dashboard/stats/", AdminDashboardStatsView.as_view(), name="admin_dashboard_stats"),
     path("dashboard/winrate/", WinRateByPeriodView.as_view(), name="admin_winrate_by_period"),
     path("dashboard/graphs/", AdminDashboardGraphsView.as_view(), name="admin_dashboard_graphs"),
