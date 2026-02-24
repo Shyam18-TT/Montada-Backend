@@ -6,7 +6,8 @@ from datetime import timedelta, datetime
 from django.utils import timezone
 from django.db.models import Count, Q, OuterRef, Subquery
 from django.db.models.functions import Coalesce
-from rest_framework import status
+from rest_framework import status, generics
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -34,6 +35,19 @@ try:
     from Followers.models import Follow
 except ImportError:
     Follow = None
+
+try:
+    from Signals.models import AppliedSignal
+except ImportError:
+    AppliedSignal = None
+
+from .serializers import AdminAnalystListSerializer, AdminTraderListSerializer
+
+
+class AdminPageNumberPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = "page_size"
+    max_page_size = 100
 
 
 def _parse_date_range(request):
@@ -466,3 +480,137 @@ class TopAnalystLeaderboardView(APIView):
             {"leaderboard": rows},
             status=status.HTTP_200_OK,
         )
+
+
+class AdminAnalystListView(generics.ListAPIView):
+    """
+    GET: Paginated list of analysts for admin dashboard.
+    Query params: page, page_size (optional), search (name or email), status (active|suspended|pending).
+    Each item: id, name, email, status (active/inactive), signals_count, followers, win_rate, registered_at, is_verified.
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+    pagination_class = AdminPageNumberPagination
+    serializer_class = AdminAnalystListSerializer
+
+    def get_queryset(self):
+        qs = User.objects.filter(user_type="analyst").order_by("-created_at")
+
+        search = (self.request.query_params.get("search") or "").strip()
+        if search:
+            qs = qs.filter(
+                Q(name__icontains=search) | Q(email__icontains=search)
+            )
+
+        status_param = (self.request.query_params.get("status") or "").strip().lower()
+        if status_param == "active":
+            qs = qs.filter(is_active=True)
+        elif status_param == "suspended":
+            qs = qs.filter(is_active=False)
+        elif status_param == "pending":
+            qs = qs.filter(is_verified=False)
+
+        if Follow is not None:
+            followers_subq = (
+                Follow.objects.filter(
+                    followed_id=OuterRef("pk"),
+                    status=Follow.Status.ACCEPTED,
+                    is_active=True,
+                )
+                .values("followed_id")
+                .annotate(c=Count("id"))
+                .values("c")
+            )
+            qs = qs.annotate(followers_count=Coalesce(Subquery(followers_subq), 0))
+
+        if TradingSignal is not None:
+            signals_subq = (
+                TradingSignal.active.filter(analyst_id=OuterRef("pk"))
+                .values("analyst_id")
+                .annotate(c=Count("id"))
+                .values("c")
+            )
+            wins_subq = (
+                TradingSignal.active.filter(
+                    analyst_id=OuterRef("pk"),
+                    status=TradingSignal.Status.CLOSED,
+                    is_win=True,
+                )
+                .values("analyst_id")
+                .annotate(c=Count("id"))
+                .values("c")
+            )
+            losses_subq = (
+                TradingSignal.active.filter(
+                    analyst_id=OuterRef("pk"),
+                    status=TradingSignal.Status.CLOSED,
+                    is_loss=True,
+                )
+                .values("analyst_id")
+                .annotate(c=Count("id"))
+                .values("c")
+            )
+            qs = qs.annotate(
+                signals_count=Coalesce(Subquery(signals_subq), 0),
+                wins=Coalesce(Subquery(wins_subq), 0),
+                losses=Coalesce(Subquery(losses_subq), 0),
+            )
+
+        return qs
+
+
+class AdminTraderListView(generics.ListAPIView):
+    """
+    GET: Paginated list of traders for admin dashboard.
+    Query params: page, page_size (optional), search (name or email), plan (basic|trial|subscribed).
+    Each item: id, name, email, status (active/inactive), subscription (trial|subscribed|basic), signals_applied, registered_at, is_verified.
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+    pagination_class = AdminPageNumberPagination
+    serializer_class = AdminTraderListSerializer
+
+    def get_queryset(self):
+        qs = User.objects.filter(user_type="trader").order_by("-created_at")
+
+        search = (self.request.query_params.get("search") or "").strip()
+        if search:
+            qs = qs.filter(
+                Q(name__icontains=search) | Q(email__icontains=search)
+            )
+
+        plan_param = (self.request.query_params.get("plan") or "").strip().lower()
+        if plan_param and Subscription is not None:
+            now = timezone.now()
+            if plan_param == "basic":
+                qs = qs.filter(
+                    Q(subscription__isnull=True)
+                    | ~Q(subscription__status="active")
+                    | Q(subscription__end_date__lt=now)
+                )
+            elif plan_param == "trial":
+                qs = qs.filter(
+                    subscription__status="active",
+                    subscription__end_date__gte=now,
+                ).filter(
+                    Q(subscription__is_trial=True) | Q(subscription__plan_type="free_trial")
+                )
+            elif plan_param == "subscribed":
+                qs = qs.filter(
+                    subscription__status="active",
+                    subscription__end_date__gte=now,
+                    subscription__plan_type__in=["monthly", "yearly"],
+                    subscription__is_trial=False,
+                )
+
+        if AppliedSignal is not None:
+            applied_subq = (
+                AppliedSignal.objects.filter(trader_id=OuterRef("pk"))
+                .values("trader_id")
+                .annotate(c=Count("id"))
+                .values("c")
+            )
+            qs = qs.annotate(signals_applied_count=Coalesce(Subquery(applied_subq), 0))
+
+        if Subscription is not None:
+            qs = qs.select_related("subscription")
+
+        return qs
