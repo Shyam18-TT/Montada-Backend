@@ -4,6 +4,7 @@ from .views import (
     AdminCreateAnalystView,
     AdminCreateTraderView,
     AdminDashboardStatsView,
+    AdminSignalsStatsView,
     WinRateByPeriodView,
     AdminDashboardGraphsView,
     TopAnalystLeaderboardView,
@@ -25,5 +26,8 @@ urlpatterns = [
     path("users/analysts/create/", AdminCreateAnalystView.as_view(), name="admin_create_analyst"),
     path("users/traders/", AdminTraderListView.as_view(), name="admin_trader_list"),
     path("users/traders/create/", AdminCreateTraderView.as_view(), name="admin_create_trader"),
+
+    path("signals/signals-stats/", AdminSignalsStatsView.as_view(), name="admin_signals_stats"),
+
 ]
 

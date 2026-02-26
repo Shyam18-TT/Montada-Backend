@@ -4,7 +4,7 @@ Admin dashboard views: stats cards with date range and percentage change.
 from calendar import monthrange
 from datetime import timedelta, datetime
 from django.utils import timezone
-from django.db.models import Count, Q, OuterRef, Subquery
+from django.db.models import Avg, Count, Q, OuterRef, Subquery
 from django.db.models.functions import Coalesce
 from rest_framework import status, generics
 from rest_framework.pagination import PageNumberPagination
@@ -407,6 +407,46 @@ class AdminDashboardStatsView(APIView):
                     "win_rate": win_rate,
                     "win_rate_increase_pct": win_rate_increase_pct,
                 },
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class AdminSignalsStatsView(APIView):
+    """
+    GET: Single API for platform-wide signal stats.
+    Returns: total_signals, open_signals, win_rate, average_confidence.
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request):
+        if TradingSignal is None:
+            return Response(
+                {
+                    "total_signals": 0,
+                    "open_signals": 0,
+                    "win_rate": None,
+                    "average_confidence": None,
+                },
+                status=status.HTTP_200_OK,
+            )
+        signals = TradingSignal.active.all()
+        total_signals = signals.count()
+        open_signals = signals.filter(status=TradingSignal.Status.OPEN).count()
+        win_count = signals.filter(is_win=True).count()
+        loss_count = signals.filter(is_loss=True).count()
+        closed_with_outcome = win_count + loss_count
+        win_rate = round((win_count / closed_with_outcome) * 100, 2) if closed_with_outcome > 0 else None
+        avg_result = signals.aggregate(avg_confidence=Avg("confidence_level"))
+        average_confidence = (
+            round(avg_result["avg_confidence"], 2) if avg_result["avg_confidence"] is not None else None
+        )
+        return Response(
+            {
+                "total_signals": total_signals,
+                "open_signals": open_signals,
+                "win_rate": win_rate,
+                "average_confidence": average_confidence,
             },
             status=status.HTTP_200_OK,
         )
