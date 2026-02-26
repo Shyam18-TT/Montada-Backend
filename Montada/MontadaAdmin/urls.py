@@ -5,6 +5,10 @@ from .views import (
     AdminCreateTraderView,
     AdminDashboardStatsView,
     AdminSignalsStatsView,
+    AdminSignalsListView,
+    AdminSignalStatusesView,
+    AdminSignalAssetsView,
+    AdminSignalTimeframesView,
     WinRateByPeriodView,
     AdminDashboardGraphsView,
     TopAnalystLeaderboardView,
@@ -28,6 +32,9 @@ urlpatterns = [
     path("users/traders/create/", AdminCreateTraderView.as_view(), name="admin_create_trader"),
 
     path("signals/signals-stats/", AdminSignalsStatsView.as_view(), name="admin_signals_stats"),
-
+    path("signals/", AdminSignalsListView.as_view(), name="admin_signals_list"),
+    path("signals/filters/statuses/", AdminSignalStatusesView.as_view(), name="admin_signal_statuses"),
+    path("signals/filters/assets/", AdminSignalAssetsView.as_view(), name="admin_signal_assets"),
+    path("signals/filters/timeframes/", AdminSignalTimeframesView.as_view(), name="admin_signal_timeframes"),
 ]
 

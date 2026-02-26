@@ -32,9 +32,10 @@ except ImportError:
     Subscription = None
 
 try:
-    from Signals.models import AssetClass
+    from Signals.models import AssetClass, Timeframe
 except ImportError:
     AssetClass = None
+    Timeframe = None
 
 try:
     from Followers.models import Follow
@@ -45,6 +46,11 @@ try:
     from Signals.models import AppliedSignal
 except ImportError:
     AppliedSignal = None
+
+try:
+    from Signals.serializers import TradingSignalSerializer
+except ImportError:
+    TradingSignalSerializer = None
 
 from .serializers import (
     AdminAnalystListSerializer,
@@ -778,3 +784,98 @@ class AdminTraderListView(generics.ListAPIView):
             qs = qs.select_related("subscription")
 
         return qs
+
+
+class AdminSignalsListView(generics.ListAPIView):
+    """
+    GET: Paginated list of all signals for admin.
+    Query params: page, page_size (optional, default 10), search, status, asset_class, timeframe.
+    - search: search in instrument symbol/name, analyst note, analyst email/name.
+    - status: OPEN | CLOSED | DRAFT
+    - asset_class: UUID of asset class
+    - timeframe: UUID of timeframe
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+    pagination_class = AdminPageNumberPagination
+    serializer_class = TradingSignalSerializer
+
+    def get_queryset(self):
+        qs = (
+            TradingSignal.active
+            .select_related("analyst", "asset_class", "instrument", "timeframe")
+            .order_by("-created_at")
+        )
+
+        search = (self.request.query_params.get("search") or "").strip()
+        if search:
+            qs = qs.filter(
+                Q(instrument__symbol__icontains=search)
+                | Q(instrument__name__icontains=search)
+                | Q(analyst_note__icontains=search)
+                | Q(analyst__email__icontains=search)
+                | Q(analyst__name__icontains=search)
+            )
+
+        status_param = (self.request.query_params.get("status") or "").strip().upper()
+        if status_param in ("OPEN", "CLOSED", "DRAFT"):
+            qs = qs.filter(status=status_param)
+
+        asset_param = self.request.query_params.get("asset_class") or self.request.query_params.get("asset")
+        if asset_param:
+            qs = qs.filter(asset_class_id=asset_param)
+
+        timeframe_param = self.request.query_params.get("timeframe")
+        if timeframe_param:
+            qs = qs.filter(timeframe_id=timeframe_param)
+
+        return qs
+
+
+class AdminSignalStatusesView(APIView):
+    """
+    GET: List of signal status choices for filter dropdowns.
+    Returns: [{ "value": "OPEN", "label": "Open" }, ...]
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request):
+        if TradingSignal is None:
+            return Response({"statuses": []}, status=status.HTTP_200_OK)
+        statuses = [
+            {"value": choice[0], "label": choice[1]}
+            for choice in TradingSignal.Status.choices
+        ]
+        return Response({"statuses": statuses}, status=status.HTTP_200_OK)
+
+
+class AdminSignalAssetsView(APIView):
+    """
+    GET: List of all asset classes for filter dropdowns.
+    Returns: [{ "id": "<uuid>", "name": "..." }, ...]
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request):
+        if AssetClass is None:
+            return Response({"assets": []}, status=status.HTTP_200_OK)
+        qs = AssetClass.objects.all().order_by("name")
+        assets = [{"id": str(a.id), "name": a.name} for a in qs]
+        return Response({"assets": assets}, status=status.HTTP_200_OK)
+
+
+class AdminSignalTimeframesView(APIView):
+    """
+    GET: List of all timeframes for filter dropdowns.
+    Returns: [{ "id": "<uuid>", "code": "...", "name": "..." }, ...]
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request):
+        if Timeframe is None:
+            return Response({"timeframes": []}, status=status.HTTP_200_OK)
+        qs = Timeframe.objects.all().order_by("code")
+        timeframes = [
+            {"id": str(t.id), "code": t.code, "name": t.name}
+            for t in qs
+        ]
+        return Response({"timeframes": timeframes}, status=status.HTTP_200_OK)
