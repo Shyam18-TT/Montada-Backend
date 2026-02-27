@@ -3,6 +3,8 @@ from .views import (
     AdminLoginView,
     AdminCreateAnalystView,
     AdminCreateTraderView,
+    AdminChangeUserPasswordView,
+    AdminSuspendUserView,
     AdminDashboardStatsView,
     AdminSignalsStatsView,
     AdminSignalsListView,
@@ -33,6 +35,8 @@ urlpatterns = [
     path("users/analysts/create/", AdminCreateAnalystView.as_view(), name="admin_create_analyst"),
     path("users/traders/", AdminTraderListView.as_view(), name="admin_trader_list"),
     path("users/traders/create/", AdminCreateTraderView.as_view(), name="admin_create_trader"),
+    path("users/change-password/", AdminChangeUserPasswordView.as_view(), name="admin_change_user_password"),
+    path("users/suspend/", AdminSuspendUserView.as_view(), name="admin_suspend_user"),
 
     path("signals/signals-stats/", AdminSignalsStatsView.as_view(), name="admin_signals_stats"),
     path("signals/", AdminSignalsListView.as_view(), name="admin_signals_list"),

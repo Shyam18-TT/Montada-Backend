@@ -13,6 +13,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from django.contrib.auth import authenticate, get_user_model
+from django.shortcuts import get_object_or_404
 
 User = get_user_model()
 
@@ -70,6 +71,8 @@ from .serializers import (
     AdminCreateAnalystSerializer,
     AdminCreateTraderSerializer,
     AdminNewsCategoryCreateSerializer,
+    AdminChangeUserPasswordSerializer,
+    AdminSuspendUserSerializer,
 )
 
 
@@ -114,6 +117,64 @@ class AdminLoginView(APIView):
                     "refresh": str(refresh),
                     "access": str(refresh.access_token),
                 },
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class AdminChangeUserPasswordView(APIView):
+    """
+    POST: Admin sets a new password for a user. Body: user_id (UUID), new_password.
+    Cannot change password of superuser (to avoid locking out admins).
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def post(self, request):
+        serializer = AdminChangeUserPasswordSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        user_id = serializer.validated_data["user_id"]
+        new_password = serializer.validated_data["new_password"]
+        user = get_object_or_404(User, id=user_id)
+        if user.is_superuser:
+            return Response(
+                {"error": "Cannot change password of a superuser account."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        user.set_password(new_password)
+        user.save(update_fields=["password"])
+        return Response(
+            {"message": "Password updated successfully."},
+            status=status.HTTP_200_OK,
+        )
+
+
+class AdminSuspendUserView(APIView):
+    """
+    POST: Admin suspend or unsuspend a user. Body: user_id (UUID), suspend (true/false).
+    Suspended users cannot log in (is_active=False). Cannot suspend superuser.
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def post(self, request):
+        serializer = AdminSuspendUserSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        user_id = serializer.validated_data["user_id"]
+        suspend = serializer.validated_data["suspend"]
+        user = get_object_or_404(User, id=user_id)
+        if user.is_superuser:
+            return Response(
+                {"error": "Cannot suspend a superuser account."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        user.is_active = not suspend
+        user.save(update_fields=["is_active"])
+        return Response(
+            {
+                "message": "User suspended." if suspend else "User activated.",
+                "user_id": str(user.id),
+                "is_active": user.is_active,
             },
             status=status.HTTP_200_OK,
         )

@@ -28,6 +28,23 @@ class AdminLoginSerializer(serializers.Serializer):
         return attrs
 
 
+class AdminChangeUserPasswordSerializer(serializers.Serializer):
+    """Admin sets a new password for a user. Body: user_id (UUID), new_password."""
+    user_id = serializers.UUIDField(required=True)
+    new_password = serializers.CharField(
+        required=True,
+        write_only=True,
+        validators=[validate_password],
+        style={"input_type": "password"},
+    )
+
+
+class AdminSuspendUserSerializer(serializers.Serializer):
+    """Admin suspend or unsuspend a user. Body: user_id (UUID), suspend (boolean)."""
+    user_id = serializers.UUIDField(required=True)
+    suspend = serializers.BooleanField(required=True)
+
+
 class AdminCreateAnalystSerializer(serializers.Serializer):
     """Create analyst from admin; requires email and password."""
     email = serializers.EmailField(required=True)
