@@ -215,3 +215,22 @@ class AdminTraderListSerializer(serializers.ModelSerializer):
 
     def get_registered_at(self, obj):
         return obj.created_at.isoformat() if obj.created_at else None
+
+
+try:
+    from News.models import NewsCategory
+except ImportError:
+    NewsCategory = None
+
+if NewsCategory is not None:
+    class AdminNewsCategoryCreateSerializer(serializers.ModelSerializer):
+        """Create a news category from admin. Name required; slug optional (auto from name)."""
+
+        class Meta:
+            model = NewsCategory
+            fields = ("id", "name", "slug")
+            extra_kwargs = {
+                "slug": {"required": False, "allow_blank": True},
+            }
+else:
+    AdminNewsCategoryCreateSerializer = None

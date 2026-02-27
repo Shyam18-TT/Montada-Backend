@@ -52,12 +52,18 @@ try:
 except ImportError:
     TradingSignalSerializer = None
 
+try:
+    from News.models import NewsCategory
+except ImportError:
+    NewsCategory = None
+
 from .serializers import (
     AdminAnalystListSerializer,
     AdminTraderListSerializer,
     AdminLoginSerializer,
     AdminCreateAnalystSerializer,
     AdminCreateTraderSerializer,
+    AdminNewsCategoryCreateSerializer,
 )
 
 
@@ -879,3 +885,31 @@ class AdminSignalTimeframesView(APIView):
             for t in qs
         ]
         return Response({"timeframes": timeframes}, status=status.HTTP_200_OK)
+
+
+class AdminNewsCategoryCreateView(generics.CreateAPIView):
+    """
+    POST: Create a news category. Admin only.
+    Body: { "name": "Category Name", "slug": "optional-slug" }
+    Slug is optional; if omitted, it is generated from name.
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+    serializer_class = AdminNewsCategoryCreateSerializer
+    queryset = NewsCategory.objects.all() if NewsCategory else []
+
+    def create(self, request, *args, **kwargs):
+        if NewsCategory is None or AdminNewsCategoryCreateSerializer is None:
+            return Response(
+                {"error": "News app is not available."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        return Response(
+            {
+                "message": "News category created successfully.",
+                "category": serializer.data,
+            },
+            status=status.HTTP_201_CREATED,
+        )

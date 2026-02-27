@@ -9,6 +9,7 @@ from .views import (
     AdminSignalStatusesView,
     AdminSignalAssetsView,
     AdminSignalTimeframesView,
+    AdminNewsCategoryCreateView,
     WinRateByPeriodView,
     AdminDashboardGraphsView,
     TopAnalystLeaderboardView,
@@ -36,5 +37,7 @@ urlpatterns = [
     path("signals/filters/statuses/", AdminSignalStatusesView.as_view(), name="admin_signal_statuses"),
     path("signals/filters/assets/", AdminSignalAssetsView.as_view(), name="admin_signal_assets"),
     path("signals/filters/timeframes/", AdminSignalTimeframesView.as_view(), name="admin_signal_timeframes"),
+
+    path("news/categories/create/", AdminNewsCategoryCreateView.as_view(), name="admin_news_category_create"),
 ]
 

@@ -80,3 +80,6 @@ class PollResponse(models.Model):
 
     class Meta:
         unique_together = ("user", "question", "option")
+
+
+
