@@ -53,9 +53,15 @@ except ImportError:
     TradingSignalSerializer = None
 
 try:
-    from News.models import NewsCategory
+    from News.models import NewsCategory, NewsArticle
 except ImportError:
     NewsCategory = None
+    NewsArticle = None
+
+try:
+    from News.serializers import NewsArticleCreateSerializer
+except ImportError:
+    NewsArticleCreateSerializer = None
 
 from .serializers import (
     AdminAnalystListSerializer,
@@ -887,6 +893,28 @@ class AdminSignalTimeframesView(APIView):
         return Response({"timeframes": timeframes}, status=status.HTTP_200_OK)
 
 
+class AdminNewsCategoryListView(generics.ListAPIView):
+    """
+    GET: List all news categories (id, name, slug) for admin. Ordered by name.
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+    serializer_class = AdminNewsCategoryCreateSerializer
+    queryset = NewsCategory.objects.all().order_by("name") if NewsCategory else []
+
+    def get_queryset(self):
+        if NewsCategory is None:
+            return []
+        return NewsCategory.objects.all().order_by("name")
+
+    def list(self, request, *args, **kwargs):
+        if NewsCategory is None or AdminNewsCategoryCreateSerializer is None:
+            return Response(
+                {"error": "News app is not available.", "categories": []},
+                status=status.HTTP_200_OK,
+            )
+        return super().list(request, *args, **kwargs)
+
+
 class AdminNewsCategoryCreateView(generics.CreateAPIView):
     """
     POST: Create a news category. Admin only.
@@ -910,6 +938,37 @@ class AdminNewsCategoryCreateView(generics.CreateAPIView):
             {
                 "message": "News category created successfully.",
                 "category": serializer.data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class AdminNewsArticleCreateView(generics.CreateAPIView):
+    """
+    POST: Create a news article. Admin only. Same fields as analyst create.
+    Sets author to the authenticated admin user.
+    Body: title, content, summary (optional), slug (optional), featured_image, category, tags, status, is_featured.
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+    serializer_class = NewsArticleCreateSerializer
+    queryset = NewsArticle.objects.all() if NewsArticle else []
+
+    def perform_create(self, serializer):
+        serializer.save(author=self.request.user)
+
+    def create(self, request, *args, **kwargs):
+        if NewsArticle is None or NewsArticleCreateSerializer is None:
+            return Response(
+                {"error": "News app is not available."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        return Response(
+            {
+                "message": "News article created successfully.",
+                "article": serializer.data,
             },
             status=status.HTTP_201_CREATED,
         )
