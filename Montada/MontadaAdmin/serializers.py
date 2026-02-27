@@ -45,6 +45,30 @@ class AdminSuspendUserSerializer(serializers.Serializer):
     suspend = serializers.BooleanField(required=True)
 
 
+class AdminUserProfileSerializer(serializers.ModelSerializer):
+    """Read-only user profile for admin view. Includes is_active, is_staff."""
+
+    class Meta:
+        model = User
+        fields = (
+            "id",
+            "username",
+            "email",
+            "name",
+            "phone_number",
+            "profile_picture",
+            "date_of_birth",
+            "user_type",
+            "is_subscribed",
+            "is_verified",
+            "is_active",
+            "is_staff",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = fields
+
+
 class AdminCreateAnalystSerializer(serializers.Serializer):
     """Create analyst from admin; requires email and password."""
     email = serializers.EmailField(required=True)

@@ -73,6 +73,7 @@ from .serializers import (
     AdminNewsCategoryCreateSerializer,
     AdminChangeUserPasswordSerializer,
     AdminSuspendUserSerializer,
+    AdminUserProfileSerializer,
 )
 
 
@@ -178,6 +179,18 @@ class AdminSuspendUserView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class AdminUserProfileView(generics.RetrieveAPIView):
+    """
+    GET: View profile details of a user by id. Admin only.
+    URL: user_id in path (UUID).
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+    serializer_class = AdminUserProfileSerializer
+    queryset = User.objects.all()
+    lookup_url_kwarg = "user_id"
+    lookup_field = "id"
 
 
 class AdminCreateAnalystView(APIView):

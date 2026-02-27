@@ -5,6 +5,7 @@ from .views import (
     AdminCreateTraderView,
     AdminChangeUserPasswordView,
     AdminSuspendUserView,
+    AdminUserProfileView,
     AdminDashboardStatsView,
     AdminSignalsStatsView,
     AdminSignalsListView,
@@ -37,6 +38,7 @@ urlpatterns = [
     path("users/traders/create/", AdminCreateTraderView.as_view(), name="admin_create_trader"),
     path("users/change-password/", AdminChangeUserPasswordView.as_view(), name="admin_change_user_password"),
     path("users/suspend/", AdminSuspendUserView.as_view(), name="admin_suspend_user"),
+    path("users/<uuid:user_id>/", AdminUserProfileView.as_view(), name="admin_user_profile"),
 
     path("signals/signals-stats/", AdminSignalsStatsView.as_view(), name="admin_signals_stats"),
     path("signals/", AdminSignalsListView.as_view(), name="admin_signals_list"),
