@@ -259,9 +259,39 @@ class AdminTraderListSerializer(serializers.ModelSerializer):
 
 
 try:
-    from News.models import NewsCategory
+    from News.models import NewsCategory, NewsArticle
 except ImportError:
     NewsCategory = None
+    NewsArticle = None
+
+if NewsArticle is not None:
+    class AdminNewsArticleListSerializer(serializers.ModelSerializer):
+        """Read-only news article for admin list. Excludes tags and is_featured."""
+
+        category_name = serializers.SerializerMethodField()
+
+        class Meta:
+            model = NewsArticle
+            fields = (
+                "id",
+                "title",
+                "slug",
+                "summary",
+                "content",
+                "featured_image",
+                "category",
+                "category_name",
+                "status",
+                "published_at",
+                "created_at",
+                "updated_at",
+            )
+            read_only_fields = fields
+
+        def get_category_name(self, obj):
+            return obj.category.name if obj.category else None
+else:
+    AdminNewsArticleListSerializer = None
 
 if NewsCategory is not None:
     class AdminNewsCategoryCreateSerializer(serializers.ModelSerializer):

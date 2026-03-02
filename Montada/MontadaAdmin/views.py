@@ -71,6 +71,7 @@ from .serializers import (
     AdminCreateAnalystSerializer,
     AdminCreateTraderSerializer,
     AdminNewsCategoryCreateSerializer,
+    AdminNewsArticleListSerializer,
     AdminChangeUserPasswordSerializer,
     AdminSuspendUserSerializer,
     AdminUserProfileSerializer,
@@ -1017,6 +1018,76 @@ class AdminNewsCategoryCreateView(generics.CreateAPIView):
         )
 
 
+class AdminNewsArticleStatsView(APIView):
+    """
+    GET: News article stats for admin. One response: total_articles, draft_count, published_count (and archived_count).
+    Counts exclude soft-deleted (is_deleted=True).
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request):
+        if NewsArticle is None:
+            return Response(
+                {"error": "News app is not available."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        base = NewsArticle.objects.filter(is_deleted=False)
+        stats = base.aggregate(
+            total=Count("id"),
+            draft_count=Count("id", filter=Q(status="draft")),
+            published_count=Count("id", filter=Q(status="published")),
+            archived_count=Count("id", filter=Q(status="archived")),
+        )
+        return Response(
+            {
+                "total_articles": stats["total"] or 0,
+                "draft_count": stats["draft_count"] or 0,
+                "published_count": stats["published_count"] or 0,
+                "archived_count": stats["archived_count"] or 0,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class AdminNewsArticleListView(generics.ListAPIView):
+    """
+    GET: List news articles for admin. Paginated.
+    Query params: search (title/summary/content), category (UUID of category), page, page_size.
+    Excludes soft-deleted (is_deleted=True). Ordered by created_at desc. Response excludes tags and is_featured.
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+    serializer_class = AdminNewsArticleListSerializer
+    pagination_class = AdminPageNumberPagination
+
+    def get_queryset(self):
+        if NewsArticle is None:
+            return []
+        qs = (
+            NewsArticle.objects.filter(is_deleted=False)
+            .select_related("author", "category")
+            .order_by("-created_at")
+        )
+        search = (self.request.query_params.get("search") or "").strip()
+        if search:
+            qs = qs.filter(
+                Q(title__icontains=search)
+                | Q(summary__icontains=search)
+                | Q(content__icontains=search)
+            )
+        category_id = self.request.query_params.get("category")
+        if category_id:
+            qs = qs.filter(category_id=category_id)
+        return qs
+
+    def list(self, request, *args, **kwargs):
+        if NewsArticle is None or AdminNewsArticleListSerializer is None:
+            return Response(
+                {"error": "News app is not available.", "results": [], "count": 0},
+                status=status.HTTP_200_OK,
+            )
+        return super().list(request, *args, **kwargs)
+
+
 class AdminNewsArticleCreateView(generics.CreateAPIView):
     """
     POST: Create a news article. Admin only. Same fields as analyst create.
@@ -1045,4 +1116,45 @@ class AdminNewsArticleCreateView(generics.CreateAPIView):
                 "article": serializer.data,
             },
             status=status.HTTP_201_CREATED,
+        )
+
+
+class AdminNewsArticleDetailView(generics.RetrieveUpdateAPIView):
+    """
+    GET: Retrieve a single news article by id. Admin only.
+    PUT/PATCH: Update article details. Admin only. Partial update supported (PATCH).
+    URL: news/articles/<id>/
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+    serializer_class = NewsArticleCreateSerializer
+    lookup_url_kwarg = "pk"
+    lookup_field = "pk"
+
+    def get_queryset(self):
+        if NewsArticle is None:
+            return User.objects.none()
+        return NewsArticle.objects.filter(is_deleted=False).select_related("author", "category").prefetch_related("tags")
+
+    def retrieve(self, request, *args, **kwargs):
+        if NewsArticle is None or NewsArticleCreateSerializer is None:
+            return Response(
+                {"error": "News app is not available."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        return super().retrieve(request, *args, **kwargs)
+
+    def update(self, request, *args, **kwargs):
+        if NewsArticle is None or NewsArticleCreateSerializer is None:
+            return Response(
+                {"error": "News app is not available."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        partial = kwargs.get("partial", False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(
+            {"message": "Article updated successfully.", "article": serializer.data},
+            status=status.HTTP_200_OK,
         )
