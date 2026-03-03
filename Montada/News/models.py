@@ -27,6 +27,7 @@ class NewsCategory(models.Model):
 
 
 class Tag(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=100, unique=True)
     slug = models.SlugField(max_length=120, unique=True)
 
@@ -46,6 +47,7 @@ class NewsArticle(models.Model):
         ('published', 'Published'),
         ('archived', 'Archived'),
     )
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
     title = models.CharField(max_length=255)
     slug = models.SlugField(max_length=270, unique=True, blank=True, null=True)

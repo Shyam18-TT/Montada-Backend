@@ -16,7 +16,7 @@ from .serializers import (
     ResetPasswordSerializer,
     EmailVerificationSerializer
 )
-from .models import PasswordResetOTP, EmailVerificationOTP
+from .models import PasswordResetOTP, EmailVerificationOTP, DeviceToken
 
 User = get_user_model()
 
@@ -550,3 +550,30 @@ Montada Team
         return Response({
             'error': 'Failed to send email. Please try again later.'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+
+class SaveFCMToken(APIView):
+    """
+    POST: Save FCM device token for the authenticated user.
+    Body: { "token": "<fcm_token_string>" }
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        token = (request.data.get("token") or "").strip()
+        if not token:
+            return Response(
+                {"error": "Token is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user = request.user
+        DeviceToken.objects.update_or_create(
+            user=user,
+            fcm_token=token,
+        )
+        return Response(
+            {"message": "Token saved"},
+            status=status.HTTP_200_OK,
+        )

@@ -245,3 +245,16 @@ class UserNotification(models.Model):
 
     def __str__(self):
         return f"{self.user} - {self.title}"
+
+
+
+# firebase token model
+
+class DeviceToken(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    fcm_token = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.user.username} - {self.token[:20]}"

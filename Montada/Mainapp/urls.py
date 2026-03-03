@@ -11,7 +11,8 @@ from .views import (
     reset_password_view,
     verify_email_view,
     resend_verification_otp_view,
-    resend_password_reset_otp_view
+    resend_password_reset_otp_view,
+    SaveFCMToken,
 )
 
 app_name = 'Mainapp'
@@ -31,5 +32,7 @@ urlpatterns = [
     path('verify-otp/', verify_otp_view, name='verify_otp'),
     path('reset-password/', reset_password_view, name='reset_password'),
     path('resend-password-reset-otp/', resend_password_reset_otp_view, name='resend_password_reset_otp'),
+
+    path('save-fcm-token/', SaveFCMToken.as_view(), name='save_fcm_token')
 ]
 
