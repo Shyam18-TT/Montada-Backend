@@ -1,6 +1,7 @@
 """
 Admin dashboard views: stats cards with date range and percentage change.
 """
+import uuid
 from calendar import monthrange
 from datetime import timedelta, datetime
 from django.utils import timezone
@@ -1148,6 +1149,200 @@ class AdminPollsListView(APIView):
         if paginated:
             return paginator.get_paginated_response(result)
         return Response({"results": result, "count": len(result)}, status=status.HTTP_200_OK)
+
+
+class AdminPollQuestionDetailView(APIView):
+    """
+    GET: Retrieve a single poll question by id with options and vote counts.
+    PUT/PATCH: Update question (question_text, question_type, order) and options.
+    Body for update: { "question_text": "...", "question_type": "single"|"multiple", "order": 0, "options": [ {"id": "uuid", "option_text": "..."}, {"option_text": "..."} ] }
+    Options with id are updated; options without id are created; options not in the list are deleted.
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get_question_queryset(self):
+        if PollQuestion is None or PollOption is None:
+            return PollQuestion.objects.none() if PollQuestion else []
+        options_with_votes = PollOption.objects.annotate(vote_count=Count("responses"))
+        return PollQuestion.objects.prefetch_related(
+            Prefetch("options", queryset=options_with_votes)
+        )
+
+    def _question_to_data(self, q):
+        opts = list(q.options.all())
+        total_votes_q = sum(getattr(opt, "vote_count", 0) for opt in opts)
+        options_data = [
+            {
+                "id": str(opt.id),
+                "option_text": opt.option_text,
+                "vote_count": getattr(opt, "vote_count", 0),
+                "vote_percentage": round(
+                    (getattr(opt, "vote_count", 0) / total_votes_q) * 100, 2
+                ) if total_votes_q else 0,
+            }
+            for opt in opts
+        ]
+        return {
+            "id": str(q.id),
+            "question_text": q.question_text,
+            "question_type": q.question_type,
+            "order": q.order,
+            "options": options_data,
+            "total_votes": total_votes_q,
+        }
+
+    def get(self, request, pk):
+        if PollQuestion is None or PollOption is None:
+            return Response(
+                {"error": "Dashboard/Poll app is not available."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        qs = self.get_question_queryset()
+        question = get_object_or_404(qs, pk=pk)
+        return Response(self._question_to_data(question), status=status.HTTP_200_OK)
+
+    def put(self, request, pk):
+        return self._update(request, pk, partial=False)
+
+    def patch(self, request, pk):
+        return self._update(request, pk, partial=True)
+
+    def _update(self, request, pk, partial):
+        if PollQuestion is None or PollOption is None:
+            return Response(
+                {"error": "Dashboard/Poll app is not available."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        question = get_object_or_404(PollQuestion, pk=pk)
+        data = request.data
+
+        if "question_text" in data:
+            question.question_text = data["question_text"]
+        if "question_type" in data:
+            qtype = data["question_type"]
+            if qtype not in ("single", "multiple"):
+                return Response(
+                    {"error": "question_type must be 'single' or 'multiple'."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            question.question_type = qtype
+        if "order" in data:
+            try:
+                question.order = int(data["order"])
+            except (TypeError, ValueError):
+                return Response(
+                    {"error": "order must be an integer."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        question.save()
+
+        if "options" in data:
+            options_payload = data["options"]
+            if not isinstance(options_payload, list):
+                return Response(
+                    {"error": "options must be a list."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            seen_ids = set()
+            for item in options_payload:
+                if not isinstance(item, dict):
+                    continue
+                opt_text = (item.get("option_text") or "").strip()
+                if not opt_text:
+                    continue
+                opt_id = item.get("id")
+                if opt_id:
+                    try:
+                        o_uuid = uuid.UUID(str(opt_id)) if isinstance(opt_id, str) else opt_id
+                    except (ValueError, TypeError):
+                        continue
+                    if PollOption.objects.filter(question=question, id=o_uuid).exists():
+                        PollOption.objects.filter(id=o_uuid).update(option_text=opt_text)
+                        seen_ids.add(o_uuid)
+                else:
+                    new_opt = PollOption.objects.create(question=question, option_text=opt_text)
+                    seen_ids.add(new_opt.id)
+            question.options.exclude(id__in=seen_ids).delete()
+
+        qs = self.get_question_queryset()
+        question = qs.get(pk=question.pk)
+        return Response(
+            {"message": "Poll question updated.", "question": self._question_to_data(question)},
+            status=status.HTTP_200_OK,
+        )
+
+
+class AdminPollOptionAddView(APIView):
+    """
+    POST: Add one or more options to a poll question.
+    URL: polls/<question_pk>/options/
+    Body (single): { "option_text": "New option" }
+    Body (multiple): { "options": [ {"option_text": "Option A"}, {"option_text": "Option B"} ] }
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def post(self, request, question_pk):
+        if PollQuestion is None or PollOption is None:
+            return Response(
+                {"error": "Dashboard/Poll app is not available."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        question = get_object_or_404(PollQuestion, pk=question_pk)
+        data = request.data
+
+        to_create = []
+        if "options" in data and isinstance(data["options"], list):
+            for item in data["options"]:
+                if isinstance(item, dict):
+                    opt_text = (item.get("option_text") or "").strip()
+                    if opt_text:
+                        to_create.append(opt_text)
+                elif isinstance(item, str) and item.strip():
+                    to_create.append(item.strip())
+        elif "option_text" in data:
+            opt_text = (data.get("option_text") or "").strip()
+            if opt_text:
+                to_create.append(opt_text)
+
+        if not to_create:
+            return Response(
+                {"error": "Provide 'option_text' or 'options' (list of { option_text } or strings)."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        created = []
+        for opt_text in to_create:
+            opt = PollOption.objects.create(question=question, option_text=opt_text)
+            created.append({"id": str(opt.id), "option_text": opt.option_text})
+
+        return Response(
+            {"message": f"Added {len(created)} option(s).", "options": created},
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class AdminPollOptionDeleteView(APIView):
+    """
+    DELETE: Remove an option from a poll question.
+    URL: polls/<question_pk>/options/<option_pk>/
+    Option must belong to the question. Responses for this option are deleted (CASCADE).
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def delete(self, request, question_pk, option_pk):
+        if PollQuestion is None or PollOption is None:
+            return Response(
+                {"error": "Dashboard/Poll app is not available."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        get_object_or_404(PollQuestion, pk=question_pk)
+        option = get_object_or_404(PollOption, pk=option_pk, question_id=question_pk)
+        option.delete()
+        return Response(
+            {"message": "Option deleted."},
+            status=status.HTTP_200_OK,
+        )
 
 
 class AdminNewsArticleListView(generics.ListAPIView):
