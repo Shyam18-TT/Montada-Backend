@@ -51,9 +51,9 @@ class NewsArticleListPagination(PageNumberPagination):
 class NewsArticleListView(generics.ListAPIView):
     """
     GET: List news articles. Paginated.
-    - Trader: only active (published) articles.
-    - Analyst: all non-deleted articles (own + others); optional ?status=draft|published|archived to filter.
-    Query params: search, category (UUID), status (analyst only: draft|published|archived), page, page_size.
+    - Trader: only published articles.
+    - Analyst: only articles created by himself; optional ?status=draft|published|archived to filter.
+    Query params: search, category (UUID), status (analyst only), page, page_size.
     """
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = NewsArticleListSerializer
@@ -66,7 +66,8 @@ class NewsArticleListView(generics.ListAPIView):
         if user_type == "trader":
             qs = qs.filter(status="published")
         else:
-            # Analyst: all non-deleted; optional status filter
+            # Analyst: only articles created by himself; optional status filter
+            qs = qs.filter(author=self.request.user)
             status_param = (self.request.query_params.get("status") or "").strip().lower()
             if status_param in ("draft", "published", "archived"):
                 qs = qs.filter(status=status_param)
@@ -82,6 +83,35 @@ class NewsArticleListView(generics.ListAPIView):
         if category_id:
             qs = qs.filter(category_id=category_id)
         return qs
+
+
+class AnalystNewsArticleDetailView(generics.RetrieveUpdateAPIView):
+    """
+    GET: Retrieve a news article. PUT/PATCH: Update the article.
+    Only the analyst who created the article (author) can retrieve or update it.
+    """
+    permission_classes = [permissions.IsAuthenticated, IsAnalystPermission]
+    serializer_class = NewsArticleCreateSerializer
+    lookup_url_kwarg = "pk"
+    lookup_field = "pk"
+
+    def get_queryset(self):
+        return (
+            NewsArticle.objects.filter(is_deleted=False, author=self.request.user)
+            .select_related("author", "category")
+            .prefetch_related("tags")
+        )
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop("partial", False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(
+            {"message": "Article updated successfully.", "article": serializer.data},
+            status=status.HTTP_200_OK,
+        )
 
 
 class NewsCategoryListView(generics.ListAPIView):
