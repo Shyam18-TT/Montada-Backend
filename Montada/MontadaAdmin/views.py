@@ -4,7 +4,7 @@ Admin dashboard views: stats cards with date range and percentage change.
 from calendar import monthrange
 from datetime import timedelta, datetime
 from django.utils import timezone
-from django.db.models import Avg, Count, Q, OuterRef, Subquery
+from django.db.models import Avg, Count, Q, OuterRef, Subquery, Prefetch
 from django.db.models.functions import Coalesce
 from rest_framework import status, generics
 from rest_framework.pagination import PageNumberPagination
@@ -63,6 +63,13 @@ try:
     from News.serializers import NewsArticleCreateSerializer
 except ImportError:
     NewsArticleCreateSerializer = None
+
+try:
+    from Dashboard.models import PollQuestion, PollOption, PollResponse
+except ImportError:
+    PollQuestion = None
+    PollOption = None
+    PollResponse = None
 
 from .serializers import (
     AdminAnalystListSerializer,
@@ -1047,6 +1054,100 @@ class AdminNewsArticleStatsView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class AdminPollStatsView(APIView):
+    """
+    GET: Poll stats for admin. One response: total_polls, active_polls, closed_polls_count, total_votes.
+    With standalone questions: total_polls = question count, active_polls = same, closed_polls_count = 0.
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request):
+        if PollQuestion is None or PollResponse is None:
+            return Response(
+                {"error": "Dashboard/Poll app is not available."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        total_polls = PollQuestion.objects.count()
+        active_polls = total_polls
+        closed_polls_count = 0
+        total_votes = PollResponse.objects.count()
+        return Response(
+            {
+                "total_polls": total_polls,
+                "active_polls": active_polls,
+                "closed_polls_count": closed_polls_count,
+                "total_votes": total_votes,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class AdminPollsListView(APIView):
+    """
+    GET: List poll questions for admin. Each result is a question with its options and vote counts.
+    Query params: search, status (all|active|closed), page, page_size.
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get_queryset(self):
+        if PollQuestion is None or PollOption is None:
+            return PollQuestion.objects.none() if PollQuestion else []
+        options_with_votes = PollOption.objects.annotate(vote_count=Count("responses"))
+        qs = (
+            PollQuestion.objects.all()
+            .order_by("order")
+            .prefetch_related(Prefetch("options", queryset=options_with_votes))
+        )
+        search = (self.request.query_params.get("search") or "").strip()
+        if search:
+            qs = qs.filter(Q(question_text__icontains=search))
+        status_param = (self.request.query_params.get("status") or "all").strip().lower()
+        if status_param == "closed":
+            qs = qs.none()
+        return qs
+
+    def get(self, request):
+        if PollQuestion is None or PollOption is None:
+            return Response(
+                {"error": "Dashboard/Poll app is not available.", "results": [], "count": 0},
+                status=status.HTTP_200_OK,
+            )
+        qs = self.get_queryset()
+        paginator = AdminPageNumberPagination()
+        page = paginator.paginate_queryset(qs, request)
+        if page is None:
+            page = list(qs)
+            paginated = False
+        else:
+            paginated = True
+        result = []
+        for q in page:
+            opts = list(q.options.all())
+            total_votes_q = sum(getattr(opt, "vote_count", 0) for opt in opts)
+            options_data = [
+                {
+                    "id": str(opt.id),
+                    "option_text": opt.option_text,
+                    "vote_count": getattr(opt, "vote_count", 0),
+                    "vote_percentage": round(
+                        (getattr(opt, "vote_count", 0) / total_votes_q) * 100, 2
+                    ) if total_votes_q else 0,
+                }
+                for opt in opts
+            ]
+            result.append({
+                "id": str(q.id),
+                "question_text": q.question_text,
+                "question_type": q.question_type,
+                "order": q.order,
+                "options": options_data,
+                "total_votes": total_votes_q,
+            })
+        if paginated:
+            return paginator.get_paginated_response(result)
+        return Response({"results": result, "count": len(result)}, status=status.HTTP_200_OK)
 
 
 class AdminNewsArticleListView(generics.ListAPIView):

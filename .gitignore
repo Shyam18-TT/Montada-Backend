@@ -20,3 +20,4 @@ Montada/Montada/settings.py
 Montada/media/*
 
 Montada/credentials/*
+Montada/credentials/*.json

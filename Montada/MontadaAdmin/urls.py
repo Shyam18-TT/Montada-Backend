@@ -18,6 +18,8 @@ from .views import (
     AdminNewsArticleListView,
     AdminNewsArticleCreateView,
     AdminNewsArticleDetailView,
+    AdminPollStatsView,
+    AdminPollsListView,
     WinRateByPeriodView,
     AdminDashboardGraphsView,
     TopAnalystLeaderboardView,
@@ -55,5 +57,8 @@ urlpatterns = [
     path("news/articles/", AdminNewsArticleListView.as_view(), name="admin_news_article_list"),
     path("news/articles/create/", AdminNewsArticleCreateView.as_view(), name="admin_news_article_create"),
     path("news/articles/<uuid:pk>/", AdminNewsArticleDetailView.as_view(), name="admin_news_article_detail"),
+
+    path("polls/stats/", AdminPollStatsView.as_view(), name="admin_poll_stats"),
+    path("polls/", AdminPollsListView.as_view(), name="admin_polls_list"),
 ]
 
