@@ -1,6 +1,7 @@
 """
 Serializers for admin list views (analysts, traders), admin login, and admin create user.
 """
+from django.conf import settings
 from rest_framework import serializers
 from django.contrib.auth import authenticate, get_user_model
 from django.contrib.auth.password_validation import validate_password
@@ -264,6 +265,19 @@ except ImportError:
     NewsCategory = None
     NewsArticle = None
 
+def _build_media_url(value):
+    """Return full URL for a media file using PUBLIC_MEDIA_BASE_URL."""
+    if not value:
+        return None
+    url = value.url if hasattr(value, "url") else str(value)
+    if not url:
+        return None
+    if url.startswith("http://") or url.startswith("https://"):
+        return url
+    base = getattr(settings, "PUBLIC_MEDIA_BASE_URL", "").rstrip("/")
+    return f"{base}{url}" if base else url
+
+
 if NewsArticle is not None:
     class AdminNewsArticleListSerializer(serializers.ModelSerializer):
         """Read-only news article for admin list. Excludes tags and is_featured."""
@@ -290,6 +304,12 @@ if NewsArticle is not None:
 
         def get_category_name(self, obj):
             return obj.category.name if obj.category else None
+
+        def to_representation(self, instance):
+            data = super().to_representation(instance)
+            if data.get("featured_image") and instance.featured_image:
+                data["featured_image"] = _build_media_url(instance.featured_image)
+            return data
 else:
     AdminNewsArticleListSerializer = None
 

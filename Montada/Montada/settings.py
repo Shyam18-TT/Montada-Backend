@@ -232,6 +232,8 @@ SIMPLE_JWT = {
 # Media files configuration
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
+# Base URL for absolute media URLs in API responses (e.g. article featured_image)
+PUBLIC_MEDIA_BASE_URL = 'https://uat.themontada.com'
 
 # Email configuration
 # Configure these settings with your email provider credentials
