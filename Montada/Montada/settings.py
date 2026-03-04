@@ -150,9 +150,9 @@ DATABASES = {
         'PASSWORD': 'Trust_2021',
         'HOST': '213.175.205.19',
         'PORT': '1433',
-         'OPTIONS': {
-            'driver': 'ODBC Driver 18 for SQL Server',
-        },
+        #  'OPTIONS': {
+        #     'driver': 'ODBC Driver 17 for SQL Server',
+        # },
     },
 }
 
