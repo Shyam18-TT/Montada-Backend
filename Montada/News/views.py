@@ -1,8 +1,10 @@
+from django.db.models import Q
 from rest_framework import status, generics, permissions
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 
 from .models import NewsArticle, NewsCategory
-from .serializers import NewsArticleCreateSerializer, NewsCategorySerializer
+from .serializers import NewsArticleCreateSerializer, NewsArticleListSerializer, NewsCategorySerializer
 
 try:
     from Signals.views import IsAnalystPermission
@@ -38,6 +40,48 @@ class AnalystNewsArticleCreateView(generics.CreateAPIView):
             },
             status=status.HTTP_201_CREATED,
         )
+
+
+class NewsArticleListPagination(PageNumberPagination):
+    page_size = 10
+    page_size_query_param = "page_size"
+    max_page_size = 100
+
+
+class NewsArticleListView(generics.ListAPIView):
+    """
+    GET: List news articles. Paginated.
+    - Trader: only active (published) articles.
+    - Analyst: all non-deleted articles (own + others); optional ?status=draft|published|archived to filter.
+    Query params: search, category (UUID), status (analyst only: draft|published|archived), page, page_size.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = NewsArticleListSerializer
+    pagination_class = NewsArticleListPagination
+
+    def get_queryset(self):
+        user_type = getattr(self.request.user, "user_type", "trader")
+        qs = NewsArticle.objects.filter(is_deleted=False).select_related("author", "category").order_by("-created_at")
+
+        if user_type == "trader":
+            qs = qs.filter(status="published")
+        else:
+            # Analyst: all non-deleted; optional status filter
+            status_param = (self.request.query_params.get("status") or "").strip().lower()
+            if status_param in ("draft", "published", "archived"):
+                qs = qs.filter(status=status_param)
+
+        search = (self.request.query_params.get("search") or "").strip()
+        if search:
+            qs = qs.filter(
+                Q(title__icontains=search)
+                | Q(summary__icontains=search)
+                | Q(content__icontains=search)
+            )
+        category_id = self.request.query_params.get("category")
+        if category_id:
+            qs = qs.filter(category_id=category_id)
+        return qs
 
 
 class NewsCategoryListView(generics.ListAPIView):

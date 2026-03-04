@@ -22,6 +22,39 @@ class NewsCategorySerializer(serializers.ModelSerializer):
         fields = ("id", "name", "slug")
 
 
+class NewsArticleListSerializer(serializers.ModelSerializer):
+    """Read-only news article for list API. Includes category_name and full featured_image URL."""
+
+    category_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = NewsArticle
+        fields = (
+            "id",
+            "title",
+            "slug",
+            "summary",
+            "content",
+            "featured_image",
+            "category",
+            "category_name",
+            "status",
+            "published_at",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = fields
+
+    def get_category_name(self, obj):
+        return obj.category.name if obj.category else None
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if data.get("featured_image") and instance.featured_image:
+            data["featured_image"] = _build_media_url(instance.featured_image)
+        return data
+
+
 class NewsArticleCreateSerializer(serializers.ModelSerializer):
     """Serializer for analyst to create a news article."""
 
