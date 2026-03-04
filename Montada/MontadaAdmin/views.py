@@ -1060,7 +1060,7 @@ class AdminNewsArticleStatsView(APIView):
 class AdminPollStatsView(APIView):
     """
     GET: Poll stats for admin. One response: total_polls, active_polls, closed_polls_count, total_votes.
-    With standalone questions: total_polls = question count, active_polls = same, closed_polls_count = 0.
+    active_polls = questions with is_active=True, closed_polls_count = is_active=False.
     """
     permission_classes = [IsAuthenticated, IsAdminUser]
 
@@ -1071,8 +1071,8 @@ class AdminPollStatsView(APIView):
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
         total_polls = PollQuestion.objects.count()
-        active_polls = total_polls
-        closed_polls_count = 0
+        active_polls = PollQuestion.objects.filter(is_active=True).count()
+        closed_polls_count = PollQuestion.objects.filter(is_active=False).count()
         total_votes = PollResponse.objects.count()
         return Response(
             {
@@ -1105,8 +1105,10 @@ class AdminPollsListView(APIView):
         if search:
             qs = qs.filter(Q(question_text__icontains=search))
         status_param = (self.request.query_params.get("status") or "all").strip().lower()
-        if status_param == "closed":
-            qs = qs.none()
+        if status_param == "active":
+            qs = qs.filter(is_active=True)
+        elif status_param == "closed":
+            qs = qs.filter(is_active=False)
         return qs
 
     def get(self, request):
@@ -1143,6 +1145,7 @@ class AdminPollsListView(APIView):
                 "question_text": q.question_text,
                 "question_type": q.question_type,
                 "order": q.order,
+                "is_active": getattr(q, "is_active", True),
                 "options": options_data,
                 "total_votes": total_votes_q,
             })
@@ -1187,6 +1190,7 @@ class AdminPollQuestionDetailView(APIView):
             "question_text": q.question_text,
             "question_type": q.question_type,
             "order": q.order,
+            "is_active": getattr(q, "is_active", True),
             "options": options_data,
             "total_votes": total_votes_q,
         }
@@ -1341,6 +1345,35 @@ class AdminPollOptionDeleteView(APIView):
         option.delete()
         return Response(
             {"message": "Option deleted."},
+            status=status.HTTP_200_OK,
+        )
+
+
+class AdminPollQuestionCloseView(APIView):
+    """
+    POST: Close or reopen a poll question.
+    URL: polls/<pk>/close/
+    Body (optional): { "reopen": true } to reopen; otherwise closes the poll (is_active=False).
+    Closed polls are excluded from active list and reject new votes.
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def post(self, request, pk):
+        if PollQuestion is None:
+            return Response(
+                {"error": "Dashboard/Poll app is not available."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        question = get_object_or_404(PollQuestion, pk=pk)
+        reopen = request.data.get("reopen") is True
+        question.is_active = reopen
+        question.save(update_fields=["is_active"])
+        return Response(
+            {
+                "message": "Poll reopened." if reopen else "Poll closed.",
+                "id": str(question.id),
+                "is_active": question.is_active,
+            },
             status=status.HTTP_200_OK,
         )
 

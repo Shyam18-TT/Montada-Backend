@@ -24,6 +24,8 @@ class PollQuestion(models.Model):
 
     order = models.PositiveIntegerField(default=0)
 
+    is_active = models.BooleanField(default=True, help_text="If False, poll is closed and no new votes accepted.")
+
     def __str__(self):
         return self.question_text
 

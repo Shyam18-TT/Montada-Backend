@@ -285,7 +285,8 @@ class ActivePollsListView(APIView):
 
         options_with_votes = PollOption.objects.annotate(vote_count=Count('responses'))
         questions_qs = (
-            PollQuestion.objects.order_by('order')
+            PollQuestion.objects.filter(is_active=True)
+            .order_by('order')
             .prefetch_related(Prefetch('options', queryset=options_with_votes))
         )
 
@@ -366,6 +367,12 @@ class PollVoteView(APIView):
             return Response(
                 {'error': 'Question not found.'},
                 status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if not getattr(question, 'is_active', True):
+            return Response(
+                {'error': 'This poll is closed.'},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         if PollResponse.objects.filter(question=question, user=request.user).exists():
