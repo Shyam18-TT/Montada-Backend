@@ -2,6 +2,7 @@ import uuid
 from datetime import timedelta
 from calendar import monthrange
 
+from django.db import connections
 from django.db.models import Avg, Count, Q
 from django.utils import timezone
 from rest_framework import status, generics
@@ -425,3 +426,112 @@ class PollVoteView(APIView):
             {'message': 'Vote recorded successfully.'},
             status=status.HTTP_201_CREATED,
         )
+
+
+
+
+# Market data symbols by category (used with ?category=forex|shares|metals|indices|commodity|energy|menashares)
+MARKET_DATA_SYMBOLS_BY_CATEGORY = {
+    'forex': [
+        'EURUSD', 'GBPUSD', 'USDJPY', 'USDCHF', 'USDCAD', 'AUDUSD', 'NZDUSD', 'EURAUD', 'EURCAD', 'EURCHF',
+        'EURGBP', 'EURJPY', 'EURNZD', 'GBPAUD', 'GBPCAD', 'GBPCHF', 'GBPJPY', 'AUDCAD', 'AUDCHF', 'AUDNZD',
+        'NZDCAD', 'NZDCHF', 'CADCHF', 'CADJPY', 'CHFJPY', 'AUDNOK', 'AUDSEK', 'AUDSGD', 'CADSGD', 'CHFNOK',
+        'CHFSGD', 'EURCZK', 'EURHUF', 'EURNOK', 'EURPLN', 'EURSEK', 'EURSGD', 'EURTRY', 'EURZAR', 'GBPHUF',
+        'GBPMXN', 'GBPNOK', 'GBPPLN', 'GBPSEK', 'GBPSGD', 'NOKJPY', 'NOKSEK', 'SGDJPY', 'TRYJPY', 'USDCNH',
+        'USDCZK', 'USDHKD', 'USDHUF', 'USDMXN', 'USDNOK', 'USDPLN', 'USDRON', 'USDSEK', 'USDSGD', 'USDTHB',
+        'USDTRY', 'USDZAR', 'ZARJPY',
+    ],
+    'shares': [
+        'AAL', 'AAPL', 'ABNB', 'ADBE', 'AIG', 'AMZN', 'AXP', 'BA', 'BABA', 'BAC', 'BK', 'BKNG', 'BMRN', 'BMY',
+        'CAT', 'CME', 'COST', 'CSCO', 'DAL', 'DELL', 'DIS', 'EBAY', 'FDX', 'GE', 'GM', 'GOOG', 'GOOGL', 'GPRO',
+        'GS', 'GT', 'HD', 'HLT', 'HOG', 'HPQ', 'IBM', 'INTC', 'JNJ', 'JPM', 'KMI', 'KO', 'MA', 'MCD', 'MCO',
+        'MMM', 'MO', 'MRK', 'MRVL', 'MS', 'MSFT', 'NFLX', 'NKE', 'NVDA', 'ORCL', 'PEP', 'PFE', 'PM', 'PYPL',
+        'QCOM', 'RACE', 'ROKU', 'SBUX', 'SHOP', 'SONY', 'SPOT', 'SQ', 'TMUS', 'TSLA', 'UA', 'UAL', 'UBER', 'UPS',
+        'VALE', 'VZ', 'WFC', 'WMT', 'XOM', 'YUM', 'ZM', 'ADSGn', 'AIRF', 'ALVG', 'BAYGn', 'BMWG', 'BNPP', 'CBKG',
+        'DAIGn', 'DANO', 'DBKGn', 'DPWGn', 'EONGn', 'IBE', 'LHAG', 'LVMH', 'MAP', 'SAN', 'SIEGn', 'SOGN', 'TEF',
+        'TOTF', 'VOWG',
+    ],
+    'metals': ['GOLD', 'SILVER', 'XAUEUR', 'PLATINUM', 'PALLADIUM', 'COPPER'],
+    'indices': [
+        'US30', 'US100', 'US500', 'US2000', 'GER40', 'FRA40', 'NETH25', 'SPA35', 'EU50', 'SWI20', 'UK100',
+        'JAP225', 'AUS200', 'HKIND', 'CHINAAS', 'USDIDX', 'DOW', 'NASDAQ', 'S&P', 'DAX', 'CAC', 'FTSE', 'AUS',
+    ],
+    'commodity': ['SOYBEAN', 'COCOA', 'COFFEE'],
+    'energy': ['CL', 'USOIL', 'BRENT', 'UKOIL', 'NATGAS'],
+    'menashares': [
+        'CBD', 'DEWA', 'DIB', 'DU', 'Emaar.Devel', 'Emaar.Propt', 'GULFNAV', 'NBD.Bank', 'Parkin', 'Salik',
+        'Taaleem', 'Tecom.Group', 'AD.Aviation', 'AD.Insuranc', 'AD.Natl.Tak', 'AD.Ship', 'ADCB', 'ADIB',
+        'ADNOC.Drill', 'ADNOC.Gas', 'ADNOC.Logis', 'Agthia.Grp', 'Alpha.Dhabi', 'Apex', 'Chimera', 'FAB.Bank',
+        'Ghitha.Hold', 'IHC', 'Modon', 'NMDC', 'Palms.Sport', 'Pure.Health', 'RAK.Bank', 'RPH',
+    ],
+}
+
+
+def _serialize_value(val):
+    """Convert DB values to JSON-serializable types (e.g. Decimal, datetime)."""
+    from decimal import Decimal
+    from datetime import date, datetime, time
+    if val is None:
+        return None
+    if isinstance(val, Decimal):
+        return float(val)
+    if isinstance(val, (datetime, date, time)):
+        return val.isoformat()
+    if hasattr(val, '__iter__') and not isinstance(val, (str, bytes)):
+        try:
+            return [_serialize_value(v) for v in val]
+        except Exception:
+            pass
+    return val
+
+
+class GetMarketDataFromMT5(APIView):
+    """
+    Returns mt5_prices data from mt5clients DB as JSON, filtered by category.
+    Query param: category = forex | shares | metals | indices | commodity | energy | menashares
+    Example: GET /marketdata/live?category=forex
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        category = (request.query_params.get('category') or '').strip().lower()
+        if not category:
+            return Response(
+                {
+                    'error': 'Missing category.',
+                    'valid_categories': list(MARKET_DATA_SYMBOLS_BY_CATEGORY.keys()),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if category not in MARKET_DATA_SYMBOLS_BY_CATEGORY:
+            return Response(
+                {
+                    'error': f'Invalid category: {category}.',
+                    'valid_categories': list(MARKET_DATA_SYMBOLS_BY_CATEGORY.keys()),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        symbols = MARKET_DATA_SYMBOLS_BY_CATEGORY[category]
+        if not symbols:
+            return Response({'data': [], 'count': 0, 'category': category}, status=status.HTTP_200_OK)
+        placeholders = ','.join(['%s'] * len(symbols))
+        sql = "SELECT * FROM mt5_prices WHERE symbol IN (%s)" % placeholders
+        try:
+            with connections['mt5clients'].cursor() as cursor:
+                cursor.execute(sql, symbols)
+                columns = [col[0] for col in cursor.description]
+                rows = cursor.fetchall()
+        except Exception as e:
+            return Response(
+                {'error': 'Failed to fetch market data.', 'detail': str(e)},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        data = []
+        for row in rows:
+            row_dict = dict(zip(columns, row))
+            data.append({k: _serialize_value(v) for k, v in row_dict.items()})
+        return Response(
+            {'data': data, 'count': len(data), 'category': category},
+            status=status.HTTP_200_OK,
+        )
+

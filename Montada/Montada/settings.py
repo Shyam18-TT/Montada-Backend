@@ -142,6 +142,18 @@ DATABASES = {
         },
        
     },
+
+    'mt5clients': {
+        'ENGINE': 'mssql',
+        'NAME': 'METATRADER5',
+        'USER': 'tinstcrm',
+        'PASSWORD': 'Trust_2021',
+        'HOST': '213.175.205.19',
+        'PORT': '1433',
+         'OPTIONS': {
+            'driver': 'ODBC Driver 17 for SQL Server',
+        },
+    },
 }
 
 CSRF_TRUSTED_ORIGINS = [
