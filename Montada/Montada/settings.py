@@ -88,6 +88,7 @@ CORS_ALLOWED_ORIGINS_REGEX = r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
 # Required if frontend sends cookies or Authorization header
 CORS_ALLOW_CREDENTIALS = True
 # Allow common headers and methods
+
 CORS_ALLOW_HEADERS = [
     "accept",
     "accept-encoding",
@@ -163,6 +164,7 @@ DATABASES = {
 CSRF_TRUSTED_ORIGINS = [
     "https://uat.themontada.com",
     "https://www.uat.themontada.com",
+    "http://localhost:8080",
 ]
 
 CSRF_COOKIE_SECURE = True
