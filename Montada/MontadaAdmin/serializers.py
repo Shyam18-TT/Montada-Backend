@@ -325,3 +325,19 @@ if NewsCategory is not None:
             }
 else:
     AdminNewsCategoryCreateSerializer = None
+
+try:
+    from Signals.serializers import TradingSignalSerializer
+
+    class AdminCreateSignalSerializer(TradingSignalSerializer):
+        """Create signal from admin. Analyst (created_by) is required and selectable from frontend."""
+
+        analyst = serializers.PrimaryKeyRelatedField(
+            queryset=User.objects.filter(user_type="analyst"),
+            required=True,
+        )
+
+        class Meta(TradingSignalSerializer.Meta):
+            read_only_fields = ("id", "created_at", "updated_at")
+except ImportError:
+    AdminCreateSignalSerializer = None

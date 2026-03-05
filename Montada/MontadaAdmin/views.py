@@ -81,6 +81,7 @@ from .serializers import (
     AdminLoginSerializer,
     AdminCreateAnalystSerializer,
     AdminCreateTraderSerializer,
+    AdminCreateSignalSerializer,
     AdminNewsCategoryCreateSerializer,
     AdminNewsArticleListSerializer,
     AdminChangeUserPasswordSerializer,
@@ -984,6 +985,33 @@ class AdminSignalTimeframesView(APIView):
             for t in qs
         ]
         return Response({"timeframes": timeframes}, status=status.HTTP_200_OK)
+
+
+class AdminCreateSignalView(generics.CreateAPIView):
+    """
+    POST: Create a trading signal from admin. Analyst (created_by) is sent in the body.
+    Body: analyst (UUID of analyst user), asset_class, instrument, direction, entry_price,
+    stop_loss, take_profit, timeframe, confidence_level, analyst_note (optional), status (optional).
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+    serializer_class = AdminCreateSignalSerializer
+
+    def create(self, request, *args, **kwargs):
+        if TradingSignal is None or AdminCreateSignalSerializer is None:
+            return Response(
+                {"error": "Signals app is not available."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(
+            {
+                "message": "Signal created successfully.",
+                "signal": serializer.data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class AdminNewsCategoryListView(generics.ListAPIView):
