@@ -395,12 +395,12 @@ class WinRateByPeriodView(APIView):
 
 class AdminDashboardStatsView(APIView):
     """
-    GET: Stats for admin dashboard with date range and increase percentage.
-    Query params:
-      - range: today | last_7_days | last_30_days (default) | custom
-      - from_date, to_date: required when range=custom (YYYY-MM-DD)
-    Returns total analysts, total traders, active signals, closed signals, win rate,
-    each with current value and increase_pct vs previous period of same length.
+    GET: Stats for admin dashboard.
+    - total_traders and total_analysts are all-time counts (no date filter).
+    - Date range (range / from_date / to_date) is used only for increase_pct:
+      total_traders_increase_pct and total_analysts_increase_pct compare new signups
+      in the selected period vs the previous period of same length.
+    Query params: range (today | last_7_days | last_30_days | custom), from_date, to_date.
     """
     permission_classes = [IsAuthenticated, IsAdminUser]
 
@@ -411,13 +411,18 @@ class AdminDashboardStatsView(APIView):
 
         prev_start, prev_end = _prev_period(start, end)
 
-        # User stats: new in period (created_at in range)
+        # Total traders/analysts: all-time counts (no date filter)
+        total_traders = User.objects.filter(user_type="trader").count()
+        total_analysts = User.objects.filter(user_type="analyst").count()
+
+        # New users in period (for new_users stat and for increase_pct)
         new_users = User.objects.filter(created_at__gte=start, created_at__lte=end).count()
         new_users_prev = User.objects.filter(created_at__gte=prev_start, created_at__lte=prev_end).count()
-        analysts_in_period = User.objects.filter(user_type="analyst", created_at__gte=start, created_at__lte=end).count()
-        analysts_prev = User.objects.filter(user_type="analyst", created_at__gte=prev_start, created_at__lte=prev_end).count()
-        traders_in_period = User.objects.filter(user_type="trader", created_at__gte=start, created_at__lte=end).count()
-        traders_prev = User.objects.filter(user_type="trader", created_at__gte=prev_start, created_at__lte=prev_end).count()
+        # New analysts/traders in range (used only for increase_pct vs previous period)
+        new_analysts_in_period = User.objects.filter(user_type="analyst", created_at__gte=start, created_at__lte=end).count()
+        new_analysts_prev = User.objects.filter(user_type="analyst", created_at__gte=prev_start, created_at__lte=prev_end).count()
+        new_traders_in_period = User.objects.filter(user_type="trader", created_at__gte=start, created_at__lte=end).count()
+        new_traders_prev = User.objects.filter(user_type="trader", created_at__gte=prev_start, created_at__lte=prev_end).count()
 
         # Active subscriptions: count that were active during the period (overlapped [start, end])
         if Subscription is not None:
@@ -494,10 +499,10 @@ class AdminDashboardStatsView(APIView):
                 "stats": {
                     "new_users": new_users,
                     "new_users_increase_pct": _pct_change(new_users, new_users_prev),
-                    "total_analysts": analysts_in_period,
-                    "total_analysts_increase_pct": _pct_change(analysts_in_period, analysts_prev),
-                    "total_traders": traders_in_period,
-                    "total_traders_increase_pct": _pct_change(traders_in_period, traders_prev),
+                    "total_analysts": total_analysts,
+                    "total_analysts_increase_pct": _pct_change(new_analysts_in_period, new_analysts_prev),
+                    "total_traders": total_traders,
+                    "total_traders_increase_pct": _pct_change(new_traders_in_period, new_traders_prev),
                     "active_subscriptions": active_subs,
                     "active_subscriptions_increase_pct": _pct_change(active_subs, active_subs_prev),
                     "active_signals": active_created_in_period if TradingSignal else 0,
