@@ -466,6 +466,12 @@ MARKET_DATA_SYMBOLS_BY_CATEGORY = {
     ],
 }
 
+# Categories for which flag is set to "" in live_quote (matches PHP exclude_flags)
+MARKET_DATA_EXCLUDE_FLAGS = ('shares', 'commodity', 'metals', 'indices', 'energy')
+
+# Keys returned per symbol to match PHP GetLiveQuotesMT5 output
+LIVE_QUOTE_KEYS = ('dir', 'bid', 'ask', 'digits', 'flag', 'ask_today', 'bid_today', 'change', 'change_percentage')
+
 
 def _serialize_value(val):
     """Convert DB values to JSON-serializable types (e.g. Decimal, datetime)."""
@@ -497,23 +503,27 @@ def _row_val(row, *keys):
 
 def _enrich_market_row(row, default_round_digits=4):
     """
-    Add computed fields using mt5_prices field names: AskLast, BidLast, AskDir,
-    Digits, etc. Adds: dir, ask_today, bid_today, change, change_percentage.
+    Add extra fields to DB row to match get_live_quotes_mt5 logic: dir, bid, ask, digits,
+    flag, ask_today, bid_today, change, change_percentage.
+    dir from AskDir (0=down, else up); change = ask_current - ask_today;
+    change_symbol = "+" if change >= 0 else ""; percentage_symbol = "" if change >= 0 else "-".
     """
     # mt5_prices columns: Symbol, AskLast, BidLast, AskDir, AskHigh, AskLow, BidHigh, BidLow, ...
-    # Use Open if available; else use AskLow/BidLow (session low) so change = current vs session low (non-zero)
-    ask_current_val = _row_val(row, 'AskLast')
-    bid_current_val = _row_val(row, 'BidLast')
+    symbol_val = _row_val(row, 'Symbol', 'symbol')
+    symbol = (symbol_val or '').strip() if symbol_val is not None else ''
+    ask_last_val = _row_val(row, 'AskLast')
+    bid_last_val = _row_val(row, 'BidLast')
+    ask_dir_val = _row_val(row, 'AskDir')
     ask_today_val = _row_val(row, 'AskOpen', 'Open', 'ask_open')
     if ask_today_val is None:
         ask_today_val = _row_val(row, 'AskLow')
     if ask_today_val is None:
-        ask_today_val = ask_current_val
+        ask_today_val = ask_last_val
     bid_today_val = _row_val(row, 'BidOpen', 'bid_open')
     if bid_today_val is None:
         bid_today_val = _row_val(row, 'BidLow')
     if bid_today_val is None:
-        bid_today_val = bid_current_val
+        bid_today_val = bid_last_val
 
     digits_val = _row_val(row, 'Digits')
     try:
@@ -522,70 +532,89 @@ def _enrich_market_row(row, default_round_digits=4):
         round_digits = default_round_digits
 
     try:
-        ask_current = float(ask_current_val) if ask_current_val is not None else None
+        bid_last = float(bid_last_val) if bid_last_val is not None else None
+        ask_last = float(ask_last_val) if ask_last_val is not None else None
         ask_today = float(ask_today_val) if ask_today_val is not None else None
-        bid_current = float(bid_current_val) if bid_current_val is not None else None
         bid_today = float(bid_today_val) if bid_today_val is not None else None
     except (TypeError, ValueError):
-        ask_current = ask_today = bid_current = bid_today = None
+        bid_last = ask_last = ask_today = bid_today = None
 
-    row['ask_today'] = round(ask_today, round_digits) if ask_today is not None else None
+    # Rounded bid/ask: bid = round(bid_last, digits), ask = round(ask_last, digits)
+    bid = round(bid_last, round_digits) if bid_last is not None else None
+    ask = round(ask_last, round_digits) if ask_last is not None else None
+    ask_today_rounded = round(ask_today, round_digits) if ask_today is not None else None
+
+    # Extra fields from get_live_quotes_mt5: bid, ask, digits, flag
+    row['bid'] = bid
+    row['ask'] = ask
+    row['digits'] = round_digits
+    row['flag'] = f"{symbol[0:2]}|{symbol[3:5]}" if len(symbol) >= 6 else ""
+
+    row['ask_today'] = ask_today_rounded
     row['bid_today'] = round(bid_today, round_digits) if bid_today is not None else None
 
-    if ask_current is None or ask_today is None:
+    # dir from AskDir: "down" if ask_dir == 0 else "up"
+    try:
+        ask_dir = ask_dir_val if ask_dir_val is None else int(float(ask_dir_val))
+    except (TypeError, ValueError):
+        ask_dir = None
+    if ask_dir is not None:
+        row['dir'] = 'down' if ask_dir == 0 else 'up'
+    else:
         row['dir'] = 'up'
+
+    if ask is None or ask_today_rounded is None:
         row['change'] = '0'
         row['change_percentage'] = '0'
         return row
 
-    # change = ask_current - ask_today
-    change = ask_current - ask_today
+    # Daily change: change = ask_current - ask_today; change_percentage = (|change|/ask_today)*100
+    ask_current = ask
+    change = ask_current - ask_today_rounded
     change_absolute = abs(change)
+    change_percentage = (change_absolute / ask_today_rounded) * 100 if ask_today_rounded else 0
 
-    change_percentage = 0
-    if ask_today != 0:
-        change_percentage = (change_absolute / ask_today) * 100
-
-    # dir must match change: "up" when change >= 0, "down" when change < 0
-    row['dir'] = 'down' if change < 0 else 'up'
-    change_symbol = '+' if change >= 0 else ''
-    percent_symbol = '' if change >= 0 else '-'
+    change_symbol = "+" if change >= 0 else ""
+    percentage_symbol = "" if change >= 0 else "-"
     row['change'] = f"{change_symbol}{round(change, 4)}"
-    row['change_percentage'] = f"{percent_symbol}{round(change_percentage, 2)}"
+    row['change_percentage'] = f"{percentage_symbol}{round(change_percentage, 2)}"
     return row
 
 
 class GetMarketDataFromMT5(APIView):
     """
-    Returns mt5_prices data from mt5clients DB as JSON, filtered by category.
-    Query param: category = forex | shares | metals | indices | commodity | energy | menashares
-    Example: GET /marketdata/live?category=forex
+    Returns mt5_prices data as a single object:
+    - live_quote: dict of symbol -> { dir, bid, ask, digits, flag, ask_today, bid_today, change, change_percentage }
+    Query param category (optional): forex | shares | metals | indices | commodity | energy | menashares
+    When category is passed: only that category's symbols; exclude_flags not applied.
+    When category is omitted: all symbols; exclude_flags applied.
     """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         category = (request.query_params.get('category') or '').strip().lower()
-        if not category:
-            return Response(
-                {
-                    'error': 'Missing category.',
-                    'valid_categories': list(MARKET_DATA_SYMBOLS_BY_CATEGORY.keys()),
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        if category not in MARKET_DATA_SYMBOLS_BY_CATEGORY:
-            return Response(
-                {
-                    'error': f'Invalid category: {category}.',
-                    'valid_categories': list(MARKET_DATA_SYMBOLS_BY_CATEGORY.keys()),
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        symbols = MARKET_DATA_SYMBOLS_BY_CATEGORY[category]
+        if category:
+            if category not in MARKET_DATA_SYMBOLS_BY_CATEGORY:
+                return Response(
+                    {
+                        'error': f'Invalid category: {category}.',
+                        'valid_categories': list(MARKET_DATA_SYMBOLS_BY_CATEGORY.keys()),
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            symbols = list(MARKET_DATA_SYMBOLS_BY_CATEGORY[category])
+            apply_exclude_flags = False
+        else:
+            all_symbols = set()
+            for syms in MARKET_DATA_SYMBOLS_BY_CATEGORY.values():
+                all_symbols.update(syms)
+            symbols = list(all_symbols)
+            apply_exclude_flags = True
+
         if not symbols:
-            return Response({'data': [], 'count': 0, 'category': category}, status=status.HTTP_200_OK)
+            return Response({'live_quote': {}}, status=status.HTTP_200_OK)
         placeholders = ','.join(['%s'] * len(symbols))
-        sql = "SELECT * FROM mt5_prices WHERE symbol IN (%s)" % placeholders
+        sql = "SELECT * FROM mt5_prices WHERE Symbol IN (%s)" % placeholders
         try:
             with connections['mt5clients'].cursor() as cursor:
                 cursor.execute(sql, symbols)
@@ -596,14 +625,26 @@ class GetMarketDataFromMT5(APIView):
                 {'error': 'Failed to fetch market data.', 'detail': str(e)},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
-        data = []
+
+        arr_symbols = {}
         for row in rows:
             row_dict = dict(zip(columns, row))
             item = {k: _serialize_value(v) for k, v in row_dict.items()}
             _enrich_market_row(item, default_round_digits=4)
-            data.append(item)
-        return Response(
-            {'data': data, 'count': len(data), 'category': category},
-            status=status.HTTP_200_OK,
-        )
+            symbol = _row_val(item, 'Symbol', 'symbol') or ''
+            symbol = symbol.strip() if isinstance(symbol, str) else str(symbol)
+            if not symbol:
+                continue
+            out = {k: item.get(k) for k in LIVE_QUOTE_KEYS if k in item}
+            arr_symbols[symbol] = out
+
+        if not category and apply_exclude_flags:
+            for category_code, instruments in MARKET_DATA_SYMBOLS_BY_CATEGORY.items():
+                if category_code not in MARKET_DATA_EXCLUDE_FLAGS:
+                    continue
+                for symbol in instruments:
+                    if symbol in arr_symbols:
+                        arr_symbols[symbol]['flag'] = ''
+
+        return Response({'live_quote': arr_symbols}, status=status.HTTP_200_OK)
 
