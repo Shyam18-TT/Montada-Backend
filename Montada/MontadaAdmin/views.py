@@ -1245,6 +1245,97 @@ class AdminPollsListView(APIView):
         return Response({"results": result, "count": len(result)}, status=status.HTTP_200_OK)
 
 
+class AdminPollCreateView(APIView):
+    """
+    POST: Create a new poll question with options. Admin only.
+    Body: question_text (required), question_type (optional: "single"|"multiple", default "single"),
+          order (optional, default 0), is_active (optional, default True),
+          options (optional list of { "option_text": "..." }).
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def _question_to_data(self, q):
+        opts = list(q.options.all())
+        total_votes_q = sum(getattr(opt, "vote_count", 0) for opt in opts)
+        options_data = [
+            {
+                "id": str(opt.id),
+                "option_text": opt.option_text,
+                "vote_count": getattr(opt, "vote_count", 0),
+                "vote_percentage": round(
+                    (getattr(opt, "vote_count", 0) / total_votes_q) * 100, 2
+                ) if total_votes_q else 0,
+            }
+            for opt in opts
+        ]
+        return {
+            "id": str(q.id),
+            "question_text": q.question_text,
+            "question_type": q.question_type,
+            "order": q.order,
+            "is_active": getattr(q, "is_active", True),
+            "options": options_data,
+            "total_votes": total_votes_q,
+        }
+
+    def post(self, request):
+        if PollQuestion is None or PollOption is None:
+            return Response(
+                {"error": "Dashboard/Poll app is not available."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        data = request.data
+        question_text = (data.get("question_text") or "").strip()
+        if not question_text:
+            return Response(
+                {"error": "question_text is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        question_type = (data.get("question_type") or "single").strip().lower()
+        if question_type not in ("single", "multiple"):
+            return Response(
+                {"error": "question_type must be 'single' or 'multiple'."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            order = int(data.get("order", 0))
+        except (TypeError, ValueError):
+            order = 0
+        is_active = data.get("is_active", True)
+        if isinstance(is_active, str):
+            is_active = is_active.lower() in ("true", "1", "yes")
+
+        question = PollQuestion.objects.create(
+            question_text=question_text,
+            question_type=question_type,
+            order=order,
+            is_active=is_active,
+        )
+        options_payload = data.get("options") or []
+        if isinstance(options_payload, list):
+            for item in options_payload:
+                if isinstance(item, dict):
+                    opt_text = (item.get("option_text") or "").strip()
+                elif isinstance(item, str):
+                    opt_text = item.strip()
+                else:
+                    continue
+                if opt_text:
+                    PollOption.objects.create(question=question, option_text=opt_text)
+
+        qs = PollQuestion.objects.prefetch_related(
+            Prefetch("options", queryset=PollOption.objects.annotate(vote_count=Count("responses")))
+        )
+        question = qs.get(pk=question.pk)
+        return Response(
+            {
+                "message": "Poll created successfully.",
+                "question": self._question_to_data(question),
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
 class AdminPollQuestionDetailView(APIView):
     """
     GET: Retrieve a single poll question by id with options and vote counts.
