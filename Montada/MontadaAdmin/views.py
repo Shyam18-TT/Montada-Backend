@@ -1174,7 +1174,11 @@ class AdminPollStatsView(APIView):
 class AdminPollsListView(APIView):
     """
     GET: List poll questions for admin. Each result is a question with its options and vote counts.
-    Query params: search, status (all|active|closed), page, page_size.
+    Query params: search, status (all|active|closed|unpublished), page, page_size.
+    - all: all polls (default)
+    - active: is_active=True (published, accepting votes)
+    - closed: is_active=False
+    - unpublished: is_active=False (same as closed in current model)
     """
     permission_classes = [IsAuthenticated, IsAdminUser]
 
@@ -1193,8 +1197,9 @@ class AdminPollsListView(APIView):
         status_param = (self.request.query_params.get("status") or "all").strip().lower()
         if status_param == "active":
             qs = qs.filter(is_active=True)
-        elif status_param == "closed":
+        elif status_param in ("closed", "unpublished"):
             qs = qs.filter(is_active=False)
+        # "all" or any other value: no filter
         return qs
 
     def get(self, request):
@@ -1359,6 +1364,47 @@ class AdminPollQuestionDetailView(APIView):
         question = qs.get(pk=question.pk)
         return Response(
             {"message": "Poll question updated.", "question": self._question_to_data(question)},
+            status=status.HTTP_200_OK,
+        )
+
+    def delete(self, request, pk):
+        """DELETE: Permanently delete a poll question (and its options and responses via CASCADE)."""
+        if PollQuestion is None:
+            return Response(
+                {"error": "Dashboard/Poll app is not available."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        question = get_object_or_404(PollQuestion, pk=pk)
+        question_id = str(question.id)
+        question.delete()
+        return Response(
+            {"message": "Poll deleted.", "id": question_id},
+            status=status.HTTP_200_OK,
+        )
+
+
+class AdminPollUnpublishView(APIView):
+    """
+    POST: Unpublish a poll (set is_active=False). Poll will no longer appear in active list or accept votes.
+    URL: polls/<pk>/unpublish/
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def post(self, request, pk):
+        if PollQuestion is None:
+            return Response(
+                {"error": "Dashboard/Poll app is not available."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        question = get_object_or_404(PollQuestion, pk=pk)
+        question.is_active = False
+        question.save(update_fields=["is_active"])
+        return Response(
+            {
+                "message": "Poll unpublished.",
+                "id": str(question.id),
+                "is_active": False,
+            },
             status=status.HTTP_200_OK,
         )
 
