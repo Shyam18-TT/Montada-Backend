@@ -485,6 +485,76 @@ def _serialize_value(val):
     return val
 
 
+def _row_val(row, *keys):
+    """Get value from row dict by first matching key (case-insensitive)."""
+    key_map = {k.lower(): k for k in row.keys()}
+    for key in keys:
+        k_lower = key.lower()
+        if k_lower in key_map:
+            return row.get(key_map[k_lower])
+    return None
+
+
+def _enrich_market_row(row, default_round_digits=4):
+    """
+    Add computed fields using mt5_prices field names: AskLast, BidLast, AskDir,
+    Digits, etc. Adds: dir, ask_today, bid_today, change, change_percentage.
+    """
+    # mt5_prices columns: Symbol, AskLast, BidLast, AskDir, AskHigh, AskLow, BidHigh, BidLow, ...
+    # Use Open if available; else use AskLow/BidLow (session low) so change = current vs session low (non-zero)
+    ask_current_val = _row_val(row, 'AskLast')
+    bid_current_val = _row_val(row, 'BidLast')
+    ask_today_val = _row_val(row, 'AskOpen', 'Open', 'ask_open')
+    if ask_today_val is None:
+        ask_today_val = _row_val(row, 'AskLow')
+    if ask_today_val is None:
+        ask_today_val = ask_current_val
+    bid_today_val = _row_val(row, 'BidOpen', 'bid_open')
+    if bid_today_val is None:
+        bid_today_val = _row_val(row, 'BidLow')
+    if bid_today_val is None:
+        bid_today_val = bid_current_val
+
+    digits_val = _row_val(row, 'Digits')
+    try:
+        round_digits = int(digits_val) if digits_val is not None else default_round_digits
+    except (TypeError, ValueError):
+        round_digits = default_round_digits
+
+    try:
+        ask_current = float(ask_current_val) if ask_current_val is not None else None
+        ask_today = float(ask_today_val) if ask_today_val is not None else None
+        bid_current = float(bid_current_val) if bid_current_val is not None else None
+        bid_today = float(bid_today_val) if bid_today_val is not None else None
+    except (TypeError, ValueError):
+        ask_current = ask_today = bid_current = bid_today = None
+
+    row['ask_today'] = round(ask_today, round_digits) if ask_today is not None else None
+    row['bid_today'] = round(bid_today, round_digits) if bid_today is not None else None
+
+    if ask_current is None or ask_today is None:
+        row['dir'] = 'up'
+        row['change'] = '0'
+        row['change_percentage'] = '0'
+        return row
+
+    # change = ask_current - ask_today
+    change = ask_current - ask_today
+    change_absolute = abs(change)
+
+    change_percentage = 0
+    if ask_today != 0:
+        change_percentage = (change_absolute / ask_today) * 100
+
+    # dir must match change: "up" when change >= 0, "down" when change < 0
+    row['dir'] = 'down' if change < 0 else 'up'
+    change_symbol = '+' if change >= 0 else ''
+    percent_symbol = '' if change >= 0 else '-'
+    row['change'] = f"{change_symbol}{round(change, 4)}"
+    row['change_percentage'] = f"{percent_symbol}{round(change_percentage, 2)}"
+    return row
+
+
 class GetMarketDataFromMT5(APIView):
     """
     Returns mt5_prices data from mt5clients DB as JSON, filtered by category.
@@ -529,7 +599,9 @@ class GetMarketDataFromMT5(APIView):
         data = []
         for row in rows:
             row_dict = dict(zip(columns, row))
-            data.append({k: _serialize_value(v) for k, v in row_dict.items()})
+            item = {k: _serialize_value(v) for k, v in row_dict.items()}
+            _enrich_market_row(item, default_round_digits=4)
+            data.append(item)
         return Response(
             {'data': data, 'count': len(data), 'category': category},
             status=status.HTTP_200_OK,
