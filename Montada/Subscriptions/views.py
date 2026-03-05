@@ -5,7 +5,11 @@ from django.contrib.auth import get_user_model
 from django.utils import timezone
 from datetime import timedelta
 from .models import Subscription
-from .serializers import SubscriptionSerializer, SubscribeSerializer
+from .serializers import (
+    SubscriptionSerializer,
+    SubscribeSerializer,
+    ConfirmSubscriptionSerializer,
+)
 
 User = get_user_model()
 
@@ -140,3 +144,67 @@ def check_subscription_status_view(request):
             'has_active_subscription': False,
             'message': 'No subscription found. Free trial will be created on first access.'
         }, status=status.HTTP_200_OK)
+
+
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated])
+def confirm_subscription_view(request):
+    """
+    Confirm and save subscription after successful payment.
+    Frontend sends: plan_id, payment_intent_id, amount, currency, subscribed_at, status.
+    Only status=succeeded is accepted. Updates or creates the user's subscription and
+    sets start_date/end_date from subscribed_at and plan_id.
+    """
+    serializer = ConfirmSubscriptionSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    data = serializer.validated_data
+    user = request.user
+    plan_id = data['plan_id']
+    subscribed_at = data['subscribed_at']
+    if subscribed_at.tzinfo is None:
+        subscribed_at = timezone.make_aware(subscribed_at)
+
+    duration = timedelta(days=365) if plan_id == 'yearly' else timedelta(days=30)
+    end_date = subscribed_at + duration
+
+    subscription = None
+    try:
+        subscription = Subscription.objects.get(user=user)
+    except Subscription.DoesNotExist:
+        pass
+
+    if subscription:
+        subscription.plan_type = plan_id
+        subscription.status = 'active'
+        subscription.is_trial = False
+        subscription.start_date = subscribed_at
+        subscription.end_date = end_date
+        subscription.payment_intent_id = data.get('payment_intent_id') or ''
+        subscription.amount = data.get('amount')
+        subscription.currency = data.get('currency', 'usd') or 'usd'
+        subscription.save()
+    else:
+        subscription = Subscription.objects.create(
+            user=user,
+            plan_type=plan_id,
+            status='active',
+            start_date=subscribed_at,
+            end_date=end_date,
+            is_trial=False,
+            payment_intent_id=data.get('payment_intent_id') or '',
+            amount=data.get('amount'),
+            currency=data.get('currency', 'usd') or 'usd',
+        )
+
+    user.is_subscribed = True
+    user.save(update_fields=['is_subscribed'])
+
+    return Response(
+        {
+            'message': 'Subscription confirmed and saved.',
+            'subscription': SubscriptionSerializer(subscription).data,
+        },
+        status=status.HTTP_200_OK,
+    )

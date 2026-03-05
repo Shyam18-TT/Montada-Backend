@@ -18,7 +18,8 @@ class SubscriptionSerializer(serializers.ModelSerializer):
         fields = (
             'id', 'user', 'user_email', 'plan_type', 'status',
             'start_date', 'end_date', 'is_trial', 'is_active',
-            'days_remaining', 'created_at', 'updated_at'
+            'days_remaining', 'payment_intent_id', 'amount', 'currency',
+            'created_at', 'updated_at'
         )
         read_only_fields = ('id', 'user', 'start_date', 'created_at', 'updated_at')
     
@@ -62,4 +63,33 @@ class SubscribeSerializer(serializers.Serializer):
             attrs['months'] = 1
         
         return attrs
+
+
+class ConfirmSubscriptionSerializer(serializers.Serializer):
+    """
+    Serializer for confirming a subscription after successful payment (frontend sends after payment).
+    """
+    plan_id = serializers.ChoiceField(
+        choices=[('monthly', 'Monthly'), ('yearly', 'Yearly')],
+        required=True,
+        help_text='Plan identifier: monthly or yearly'
+    )
+    payment_intent_id = serializers.CharField(required=True, allow_blank=False)
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2, required=True)
+    currency = serializers.CharField(default='usd', max_length=10, required=False)
+    subscribed_at = serializers.DateTimeField(required=True)
+    status = serializers.ChoiceField(
+        choices=[('succeeded', 'Succeeded'), ('failed', 'Failed'), ('pending', 'Pending')],
+        required=True
+    )
+
+    def validate_plan_id(self, value):
+        if value not in ('monthly', 'yearly'):
+            raise serializers.ValidationError("plan_id must be 'monthly' or 'yearly'.")
+        return value
+
+    def validate_status(self, value):
+        if value != 'succeeded':
+            raise serializers.ValidationError("Only succeeded payments can confirm a subscription.")
+        return value
 

@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
+import os
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -252,6 +253,9 @@ MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 # Base URL for absolute media URLs in API responses (e.g. article featured_image)
 PUBLIC_MEDIA_BASE_URL = 'https://uat.themontada.com'
+
+# Marketaux API for market/finance news (https://www.marketaux.com/documentation). Sign up for a free token.
+MARKETAUX_API_TOKEN = "vIWcnrrYFI0FBaNnAgD0DAeiQ2prDE7QakmniN9h"
 
 # Email configuration
 # Configure these settings with your email provider credentials

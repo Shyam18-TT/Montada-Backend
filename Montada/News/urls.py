@@ -8,4 +8,7 @@ urlpatterns = [
     path("articles/create/", views.AnalystNewsArticleCreateView.as_view(), name="article_create"),
     path("articles/<uuid:pk>/", views.AnalystNewsArticleDetailView.as_view(), name="article_detail"),
     path("categories/", views.NewsCategoryListView.as_view(), name="category_list"),
+
+
+    path('market-news/',views.MarketNewsList.as_view(), name='market_news'),
 ]

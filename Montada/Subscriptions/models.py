@@ -54,6 +54,25 @@ class Subscription(models.Model):
         default=True,
         help_text='Whether this is a trial subscription'
     )
+    payment_intent_id = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        help_text='Stripe (or provider) payment intent ID for the last payment'
+    )
+    amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text='Amount paid for the subscription'
+    )
+    currency = models.CharField(
+        max_length=10,
+        default='usd',
+        blank=True,
+        help_text='Currency code of the payment'
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
