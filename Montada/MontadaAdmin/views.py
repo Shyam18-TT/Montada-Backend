@@ -37,9 +37,10 @@ except ImportError:
     Subscription = None
 
 try:
-    from Signals.models import AssetClass, Timeframe
+    from Signals.models import AssetClass, Instrument, Timeframe
 except ImportError:
     AssetClass = None
+    Instrument = None
     Timeframe = None
 
 try:
@@ -967,6 +968,34 @@ class AdminSignalAssetsView(APIView):
         qs = AssetClass.objects.all().order_by("name")
         assets = [{"id": str(a.id), "name": a.name} for a in qs]
         return Response({"assets": assets}, status=status.HTTP_200_OK)
+
+
+class AdminSignalInstrumentsView(APIView):
+    """
+    GET: List of instruments for admin (e.g. signal create form).
+    Query param: asset_class (UUID) to filter by asset class.
+    Returns: [{ "id": "<uuid>", "symbol": "...", "name": "...", "asset_class": "<uuid>", "asset_class_name": "..." }, ...]
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request):
+        if Instrument is None:
+            return Response({"instruments": []}, status=status.HTTP_200_OK)
+        qs = Instrument.objects.filter(is_active=True).select_related("asset_class").order_by("asset_class__name", "symbol")
+        asset_class_id = request.query_params.get("asset_class")
+        if asset_class_id:
+            qs = qs.filter(asset_class_id=asset_class_id)
+        instruments = [
+            {
+                "id": str(i.id),
+                "symbol": i.symbol,
+                "name": i.name or i.symbol,
+                "asset_class": str(i.asset_class_id),
+                "asset_class_name": i.asset_class.name if i.asset_class else None,
+            }
+            for i in qs
+        ]
+        return Response({"instruments": instruments}, status=status.HTTP_200_OK)
 
 
 class AdminSignalTimeframesView(APIView):
