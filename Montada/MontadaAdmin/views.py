@@ -16,6 +16,8 @@ from rest_framework.views import APIView
 
 from django.contrib.auth import authenticate, get_user_model
 from django.shortcuts import get_object_or_404
+from django.views.decorators.csrf import csrf_exempt
+from django.utils.decorators import method_decorator
 
 User = get_user_model()
 
@@ -87,6 +89,7 @@ from .serializers import (
 )
 
 
+@method_decorator(csrf_exempt, name="dispatch")
 class AdminLoginView(APIView):
     """
     POST: Admin-only login. Accepts email and password.

@@ -6,6 +6,8 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth import get_user_model
 from django.core.mail import send_mail
 from django.conf import settings
+from django.views.decorators.csrf import csrf_exempt
+from django.utils.decorators import method_decorator
 from .serializers import (
     UserRegistrationSerializer,
     UserLoginSerializer,
@@ -27,8 +29,8 @@ except ImportError:
     Subscription = None
 
 
+@method_decorator(csrf_exempt, name="dispatch")
 class RegisterView(generics.CreateAPIView):
-
     queryset = User.objects.all()
     serializer_class = UserRegistrationSerializer
     permission_classes = [permissions.AllowAny]
@@ -167,6 +169,7 @@ Montada Team
         }, status=status.HTTP_201_CREATED)
 
 
+@csrf_exempt
 @api_view(['POST'])
 @permission_classes([permissions.AllowAny])
 def login_view(request):
@@ -254,6 +257,7 @@ def logout_view(request):
         }, status=status.HTTP_400_BAD_REQUEST)
 
 
+@csrf_exempt
 @api_view(['POST'])
 @permission_classes([permissions.AllowAny])
 def forgot_password_view(request):
@@ -321,6 +325,7 @@ Montada Team
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
+@csrf_exempt
 @api_view(['POST'])
 @permission_classes([permissions.AllowAny])
 def verify_otp_view(request):
@@ -340,6 +345,7 @@ def verify_otp_view(request):
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
+@csrf_exempt
 @api_view(['POST'])
 @permission_classes([permissions.AllowAny])
 def reset_password_view(request):
@@ -371,6 +377,7 @@ def reset_password_view(request):
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
+@csrf_exempt
 @api_view(['POST'])
 @permission_classes([permissions.AllowAny])
 def verify_email_view(request):
@@ -417,6 +424,7 @@ def verify_email_view(request):
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
+@csrf_exempt
 @api_view(['POST'])
 @permission_classes([permissions.AllowAny])
 def resend_verification_otp_view(request):
@@ -486,6 +494,7 @@ Montada Team
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+@csrf_exempt
 @api_view(['POST'])
 @permission_classes([permissions.AllowAny])
 def resend_password_reset_otp_view(request):
