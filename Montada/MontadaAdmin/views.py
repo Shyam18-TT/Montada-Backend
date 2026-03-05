@@ -426,21 +426,38 @@ class AdminDashboardStatsView(APIView):
         new_traders_in_period = User.objects.filter(user_type="trader", created_at__gte=start, created_at__lte=end).count()
         new_traders_prev = User.objects.filter(user_type="trader", created_at__gte=prev_start, created_at__lte=prev_end).count()
 
-        # Active subscriptions: count that were active during the period (overlapped [start, end])
+        # Active subscriptions: paid (subscribed) users only, excluding trial (is_trial=False)
+        # Active trial users: users currently on trial (is_trial=True)
         if Subscription is not None:
             active_subs = Subscription.objects.filter(
                 status="active",
+                is_trial=False,
                 start_date__lte=end,
                 end_date__gte=start,
             ).count()
             active_subs_prev = Subscription.objects.filter(
                 status="active",
+                is_trial=False,
+                start_date__lte=prev_end,
+                end_date__gte=prev_start,
+            ).count()
+            active_trial_users = Subscription.objects.filter(
+                status="active",
+                is_trial=True,
+                start_date__lte=end,
+                end_date__gte=start,
+            ).count()
+            active_trial_users_prev = Subscription.objects.filter(
+                status="active",
+                is_trial=True,
                 start_date__lte=prev_end,
                 end_date__gte=prev_start,
             ).count()
         else:
             active_subs = 0
             active_subs_prev = 0
+            active_trial_users = 0
+            active_trial_users_prev = 0
 
         if TradingSignal is None:
             active_created_in_period = 0
@@ -507,6 +524,8 @@ class AdminDashboardStatsView(APIView):
                     "total_traders_increase_pct": _pct_change(new_traders_in_period, new_traders_prev),
                     "active_subscriptions": active_subs,
                     "active_subscriptions_increase_pct": _pct_change(active_subs, active_subs_prev),
+                    "active_trial_users": active_trial_users,
+                    "active_trial_users_increase_pct": _pct_change(active_trial_users, active_trial_users_prev),
                     "active_signals": active_created_in_period if TradingSignal else 0,
                     "active_signals_increase_pct": _pct_change(
                         active_created_in_period if TradingSignal else 0,
