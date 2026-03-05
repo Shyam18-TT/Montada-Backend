@@ -94,6 +94,7 @@ class AdminLoginView(APIView):
     Body: { "email": "...", "password": "..." }
     """
     permission_classes = [AllowAny]
+    authentication_classes = []
 
     def post(self, request):
         serializer = AdminLoginSerializer(data=request.data, context={"request": request})
