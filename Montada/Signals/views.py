@@ -515,3 +515,192 @@ class TraderAppliedSignalsListView(generics.ListAPIView):
             trader=self.request.user
         ).select_related('signal', 'signal__analyst', 'signal__asset_class', 'signal__instrument', 'signal__timeframe').order_by('-applied_at')
 
+
+# ---------------------------------------------------------------------------
+# Signal notification categories and their preset title/body builders
+# ---------------------------------------------------------------------------
+
+_NOTIFICATION_CATEGORIES = {
+    "buy_now": {
+        "label": "Buy Now",
+        "title_tpl": "BUY {symbol} – Act Now",
+        "body_tpl": "Buy {symbol} now. Entry: {entry} | TP: {tp} | SL: {sl}",
+    },
+    "sell_now": {
+        "label": "Sell Now",
+        "title_tpl": "SELL {symbol} – Act Now",
+        "body_tpl": "Sell {symbol} now. Entry: {entry} | TP: {tp} | SL: {sl}",
+    },
+    "cancel_trade": {
+        "label": "Cancel Trade",
+        "title_tpl": "Cancel {symbol} Trade",
+        "body_tpl": "Cancel your {symbol} {direction} trade. The setup is no longer valid.",
+    },
+    "exit": {
+        "label": "Exit Signal",
+        "title_tpl": "Exit {symbol} Position – Target Reached",
+        "body_tpl": "Close {symbol} position. Target reached. Entry: {entry} | TP: {tp}",
+    },
+}
+
+_AUDIENCE_CHOICES = ("followers", "applied")
+
+
+def _build_notification_content(signal, category: str, custom_title: str | None, custom_body: str | None):
+    """Build title and body for a signal push notification."""
+    symbol = signal.instrument.symbol if signal.instrument else "Signal"
+    direction = signal.direction or ""
+    entry = str(signal.entry_price) if signal.entry_price else "N/A"
+    tp = str(signal.take_profit) if signal.take_profit else "N/A"
+    sl = str(signal.stop_loss) if signal.stop_loss else "N/A"
+    timeframe = signal.timeframe.code if signal.timeframe else ""
+
+    tpl = _NOTIFICATION_CATEGORIES.get(category, {})
+    title = custom_title or tpl.get("title_tpl", "Signal Alert").format(
+        symbol=symbol, direction=direction, entry=entry, tp=tp, sl=sl, timeframe=timeframe
+    )
+    body = custom_body or tpl.get("body_tpl", "{symbol} signal update.").format(
+        symbol=symbol, direction=direction, entry=entry, tp=tp, sl=sl, timeframe=timeframe
+    )
+    return title, body
+
+
+class SignalPushNotificationView(generics.GenericAPIView):
+    """
+    POST: Analyst sends a push notification to users for one of their signals.
+
+    URL: signals/<pk>/notify/
+
+    Body (JSON):
+    {
+        "audience"     : "followers" | "applied",   // required
+        "category"     : "buy_now" | "sell_now" | "cancel_trade" | "exit",  // required
+        "custom_title" : "Override title",           // optional
+        "custom_body"  : "Override message body",    // optional
+    }
+
+    - audience=followers : notify all accepted followers of the analyst.
+    - audience=applied   : notify only traders who applied this specific signal.
+    - category           : determines the pre-built title and body (can be overridden).
+    - The notification data payload always includes signal_id, symbol, direction, category.
+    """
+    permission_classes = [permissions.IsAuthenticated, IsAnalystPermission]
+
+    def post(self, request, pk):
+        if request.user.user_type != "analyst":
+            return Response(
+                {"error": "Only analysts can send signal notifications."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        # Fetch the signal; must belong to this analyst
+        try:
+            signal = (
+                TradingSignal.active
+                .select_related("instrument", "asset_class", "timeframe", "analyst")
+                .get(pk=pk, analyst=request.user)
+            )
+        except TradingSignal.DoesNotExist:
+            return Response(
+                {"error": "Signal not found or does not belong to you."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Validate required fields
+        audience = (request.data.get("audience") or "").strip().lower()
+        category = (request.data.get("category") or "").strip().lower()
+        custom_title = (request.data.get("custom_title") or "").strip() or None
+        custom_body = (request.data.get("custom_body") or "").strip() or None
+
+        if audience not in _AUDIENCE_CHOICES:
+            return Response(
+                {"error": f"'audience' must be one of: {', '.join(_AUDIENCE_CHOICES)}."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if category not in _NOTIFICATION_CATEGORIES:
+            return Response(
+                {"error": f"'category' must be one of: {', '.join(_NOTIFICATION_CATEGORIES)}."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Build recipients queryset
+        from django.contrib.auth import get_user_model
+        UserModel = get_user_model()
+
+        if audience == "followers":
+            recipient_ids = (
+                Follow.objects.filter(
+                    followed=request.user,
+                    status=Follow.Status.ACCEPTED,
+                    is_active=True,
+                ).values_list("follower_id", flat=True)
+            )
+            recipients = UserModel.objects.filter(id__in=recipient_ids)
+        else:  # applied
+            recipient_ids = (
+                AppliedSignal.objects.filter(signal=signal)
+                .values_list("trader_id", flat=True)
+            )
+            recipients = UserModel.objects.filter(id__in=recipient_ids)
+
+        recipient_count = recipients.count()
+        if recipient_count == 0:
+            return Response(
+                {
+                    "message": "No recipients found for the selected audience. No notification sent.",
+                    "audience": audience,
+                    "category": category,
+                    "recipient_count": 0,
+                    "success_count": 0,
+                    "failure_count": 0,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        # Build title / body from signal details
+        title, body = _build_notification_content(signal, category, custom_title, custom_body)
+
+        # Data payload (always strings)
+        symbol = signal.instrument.symbol if signal.instrument else ""
+        data_payload = {
+            "type": "signal_alert",
+            "signal_id": str(signal.id),
+            "category": category,
+            "symbol": symbol,
+            "direction": signal.direction or "",
+            "entry_price": str(signal.entry_price) if signal.entry_price else "",
+            "take_profit": str(signal.take_profit) if signal.take_profit else "",
+            "stop_loss": str(signal.stop_loss) if signal.stop_loss else "",
+            "timeframe": signal.timeframe.code if signal.timeframe else "",
+            "signal_status": signal.status or "",
+        }
+
+        # Send via Firebase
+        try:
+            from .push_notifications import push_signal_notification
+            result = push_signal_notification(
+                title=title,
+                body=body,
+                users=recipients,
+                data=data_payload,
+            )
+        except Exception as exc:
+            return Response(
+                {"error": f"Push notification failed: {exc}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        return Response(
+            {
+                "message": "Push notification sent.",
+                "audience": audience,
+                "category": category,
+                "title": title,
+                "body": body,
+                "recipient_count": recipient_count,
+                "success_count": result.get("success_count", 0),
+                "failure_count": result.get("failure_count", 0),
+            },
+            status=status.HTTP_200_OK,
+        )
+
