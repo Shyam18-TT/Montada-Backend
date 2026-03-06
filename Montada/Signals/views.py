@@ -1,4 +1,5 @@
 from django.utils import timezone
+from django.db.models import Count
 from rest_framework import status, generics, permissions
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
@@ -198,6 +199,8 @@ class AnalystSignalListView(generics.ListAPIView):
             analyst=self.request.user
         ).select_related(
             'analyst', 'asset_class', 'instrument', 'timeframe'
+        ).annotate(
+            applied_count=Count('applications')
         )
 
         # Optional filter by status query parameter: ?status=OPEN/CLOSED/DRAFT
@@ -206,6 +209,20 @@ class AnalystSignalListView(generics.ListAPIView):
             queryset = queryset.filter(status=status_param)
 
         return queryset.order_by('-created_at')
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        items = page if page is not None else queryset
+        serializer = self.get_serializer(items, many=True)
+        data = []
+        for signal_obj, signal_data in zip(items, serializer.data):
+            entry = dict(signal_data)
+            entry['applied_count'] = signal_obj.applied_count
+            data.append(entry)
+        if page is not None:
+            return self.get_paginated_response(data)
+        return Response(data)
 
 
 class AnalystSignalUpdateView(generics.RetrieveUpdateAPIView):

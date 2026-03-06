@@ -66,7 +66,7 @@ class NewsArticleListView(generics.ListAPIView):
 
     def get_queryset(self):
         user_type = getattr(self.request.user, "user_type", "trader")
-        qs = NewsArticle.objects.filter(is_deleted=False).select_related("author", "category").order_by("-created_at")
+        qs = NewsArticle.objects.filter(is_deleted=False).select_related("author", "category").prefetch_related("tags").order_by("-created_at")
 
         if user_type == "trader":
             qs = qs.filter(status="published")

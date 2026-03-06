@@ -22,10 +22,20 @@ class NewsCategorySerializer(serializers.ModelSerializer):
         fields = ("id", "name", "slug")
 
 
+class TagSerializer(serializers.ModelSerializer):
+    """Minimal tag for list/detail responses."""
+
+    class Meta:
+        model = Tag
+        fields = ("id", "name", "slug")
+        read_only_fields = fields
+
+
 class NewsArticleListSerializer(serializers.ModelSerializer):
-    """Read-only news article for list API. Includes category_name and full featured_image URL."""
+    """Read-only news article for list API. Includes category_name, tags, and full featured_image URL."""
 
     category_name = serializers.SerializerMethodField()
+    tags = TagSerializer(many=True, read_only=True)
 
     class Meta:
         model = NewsArticle
@@ -38,6 +48,7 @@ class NewsArticleListSerializer(serializers.ModelSerializer):
             "featured_image",
             "category",
             "category_name",
+            "tags",
             "status",
             "published_at",
             "created_at",

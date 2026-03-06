@@ -467,13 +467,26 @@ def _premium_followers_filter(now):
     )
 
 
+def _trial_followers_filter(now):
+    """Q filter for followers on an active free_trial plan."""
+    return Q(
+        follower__subscription__status="active",
+        follower__subscription__end_date__gte=now,
+        follower__subscription__plan_type="free_trial",
+    )
+
+
 class FollowersListView(generics.ListAPIView):
     """
     List users who follow you (accepted and active). Uses DRF pagination: ?page=1&page_size=20.
-    Response includes: count, followers_count, premium_followers_count, basic_followers_count,
-    followers_this_week_count, next, previous, results.
+    Response includes: count, followers_count, premium_followers_count, trial_followers_count,
+    basic_followers_count, followers_this_week_count, next, previous, results.
     Query params:
-      - category: 'all' (default) | 'basic' | 'premium'
+      - category: 'all' (default) | 'premium' | 'trial' | 'basic'
+          premium  – followers with an active monthly/yearly subscription
+          trial    – followers on an active free trial
+          basic    – followers with no active subscription (neither premium nor trial)
+          all      – no filter (default)
       - search: optional string to filter by follower's name, username, or email.
     """
     permission_classes = [IsAuthenticated]
@@ -489,12 +502,15 @@ class FollowersListView(generics.ListAPIView):
             .order_by("-accepted_at")
         )
 
-        category = (self.request.query_params.get("category") or "all").strip().lower()
+        category = (self.request.query_params.get("subscription_type") or "all").strip().lower()
         premium_filter = _premium_followers_filter(now)
+        trial_filter = _trial_followers_filter(now)
         if category == "premium":
             qs = qs.filter(premium_filter)
+        elif category == "trial":
+            qs = qs.filter(trial_filter)
         elif category == "basic":
-            qs = qs.exclude(premium_filter)
+            qs = qs.exclude(premium_filter).exclude(trial_filter)
 
         search = (self.request.query_params.get("search") or "").strip()
         if search:
@@ -511,11 +527,13 @@ class FollowersListView(generics.ListAPIView):
         week_ago = now - timedelta(days=7)
         base_qs = _base_followers_queryset(request.user)
         premium_filter = _premium_followers_filter(now)
+        trial_filter = _trial_followers_filter(now)
 
         response = super().list(request, *args, **kwargs)
         response.data["followers_count"] = base_qs.count()
         response.data["premium_followers_count"] = base_qs.filter(premium_filter).count()
-        response.data["basic_followers_count"] = base_qs.exclude(premium_filter).count()
+        response.data["trial_followers_count"] = base_qs.filter(trial_filter).count()
+        response.data["basic_followers_count"] = base_qs.exclude(premium_filter).exclude(trial_filter).count()
         response.data["followers_this_week_count"] = base_qs.filter(accepted_at__gte=week_ago).count()
         return response
 
