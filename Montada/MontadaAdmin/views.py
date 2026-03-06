@@ -1676,11 +1676,13 @@ class AdminNewsArticleCreateView(generics.CreateAPIView):
         )
 
 
-class AdminNewsArticleDetailView(generics.RetrieveUpdateAPIView):
+class AdminNewsArticleDetailView(generics.RetrieveUpdateDestroyAPIView):
     """
-    GET: Retrieve a single news article by id. Admin only.
-    PUT/PATCH: Update article details. Admin only. Partial update supported (PATCH).
-    URL: news/articles/<id>/
+    GET   : Retrieve a single news article by id.
+    PUT   : Full update of article details.
+    PATCH : Partial update of article details.
+    DELETE: Soft-delete the article (sets is_deleted=True, keeps the DB row).
+    Admin only.  URL: news/articles/<id>/
     """
     permission_classes = [IsAuthenticated, IsAdminUser]
     serializer_class = NewsArticleCreateSerializer
@@ -1713,6 +1715,48 @@ class AdminNewsArticleDetailView(generics.RetrieveUpdateAPIView):
         serializer.save()
         return Response(
             {"message": "Article updated successfully.", "article": serializer.data},
+            status=status.HTTP_200_OK,
+        )
+
+    def destroy(self, request, *args, **kwargs):
+        if NewsArticle is None:
+            return Response(
+                {"error": "News app is not available."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        instance = self.get_object()
+        instance.is_deleted = True
+        instance.save(update_fields=["is_deleted"])
+        return Response(
+            {"message": "Article deleted successfully."},
+            status=status.HTTP_200_OK,
+        )
+
+
+class AdminNewsArticleUnpublishView(APIView):
+    """
+    POST: Unpublish a published news article (sets status back to 'draft').
+    Admin only.  URL: news/articles/<pk>/unpublish/
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def post(self, request, pk):
+        if NewsArticle is None:
+            return Response(
+                {"error": "News app is not available."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        article = get_object_or_404(NewsArticle, pk=pk, is_deleted=False)
+        if article.status != "published":
+            return Response(
+                {"error": f"Article is already '{article.status}' and cannot be unpublished."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        article.status = "draft"
+        article.published_at = None
+        article.save(update_fields=["status", "published_at"])
+        return Response(
+            {"message": "Article unpublished successfully.", "status": article.status},
             status=status.HTTP_200_OK,
         )
 
