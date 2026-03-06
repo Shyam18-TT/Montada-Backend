@@ -34,6 +34,7 @@ from .views import (
     AdminAnalystListView,
     AdminTraderListView,
     AdminGetMarketDataFromMT5,
+    AdminMarketNewsList,
 )
 
 app_name = "MontadaAdmin"
@@ -79,5 +80,6 @@ urlpatterns = [
     path("polls/<uuid:question_pk>/options/<uuid:option_pk>/", AdminPollOptionDeleteView.as_view(), name="admin_poll_option_delete"),
 
     path("marketdata/live/", AdminGetMarketDataFromMT5.as_view(), name="admin_marketdata_live"),
+    path("news/market-news/", AdminMarketNewsList.as_view(), name="admin_market_news"),
 ]
 

@@ -1,9 +1,14 @@
 """
 Admin dashboard views: stats cards with date range and percentage change.
 """
+import json
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
 from calendar import monthrange
 from datetime import timedelta, datetime
+from django.conf import settings as django_settings
 from django.utils import timezone
 from django.db import connections
 from django.db.models import Avg, Count, Q, OuterRef, Subquery, Prefetch
@@ -1924,3 +1929,112 @@ class AdminGetMarketDataFromMT5(APIView):
                         arr_symbols[symbol]['flag'] = ''
 
         return Response({'live_quote': arr_symbols}, status=status.HTTP_200_OK)
+
+
+# --- Market news (Marketaux API) - same as News.MarketNewsList but admin-only ---
+MARKETAUX_ALLOWED_PARAMS = {
+    "symbols", "entity_types", "industries", "countries", "sentiment_gte", "sentiment_lte",
+    "min_match_score", "filter_entities", "must_have_entities", "group_similar", "search",
+    "domains", "exclude_domains", "source_ids", "exclude_source_ids", "language",
+    "published_before", "published_after", "published_on", "sort", "sort_order", "limit", "page",
+}
+MARKET_NEWS_SYMBOLS_BY_CATEGORY = {
+    "all": [],
+    "forex": [
+        "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "USDCAD", "AUDUSD", "NZDUSD", "EURGBP", "EURJPY",
+        "GBPJPY", "AUDJPY", "USDCNH", "EURAUD", "EURCAD", "GBPAUD", "AUDNZD",
+    ],
+    "currencies": [
+        "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "USDCAD", "AUDUSD", "NZDUSD", "EURGBP", "EURJPY",
+        "GBPJPY", "AUDJPY", "USDCNH", "EURAUD", "EURCAD", "GBPAUD", "AUDNZD",
+    ],
+    "shares": [
+        "AAPL", "AMZN", "MSFT", "GOOGL", "TSLA", "NVDA", "META", "JPM", "JNJ", "V", "WMT",
+        "PG", "MA", "HD", "DIS", "BAC", "XOM", "PFE", "CSCO", "NFLX",
+    ],
+    "equity": [
+        "AAPL", "AMZN", "MSFT", "GOOGL", "TSLA", "NVDA", "META", "JPM", "JNJ", "V", "WMT",
+        "PG", "MA", "HD", "DIS", "BAC", "XOM", "PFE", "CSCO", "NFLX",
+    ],
+    "stocks": [
+        "AAPL", "AMZN", "MSFT", "GOOGL", "TSLA", "NVDA", "META", "JPM", "JNJ", "V", "WMT",
+        "PG", "MA", "HD", "DIS", "BAC", "XOM", "PFE", "CSCO", "NFLX",
+    ],
+    "crypto": ["BTC", "ETH", "BNB", "XRP", "ADA", "SOL", "DOGE", "AVAX", "DOT", "MATIC", "LINK", "UNI", "ATOM", "LTC", "ETC", "XLM", "NEAR", "APT", "ARB", "OP"],
+    "cryptocurrency": ["BTC", "ETH", "BNB", "XRP", "ADA", "SOL", "DOGE", "AVAX", "DOT", "MATIC", "LINK", "UNI", "ATOM", "LTC", "ETC", "XLM", "NEAR", "APT", "ARB", "OP"],
+    "metals": ["GOLD", "SILVER", "XAUEUR", "PLATINUM", "PALLADIUM", "COPPER"],
+    "indices": ["US30", "US100", "US500", "US2000", "GER40", "FRA40", "UK100", "JAP225", "NASDAQ", "DOW"],
+    "index": ["US30", "US100", "US500", "US2000", "GER40", "FRA40", "UK100", "JAP225", "NASDAQ", "DOW"],
+    "commodity": ["SOYBEAN", "COCOA", "COFFEE"],
+    "commodities": ["GOLD", "SILVER", "COPPER", "CL", "BRENT", "USOIL", "UKOIL", "SOYBEAN", "COCOA", "COFFEE"],
+    "energy": ["CL", "USOIL", "BRENT", "UKOIL", "NATGAS"],
+    "menashares": [
+        "Emaar.Propt", "ADCB", "ADIB", "FAB.Bank", "DEWA", "TAKREER", "NMDC", "IHC", "GULFNAV",
+    ],
+}
+
+
+class AdminMarketNewsList(APIView):
+    """
+    GET: Fetch market/finance news from Marketaux API (admin-only).
+    Same query params as News MarketNewsList: category, language, limit, page, symbols, etc.
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request):
+        api_token = getattr(django_settings, "MARKETAUX_API_TOKEN", None)
+        if not api_token:
+            return Response(
+                {"error": "Market news API is not configured (MARKETAUX_API_TOKEN missing)."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        params = {
+            "api_token": api_token,
+            "filter_entities": "true",
+        }
+        category = (request.query_params.get("category") or "all").strip().lower()
+        if category not in MARKET_NEWS_SYMBOLS_BY_CATEGORY:
+            return Response(
+                {
+                    "error": f"Invalid category: {category}.",
+                    "valid_categories": list(MARKET_NEWS_SYMBOLS_BY_CATEGORY.keys()),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        category_symbols = MARKET_NEWS_SYMBOLS_BY_CATEGORY[category]
+        if category_symbols:
+            params["symbols"] = ",".join(category_symbols)
+        for key in MARKETAUX_ALLOWED_PARAMS:
+            val = request.query_params.get(key)
+            if val is not None:
+                params[key] = val
+        url = "https://api.marketaux.com/v1/news/all?" + urllib.parse.urlencode(params)
+        try:
+            req = urllib.request.Request(url, method="GET")
+            req.add_header(
+                "User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            body = e.read().decode() if e.fp else "{}"
+            try:
+                err_data = json.loads(body)
+            except Exception:
+                err_data = {"error": body or str(e)}
+            if "1010" in str(err_data.get("error", "")):
+                return Response(
+                    {
+                        "error": "Market news provider is blocking this server's region or network (Cloudflare 1010).",
+                        "code": "1010",
+                    },
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
+            return Response(err_data, status=e.code)
+        except Exception as e:
+            return Response(
+                {"error": "Failed to fetch market news.", "detail": str(e)},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        return Response(data, status=status.HTTP_200_OK)

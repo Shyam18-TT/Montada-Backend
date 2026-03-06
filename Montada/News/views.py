@@ -160,6 +160,8 @@ MARKET_NEWS_SYMBOLS_BY_CATEGORY = {
         "AAPL", "AMZN", "MSFT", "GOOGL", "TSLA", "NVDA", "META", "JPM", "JNJ", "V", "WMT",
         "PG", "MA", "HD", "DIS", "BAC", "XOM", "PFE", "CSCO", "NFLX",
     ],
+    "crypto": ["BTC", "ETH", "BNB", "XRP", "ADA", "SOL", "DOGE", "AVAX", "DOT", "MATIC", "LINK", "UNI", "ATOM", "LTC", "ETC", "XLM", "NEAR", "APT", "ARB", "OP"],
+    "cryptocurrency": ["BTC", "ETH", "BNB", "XRP", "ADA", "SOL", "DOGE", "AVAX", "DOT", "MATIC", "LINK", "UNI", "ATOM", "LTC", "ETC", "XLM", "NEAR", "APT", "ARB", "OP"],
     "metals": ["GOLD", "SILVER", "XAUEUR", "PLATINUM", "PALLADIUM", "COPPER"],
     "indices": ["US30", "US100", "US500", "US2000", "GER40", "FRA40", "UK100", "JAP225", "NASDAQ", "DOW"],
     "index": ["US30", "US100", "US500", "US2000", "GER40", "FRA40", "UK100", "JAP225", "NASDAQ", "DOW"],
@@ -175,8 +177,8 @@ MARKET_NEWS_SYMBOLS_BY_CATEGORY = {
 class MarketNewsList(APIView):
     """
     GET: Fetch market/finance news from Marketaux API (same URL style as official docs).
-    Query param: category = all | forex | shares | equity | stocks | metals | indices |
-                 commodity | commodities | energy | menashares.
+    Query param: category = all | forex | shares | equity | stocks | crypto | cryptocurrency |
+                 metals | indices | commodity | commodities | energy | menashares.
     Optional: language, limit, page, symbols (overrides category symbols), etc.
     Example: ?category=forex&filter_entities=true&language=en&limit=10
     """
