@@ -2442,34 +2442,45 @@ class AdminFCMBroadcastView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
+        # ── Resolve device tokens ────────────────────────────────────────────
+        from Mainapp.models import DeviceToken
+        token_strings = list(
+            DeviceToken.objects.filter(user__in=recipient_list)
+            .values_list("fcm_token", flat=True)
+            .distinct()
+        )
+        device_tokens_found = len(token_strings)
+
         # ── Send FCM push ────────────────────────────────────────────────────
         fcm_success = 0
         fcm_failure = 0
-        try:
-            from firebase import send_push_to_users
-            fcm_result = send_push_to_users(
-                users=recipient_list,
-                title=title,
-                body=message,
-                data={
-                    "type": "admin_broadcast",
-                    "category": category,
-                    "redirect_url": redirect_url or "",
-                },
-            )
-            fcm_success = fcm_result.get("success_count", 0)
-            fcm_failure = fcm_result.get("failure_count", 0)
-        except Exception:
-            # FCM failure is non-fatal — DB notifications already saved
-            fcm_failure = recipient_count
+        if token_strings:
+            try:
+                from firebase import send_push_to_tokens
+                fcm_result = send_push_to_tokens(
+                    tokens=token_strings,
+                    title=title,
+                    body=message,
+                    data={
+                        "type": "admin_broadcast",
+                        "category": category,
+                        "redirect_url": redirect_url or "",
+                    },
+                )
+                fcm_success = fcm_result.get("success_count", 0)
+                fcm_failure = fcm_result.get("failure_count", 0)
+            except Exception:
+                # FCM failure is non-fatal — DB notifications already saved
+                fcm_failure = device_tokens_found
 
         return Response(
             {
-                "message": "Notification sent successfully.",
+                "message": "Notification saved and push sent." if device_tokens_found else "Notification saved. No device tokens registered for recipients.",
                 "segment": segment,
                 "category": category,
                 "title": title,
                 "recipient_count": recipient_count,
+                "device_tokens_found": device_tokens_found,
                 "fcm_success": fcm_success,
                 "fcm_failure": fcm_failure,
             },
