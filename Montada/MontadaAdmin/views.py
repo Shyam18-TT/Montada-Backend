@@ -2265,3 +2265,213 @@ class AdminPaymentHistoryView(generics.ListAPIView):
         return Response(data)
 
 
+# ===========================================================================
+# Admin FCM Push Notification Broadcast
+# ===========================================================================
+
+# Segment → Q filter mapping (resolved at request time so `now` is fresh)
+_SEGMENT_LABELS = {
+    "all":       "All users",
+    "analysts":  "Analysts",
+    "traders":   "Traders",
+    "premium":   "Premium (active monthly/yearly)",
+    "trial":     "Trial users",
+    "basic":     "Basic (no active subscription)",
+    "inactive":  "Inactive users",
+}
+
+# Notification categories shown to the admin (stored in UserNotification.notification_type)
+# Maps admin-facing category → UserNotification notification_type
+_PUSH_CATEGORY_MAP = {
+    "broadcast":             "INFO",
+    "targeted":              "INFO",
+    "subscription_reminder": "WARNING",
+    "system_alert":          "WARNING",
+    "promotional":           "INFO",
+}
+
+_PUSH_CATEGORIES = list(_PUSH_CATEGORY_MAP.keys())
+
+
+def _build_segment_qs(segment: str, now):
+    """Return a User queryset for the requested segment."""
+    base = User.objects.filter(is_active=True)
+
+    if segment == "analysts":
+        return base.filter(user_type="analyst")
+
+    if segment == "traders":
+        return base.filter(user_type="trader")
+
+    if Subscription is None:
+        # No subscription app — fall back to all active users
+        return base
+
+    if segment == "premium":
+        return base.filter(
+            subscription__status="active",
+            subscription__end_date__gte=now,
+            subscription__is_trial=False,
+            subscription__plan_type__in=["monthly", "yearly"],
+        )
+
+    if segment == "trial":
+        return base.filter(
+            subscription__status="active",
+            subscription__end_date__gte=now,
+            subscription__is_trial=True,
+        )
+
+    if segment == "basic":
+        # Traders with no active subscription at all
+        active_sub_ids = User.objects.filter(
+            subscription__status="active",
+            subscription__end_date__gte=now,
+        ).values_list("id", flat=True)
+        return base.filter(user_type="trader").exclude(id__in=active_sub_ids)
+
+    if segment == "inactive":
+        return User.objects.filter(is_active=False)
+
+    # default: "all"
+    return base
+
+
+class AdminFCMBroadcastView(APIView):
+    """
+    POST  /api/admin/notifications/broadcast/
+
+    Send a push notification + save UserNotification for each matched user.
+
+    Body
+    ----
+    {
+        "title"            : "Server maintenance tonight",      // required
+        "message"          : "We will be down at 02:00 UTC.",   // required
+        "segment"          : "all",                             // required
+        "category"         : "system_alert",                    // required
+        "redirect_url"     : "https://...",                     // optional
+        "user_ids"         : ["uuid1", "uuid2"]                 // required only when segment="targeted"
+    }
+
+    segment options
+    ---------------
+    all        – every active user
+    analysts   – users with user_type='analyst'
+    traders    – users with user_type='trader'
+    premium    – traders on an active monthly/yearly subscription
+    trial      – traders on an active free_trial subscription
+    basic      – traders with no active subscription
+    inactive   – users where is_active=False
+    targeted   – exact list of user IDs in user_ids
+
+    category options
+    ----------------
+    broadcast             – general announcement to all
+    targeted              – personalised message to specific users
+    subscription_reminder – remind users about expiring/upgrade
+    system_alert          – maintenance, downtime, urgent info
+    promotional           – offers, new features, campaigns
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def post(self, request):
+        title    = (request.data.get("title") or "").strip()
+        message  = (request.data.get("message") or "").strip()
+        segment  = (request.data.get("segment") or "").strip().lower()
+        category = (request.data.get("category") or "").strip().lower()
+        redirect_url = (request.data.get("redirect_url") or "").strip() or None
+        user_ids = request.data.get("user_ids") or []
+
+        # ── Validate ────────────────────────────────────────────────────────
+        errors = {}
+        if not title:
+            errors["title"] = "This field is required."
+        if not message:
+            errors["message"] = "This field is required."
+        valid_segments = list(_SEGMENT_LABELS.keys()) + ["targeted"]
+        if segment not in valid_segments:
+            errors["segment"] = f"Must be one of: {', '.join(valid_segments)}."
+        if category not in _PUSH_CATEGORIES:
+            errors["category"] = f"Must be one of: {', '.join(_PUSH_CATEGORIES)}."
+        if segment == "targeted" and not user_ids:
+            errors["user_ids"] = "Required when segment is 'targeted'."
+        if errors:
+            return Response(errors, status=status.HTTP_400_BAD_REQUEST)
+
+        # ── Build recipient queryset ─────────────────────────────────────────
+        now = timezone.now()
+        if segment == "targeted":
+            recipients = User.objects.filter(id__in=user_ids)
+        else:
+            recipients = _build_segment_qs(segment, now)
+
+        recipient_list = list(recipients.distinct())
+        recipient_count = len(recipient_list)
+
+        if recipient_count == 0:
+            return Response(
+                {
+                    "message": "No recipients found for the selected segment.",
+                    "segment": segment,
+                    "category": category,
+                    "recipient_count": 0,
+                    "fcm_success": 0,
+                    "fcm_failure": 0,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        # ── Save UserNotification rows ───────────────────────────────────────
+        notification_type = _PUSH_CATEGORY_MAP.get(category, "INFO")
+        try:
+            from Mainapp.models import UserNotification
+            UserNotification.objects.bulk_create([
+                UserNotification(
+                    user=user,
+                    title=title,
+                    message=message,
+                    notification_type=notification_type,
+                    redirect_url=redirect_url,
+                )
+                for user in recipient_list
+            ])
+        except Exception as db_exc:
+            return Response(
+                {"error": f"Failed to save notifications to DB: {db_exc}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        # ── Send FCM push ────────────────────────────────────────────────────
+        fcm_success = 0
+        fcm_failure = 0
+        try:
+            from firebase import send_push_to_users
+            fcm_result = send_push_to_users(
+                users=recipient_list,
+                title=title,
+                body=message,
+                data={
+                    "type": "admin_broadcast",
+                    "category": category,
+                    "redirect_url": redirect_url or "",
+                },
+            )
+            fcm_success = fcm_result.get("success_count", 0)
+            fcm_failure = fcm_result.get("failure_count", 0)
+        except Exception:
+            # FCM failure is non-fatal — DB notifications already saved
+            fcm_failure = recipient_count
+
+        return Response(
+            {
+                "message": "Notification sent successfully.",
+                "segment": segment,
+                "category": category,
+                "title": title,
+                "recipient_count": recipient_count,
+                "fcm_success": fcm_success,
+                "fcm_failure": fcm_failure,
+            },
+            status=status.HTTP_200_OK,
+        )

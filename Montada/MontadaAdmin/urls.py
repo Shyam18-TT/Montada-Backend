@@ -39,7 +39,7 @@ from .views import (
     AdminSubscriptionStatsView,
     AdminMRRView,
     AdminPaymentHistoryView,
-    
+    AdminFCMBroadcastView,
 )
 
 app_name = "MontadaAdmin"
@@ -92,6 +92,6 @@ urlpatterns = [
     path("subscriptions/mrr/", AdminMRRView.as_view(), name="admin_subscription_mrr"),
     path("subscriptions/payments/", AdminPaymentHistoryView.as_view(), name="admin_payment_history"),
 
-   
+    path("notifications/broadcast/", AdminFCMBroadcastView.as_view(), name="admin_fcm_broadcast"),
 ]
 

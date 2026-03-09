@@ -643,7 +643,9 @@ class SignalPushNotificationView(generics.GenericAPIView):
             )
             recipients = UserModel.objects.filter(id__in=recipient_ids)
 
-        recipient_count = recipients.count()
+        # Evaluate once so the same list is reused for DB save + FCM send
+        recipient_list = list(recipients)
+        recipient_count = len(recipient_list)
         if recipient_count == 0:
             return Response(
                 {
@@ -651,6 +653,7 @@ class SignalPushNotificationView(generics.GenericAPIView):
                     "audience": audience,
                     "category": category,
                     "recipient_count": 0,
+                    "device_tokens_found": 0,
                     "success_count": 0,
                     "failure_count": 0,
                 },
@@ -675,31 +678,61 @@ class SignalPushNotificationView(generics.GenericAPIView):
             "signal_status": signal.status or "",
         }
 
-        # Send via Firebase
+        # Save to UserNotification table for each recipient
         try:
-            from .push_notifications import push_signal_notification
-            result = push_signal_notification(
-                title=title,
-                body=body,
-                users=recipients,
-                data=data_payload,
-            )
-        except Exception as exc:
-            return Response(
-                {"error": f"Push notification failed: {exc}"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+            from Mainapp.models import UserNotification
+            UserNotification.objects.bulk_create([
+                UserNotification(
+                    user=recipient,
+                    title=title,
+                    message=body,
+                    notification_type="INFO",
+                )
+                for recipient in recipient_list
+            ])
+        except Exception:
+            pass  # DB notification failure should not block the FCM send
+
+        # Resolve FCM tokens now so we can report device_tokens_found
+        from Mainapp.models import DeviceToken
+        token_strings = list(
+            DeviceToken.objects.filter(user__in=recipient_list)
+            .values_list("fcm_token", flat=True)
+            .distinct()
+        )
+        device_tokens_found = len(token_strings)
+
+        # Send via Firebase
+        fcm_success = 0
+        fcm_failure = 0
+        if token_strings:
+            try:
+                from firebase import send_push_to_tokens
+                result = send_push_to_tokens(
+                    tokens=token_strings,
+                    title=title,
+                    body=body,
+                    data=data_payload,
+                )
+                fcm_success = result.get("success_count", 0)
+                fcm_failure = result.get("failure_count", 0)
+            except Exception as exc:
+                return Response(
+                    {"error": f"Push notification failed: {exc}"},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
 
         return Response(
             {
-                "message": "Push notification sent.",
+                "message": "Notification saved and push sent." if device_tokens_found else "Notification saved. No device tokens registered for recipients.",
                 "audience": audience,
                 "category": category,
                 "title": title,
                 "body": body,
                 "recipient_count": recipient_count,
-                "success_count": result.get("success_count", 0),
-                "failure_count": result.get("failure_count", 0),
+                "device_tokens_found": device_tokens_found,
+                "success_count": fcm_success,
+                "failure_count": fcm_failure,
             },
             status=status.HTTP_200_OK,
         )
