@@ -678,7 +678,8 @@ class SignalPushNotificationView(generics.GenericAPIView):
             "signal_status": signal.status or "",
         }
 
-        # Save to UserNotification table for each recipient
+        # ── Save to UserNotification (non-fatal) ────────────────────────────
+        db_error = None
         try:
             from Mainapp.models import UserNotification
             UserNotification.objects.bulk_create([
@@ -690,21 +691,28 @@ class SignalPushNotificationView(generics.GenericAPIView):
                 )
                 for recipient in recipient_list
             ])
-        except Exception:
-            pass  # DB notification failure should not block the FCM send
+        except Exception as exc:
+            db_error = str(exc)
 
-        # Resolve FCM tokens now so we can report device_tokens_found
-        from Mainapp.models import DeviceToken
-        token_strings = list(
-            DeviceToken.objects.filter(user__in=recipient_list)
-            .values_list("fcm_token", flat=True)
-            .distinct()
-        )
-        device_tokens_found = len(token_strings)
+        # ── Resolve FCM device tokens (non-fatal) ────────────────────────────
+        token_strings = []
+        device_tokens_found = 0
+        tokens_error = None
+        try:
+            from Mainapp.models import DeviceToken
+            token_strings = list(
+                DeviceToken.objects.filter(user__in=recipient_list)
+                .values_list("fcm_token", flat=True)
+                .distinct()
+            )
+            device_tokens_found = len(token_strings)
+        except Exception as exc:
+            tokens_error = str(exc)
 
-        # Send via Firebase
+        # ── Send via Firebase (non-fatal) ────────────────────────────────────
         fcm_success = 0
         fcm_failure = 0
+        fcm_error = None
         if token_strings:
             try:
                 from firebase import send_push_to_tokens
@@ -717,23 +725,38 @@ class SignalPushNotificationView(generics.GenericAPIView):
                 fcm_success = result.get("success_count", 0)
                 fcm_failure = result.get("failure_count", 0)
             except Exception as exc:
-                return Response(
-                    {"error": f"Push notification failed: {exc}"},
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                )
+                fcm_error = str(exc)
+                fcm_failure = device_tokens_found
 
-        return Response(
-            {
-                "message": "Notification saved and push sent." if device_tokens_found else "Notification saved. No device tokens registered for recipients.",
-                "audience": audience,
-                "category": category,
-                "title": title,
-                "body": body,
-                "recipient_count": recipient_count,
-                "device_tokens_found": device_tokens_found,
-                "success_count": fcm_success,
-                "failure_count": fcm_failure,
-            },
-            status=status.HTTP_200_OK,
-        )
+        # ── Build response message ───────────────────────────────────────────
+        if db_error and tokens_error:
+            msg = "Both DB save and token lookup failed."
+        elif db_error:
+            msg = "DB save failed; push attempted."
+        elif device_tokens_found == 0:
+            msg = "Notification saved. No device tokens registered for recipients."
+        elif fcm_error:
+            msg = "Notification saved. FCM push failed."
+        else:
+            msg = "Notification saved and push sent."
+
+        response_data = {
+            "message": msg,
+            "audience": audience,
+            "category": category,
+            "title": title,
+            "body": body,
+            "recipient_count": recipient_count,
+            "device_tokens_found": device_tokens_found,
+            "success_count": fcm_success,
+            "failure_count": fcm_failure,
+        }
+        if db_error:
+            response_data["db_error"] = db_error
+        if tokens_error:
+            response_data["tokens_error"] = tokens_error
+        if fcm_error:
+            response_data["fcm_error"] = fcm_error
+
+        return Response(response_data, status=status.HTTP_200_OK)
 
