@@ -36,6 +36,7 @@ from .views import (
     AdminTraderListView,
     AdminGetMarketDataFromMT5,
     AdminMarketNewsList,
+    AdminSubscriptionStatsView,
 )
 
 app_name = "MontadaAdmin"
@@ -83,5 +84,7 @@ urlpatterns = [
 
     path("marketdata/live/", AdminGetMarketDataFromMT5.as_view(), name="admin_marketdata_live"),
     path("news/market-news/", AdminMarketNewsList.as_view(), name="admin_market_news"),
+
+    path("subscriptions/stats/", AdminSubscriptionStatsView.as_view(), name="admin_subscription_stats"),
 ]
 

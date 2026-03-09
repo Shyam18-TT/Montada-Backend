@@ -2082,3 +2082,73 @@ class AdminMarketNewsList(APIView):
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
         return Response(data, status=status.HTTP_200_OK)
+
+
+# ===========================================================================
+# Subscriptions & Revenue – Admin Stats
+# ===========================================================================
+
+def _sub_period_filter(field, start, end):
+    """Return a Q that filters a DateTimeField between start and end."""
+    return Q(**{f"{field}__gte": start, f"{field}__lte": end})
+
+
+def _revenue_for_qs(qs):
+    """Sum amount for non-null, non-trial paid subscriptions in a queryset."""
+    from django.db.models import Sum
+    result = qs.filter(is_trial=False, amount__isnull=False).aggregate(total=Sum("amount"))
+    return float(result["total"] or 0)
+
+
+class AdminSubscriptionStatsView(APIView):
+    """
+    GET  /api/admin/subscriptions/stats/
+
+    Returns high-level subscription & revenue metrics (no date-range filtering).
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request):
+        if Subscription is None:
+            return Response({"error": "Subscriptions app not available."}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+        now = timezone.now()
+        all_subs = Subscription.objects.all()
+
+        # ── Totals (all-time) ───────────────────────────────────────────────
+        total = all_subs.count()
+        active = all_subs.filter(status="active", end_date__gte=now, is_trial=False).count()
+        trial = all_subs.filter(status="active", end_date__gte=now, is_trial=True).count()
+        monthly = all_subs.filter(status="active", end_date__gte=now, plan_type="monthly", is_trial=False).count()
+        yearly = all_subs.filter(status="active", end_date__gte=now, plan_type="yearly", is_trial=False).count()
+        expired = all_subs.filter(status="expired").count()
+        cancelled = all_subs.filter(status="cancelled").count()
+
+        # ── Revenue ─────────────────────────────────────────────────────────
+        currency_mode = (
+            all_subs.filter(is_trial=False, amount__isnull=False)
+            .values("currency")
+            .annotate(cnt=Count("id"))
+            .order_by("-cnt")
+            .first()
+        )
+        dominant_currency = currency_mode["currency"] if currency_mode else "usd"
+
+        return Response(
+            {
+                "total_subscriptions": total,
+                "active_subscriptions": active,
+                "trial_subscriptions": trial,
+                "monthly_subscriptions": monthly,
+                "yearly_subscriptions": yearly,
+                "expired_subscriptions": expired,
+                "cancelled_subscriptions": cancelled,
+                "all_time_revenue": {
+                    "value": round(_revenue_for_qs(all_subs), 2),
+                    "currency": dominant_currency,
+                },
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
