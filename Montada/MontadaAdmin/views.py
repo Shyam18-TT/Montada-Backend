@@ -2152,3 +2152,116 @@ class AdminSubscriptionStatsView(APIView):
         )
 
 
+class AdminMRRView(APIView):
+    """
+    GET  /api/admin/subscriptions/mrr/
+    Returns MRR for the last 6 calendar months: month key, month name, and value.
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request):
+        if Subscription is None:
+            return Response({"error": "Subscriptions app not available."}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+        import decimal
+        import calendar
+
+        now = timezone.now()
+        mrr_data = []
+
+        for i in range(5, -1, -1):
+            year = now.year
+            month = now.month - i
+            while month <= 0:
+                month += 12
+                year -= 1
+            last_day = monthrange(year, month)[1]
+            m_start = timezone.make_aware(timezone.datetime(year, month, 1))
+            m_end = timezone.make_aware(timezone.datetime(year, month, last_day, 23, 59, 59, 999999))
+            if m_end > now:
+                m_end = now
+
+            qs = Subscription.objects.filter(
+                is_trial=False,
+                amount__isnull=False,
+                status__in=["active", "expired", "cancelled"],
+                start_date__lte=m_end,
+                end_date__gte=m_start,
+            ).values("plan_type", "amount")
+
+            total = decimal.Decimal("0")
+            for sub in qs:
+                amt = sub["amount"] or 0
+                total += amt / 12 if sub["plan_type"] == "yearly" else amt
+
+            mrr_data.append({
+                "month": f"{year}-{month:02d}",
+                "month_name": calendar.month_name[month],
+                "value": float(round(total, 2)),
+            })
+
+        return Response({"mrr": mrr_data}, status=status.HTTP_200_OK)
+
+
+class AdminPaymentHistoryView(generics.ListAPIView):
+    """
+    GET  /api/admin/subscriptions/payments/
+
+    Paginated payment history — only subscriptions that have an amount recorded.
+    Each row: username, plan, amount, currency, status, date (start_date).
+
+    Query params:
+        plan   : free_trial | monthly | yearly
+        status : active | expired | cancelled
+        search : name or email (icontains)
+        page / page_size
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+    pagination_class = AdminPageNumberPagination
+
+    def get_queryset(self):
+        if Subscription is None:
+            return User.objects.none()
+        qs = (
+            Subscription.objects
+            .filter(amount__isnull=False)
+            .select_related("user")
+            .order_by("-start_date")
+        )
+        plan = self.request.query_params.get("plan", "").strip().lower()
+        if plan:
+            qs = qs.filter(plan_type=plan)
+        sub_status = self.request.query_params.get("status", "").strip().lower()
+        if sub_status:
+            qs = qs.filter(status=sub_status)
+        search = self.request.query_params.get("search", "").strip()
+        if search:
+            qs = qs.filter(
+                Q(user__name__icontains=search) | Q(user__email__icontains=search)
+            )
+        return qs
+
+    def list(self, request, *args, **kwargs):
+        if Subscription is None:
+            return Response({"error": "Subscriptions app not available."}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        qs = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(qs)
+        items = page if page is not None else qs
+        data = [
+            {
+                "id": str(sub.id),
+                "username": sub.user.name or sub.user.email,
+                "email": sub.user.email,
+                "plan": sub.plan_type,
+                "amount": float(sub.amount),
+                "currency": sub.currency or "usd",
+                "status": sub.status,
+                "date": sub.start_date.isoformat() if sub.start_date else None,
+            }
+            for sub in items
+        ]
+        if page is not None:
+            return self.get_paginated_response(data)
+        return Response(data)
+
+
