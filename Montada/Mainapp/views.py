@@ -580,7 +580,7 @@ class SaveFCMToken(APIView):
         user = request.user
         DeviceToken.objects.update_or_create(
             user=user,
-            fcm_token=token,
+            defaults={"fcm_token": token},
         )
         return Response(
             {"message": "Token saved"},

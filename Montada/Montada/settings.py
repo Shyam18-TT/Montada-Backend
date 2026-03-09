@@ -51,7 +51,6 @@ INSTALLED_APPS = [
     'rest_framework',
     'rest_framework_simplejwt',
     'rest_framework_simplejwt.token_blacklist',
-    # "push_notifications",
     # custom apps
     'Mainapp',
     'Subscriptions',
@@ -117,13 +116,6 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = 'Montada.wsgi.application'
-
-# push notification settings---------
-PUSH_NOTIFICATIONS_SETTINGS = {
-        "FCM_API_KEY": "[your api key]",
-        "GCM_API_KEY": "[your api key]",
-        "APNS_CERTIFICATE": "/path/to/your/certificate.pem",
-}
 
 
 # Database
