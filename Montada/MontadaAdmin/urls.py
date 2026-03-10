@@ -41,6 +41,7 @@ from .views import (
     AdminPaymentHistoryView,
     AdminFCMBroadcastView,
     AdminUserPickerView,
+    AdminEconomicCalendarView,
 )
 
 app_name = "MontadaAdmin"
@@ -87,6 +88,7 @@ urlpatterns = [
     path("polls/<uuid:question_pk>/options/<uuid:option_pk>/", AdminPollOptionDeleteView.as_view(), name="admin_poll_option_delete"),
 
     path("marketdata/live/", AdminGetMarketDataFromMT5.as_view(), name="admin_marketdata_live"),
+    path("marketdata/economic-calendar/", AdminEconomicCalendarView.as_view(), name="admin_economic_calendar"),
     path("news/market-news/", AdminMarketNewsList.as_view(), name="admin_market_news"),
 
     path("subscriptions/stats/", AdminSubscriptionStatsView.as_view(), name="admin_subscription_stats"),

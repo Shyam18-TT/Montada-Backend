@@ -2542,3 +2542,102 @@ class AdminUserPickerView(generics.ListAPIView):
         if page is not None:
             return self.get_paginated_response(data)
         return Response(data, status=status.HTTP_200_OK)
+
+
+class AdminEconomicCalendarView(APIView):
+    """
+    GET  /api/admin/marketdata/economic-calendar/
+
+    Fetches the economic calendar from ForexNewsAPI (admin-only).
+
+    Available filters (query params):
+    ┌─────────────┬──────────────────────────────────────────────────────────┐
+    │ Param       │ Description                                              │
+    ├─────────────┼──────────────────────────────────────────────────────────┤
+    │ date        │ Shorthand range: today | yesterday | last7days |         │
+    │             │ last30days  — OR a specific date YYYY-MM-DD              │
+    │ from_date   │ Start of custom date range  YYYY-MM-DD                   │
+    │ to_date     │ End of custom date range    YYYY-MM-DD                   │
+    │ country     │ Comma-separated ISO country codes  e.g. US,GB,EU         │
+    │ importance  │ 1 (low) | 2 (medium) | 3 (high)  — comma-separated ok   │
+    │ currency    │ Comma-separated currency codes  e.g. USD,EUR,GBP         │
+    │ items       │ Results per page (default 10)                            │
+    │ page        │ Page number     (default 1)                              │
+    └─────────────┴──────────────────────────────────────────────────────────┘
+
+    Response shape:
+    {
+        "total_pages" : 5,
+        "page"        : 1,
+        "items"       : 10,
+        "events"      : [ { ...ForexNewsAPI event object... }, ... ]
+    }
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    _BASE_URL = "https://forexnewsapi.com/api/v1/economic-calendar"
+
+    _ALLOWED_PARAMS = {
+        "date", "from_date", "to_date",
+        "country", "importance", "currency",
+        "items", "page",
+    }
+
+    def get(self, request):
+        token = getattr(django_settings, "FOREXNEWS_API_TOKEN", "")
+        if not token:
+            return Response(
+                {"error": "ForexNewsAPI token is not configured."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        params = {"token": token}
+
+        for key in self._ALLOWED_PARAMS:
+            val = (request.query_params.get(key) or "").strip()
+            if val:
+                params[key] = val
+
+        # Sensible defaults
+        params.setdefault("date",  "last7days")
+        params.setdefault("items", "10")
+        params.setdefault("page",  "1")
+
+        url = self._BASE_URL + "?" + urllib.parse.urlencode(params)
+
+        try:
+            req = urllib.request.Request(url, method="GET")
+            req.add_header(
+                "User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                raw = json.loads(resp.read().decode())
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode() if exc.fp else "{}"
+            try:
+                err_data = json.loads(body)
+            except Exception:
+                err_data = {"error": body or str(exc)}
+            return Response(err_data, status=exc.code)
+        except urllib.error.URLError as exc:
+            return Response(
+                {"error": "Could not reach ForexNewsAPI.", "detail": str(exc.reason)},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        except Exception as exc:
+            return Response(
+                {"error": "Failed to fetch economic calendar.", "detail": str(exc)},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        return Response(
+            {
+                "total_pages": raw.get("total_pages", 1),
+                "page":        int(params.get("page", 1)),
+                "items":       int(params.get("items", 10)),
+                "events":      raw.get("data", []),
+            },
+            status=status.HTTP_200_OK,
+        )
