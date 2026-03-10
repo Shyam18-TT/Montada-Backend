@@ -341,3 +341,197 @@ class ForexEventsView(APIView):
             status=status.HTTP_200_OK,
         )
 
+
+class ForexEventDetailView(APIView):
+    """
+    GET  /api/news/events/<event_id>/
+
+    Fetches the details of a single economic event by its event_id
+    (e.g. AAD978) from ForexNewsAPI, including all related news articles.
+
+    Query params:
+        page      : page number for the article list (default 1)
+
+    Response shape:
+    {
+        "event_id"   : "AAD978",
+        "event_name" : "China trade surges...",
+        "event_text" : "...",
+        "page"       : 1,
+        "articles"   : [
+            {
+                "title"       : "...",
+                "news_url"    : "...",
+                "image_url"   : "...",
+                "text"        : "...",
+                "sentiment"   : "Positive",
+                "type"        : "Article",
+                "source_name" : "Reuters",
+                "date"        : "...",
+                "currency"    : [],
+                "topics"      : ["China"]
+            },
+            ...
+        ]
+    }
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, event_id):
+        token = getattr(settings, "FOREXNEWS_API_TOKEN", "ix9zm1aqfxqzclsusns6cqsaufji9k3lpdcy0ybs")
+        base_url = getattr(settings, "FOREXNEWS_EVENTS_URL", "https://forexnewsapi.com/api/v1/events")
+
+        if not token:
+            return Response(
+                {"error": "ForexNewsAPI token is not configured."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        event_id = event_id.strip().upper()
+        if not event_id:
+            return Response(
+                {"error": "event_id is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        page = request.query_params.get("page", "1")
+
+        params = {
+            "eventid": event_id,
+            "page":    page,
+            "token":   token,
+        }
+        url = base_url + "?" + urllib.parse.urlencode(params)
+
+        try:
+            req = urllib.request.Request(url, method="GET")
+            req.add_header(
+                "User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                raw = json.loads(resp.read().decode())
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode() if exc.fp else "{}"
+            try:
+                err_data = json.loads(body)
+            except Exception:
+                err_data = {"error": body or str(exc)}
+            return Response(err_data, status=exc.code)
+        except urllib.error.URLError as exc:
+            return Response(
+                {"error": "Could not reach ForexNewsAPI.", "detail": str(exc.reason)},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        except Exception as exc:
+            return Response(
+                {"error": "Failed to fetch event detail.", "detail": str(exc)},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        return Response(
+            {
+                "event_id":   event_id,
+                "event_name": raw.get("event_name", ""),
+                "event_text": raw.get("event_text", ""),
+                "page":       int(page),
+                "articles":   raw.get("data", []),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class ForexTrendingHeadlinesView(APIView):
+    """
+    GET  /api/news/trending-headlines/
+
+    Returns trending forex/market headlines from ForexNewsAPI.
+
+    Query params:
+        page      : page number (default 1)
+        currency  : comma-separated currency codes to filter e.g. USD,EUR
+        date      : specific date YYYY-MM-DD
+        from_date : start date YYYY-MM-DD
+        to_date   : end date YYYY-MM-DD
+        sentiment : Positive | Negative | Neutral
+
+    Response shape:
+    {
+        "total_pages": 101,
+        "page": 1,
+        "headlines": [
+            {
+                "id"        : 5116,
+                "headline"  : "South Africa GDP Growth Slows...",
+                "text"      : "...",
+                "news_id"   : 289186,
+                "sentiment" : "Negative",
+                "date"      : "Tue, 10 Mar 2026 05:30:46 -0400",
+                "currency"  : []
+            },
+            ...
+        ]
+    }
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    _ALLOWED_PARAMS = {"page", "currency", "date", "from_date", "to_date", "sentiment"}
+
+    def get(self, request):
+        token    = getattr(settings, "FOREXNEWS_API_TOKEN", "")
+        base_url = getattr(settings, "FOREXNEWS_TRENDING_URL",
+                           "https://forexnewsapi.com/api/v1/trending-headlines")
+
+        if not token:
+            return Response(
+                {"error": "ForexNewsAPI token is not configured."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        params = {"token": token}
+        for key in self._ALLOWED_PARAMS:
+            val = request.query_params.get(key)
+            if val:
+                params[key] = val
+
+        params.setdefault("page", "1")
+
+        url = base_url + "?" + urllib.parse.urlencode(params)
+
+        try:
+            req = urllib.request.Request(url, method="GET")
+            req.add_header(
+                "User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                raw = json.loads(resp.read().decode())
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode() if exc.fp else "{}"
+            try:
+                err_data = json.loads(body)
+            except Exception:
+                err_data = {"error": body or str(exc)}
+            return Response(err_data, status=exc.code)
+        except urllib.error.URLError as exc:
+            return Response(
+                {"error": "Could not reach ForexNewsAPI.", "detail": str(exc.reason)},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        except Exception as exc:
+            return Response(
+                {"error": "Failed to fetch trending headlines.", "detail": str(exc)},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        return Response(
+            {
+                "total_pages": raw.get("total_pages", 1),
+                "page":        int(params.get("page", 1)),
+                "headlines":   raw.get("data", []),
+            },
+            status=status.HTTP_200_OK,
+        )
+
