@@ -2486,3 +2486,59 @@ class AdminFCMBroadcastView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class AdminUserPickerView(generics.ListAPIView):
+    """
+    GET  /api/admin/notifications/user-picker/
+
+    Returns a lightweight list of all active users (id + username + email +
+    user_type) intended for the targeted-user picker in AdminFCMBroadcastView.
+
+    Query params:
+        search    : filter by username or email (case-insensitive, partial)
+        user_type : filter by user type  (analyst | trader)
+        page      : page number (default 1)
+        page_size : results per page     (default 50, max 200)
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    class _Pagination(PageNumberPagination):
+        page_size = 50
+        page_size_query_param = "page_size"
+        max_page_size = 200
+
+    pagination_class = _Pagination
+
+    def get_queryset(self):
+        qs = (
+            User.objects.filter(is_active=True)
+            .order_by("username")
+            .only("id", "username", "email", "user_type")
+        )
+        search = (self.request.query_params.get("search") or "").strip()
+        if search:
+            qs = qs.filter(
+                Q(username__icontains=search) | Q(email__icontains=search)
+            )
+        user_type = (self.request.query_params.get("user_type") or "").strip().lower()
+        if user_type in ("analyst", "trader"):
+            qs = qs.filter(user_type=user_type)
+        return qs
+
+    def list(self, request, *args, **kwargs):
+        qs = self.get_queryset()
+        page = self.paginate_queryset(qs)
+        users = page if page is not None else qs
+        data = [
+            {
+                "id": str(u.id),
+                "username": u.username,
+                "email": u.email,
+                "user_type": getattr(u, "user_type", ""),
+            }
+            for u in users
+        ]
+        if page is not None:
+            return self.get_paginated_response(data)
+        return Response(data, status=status.HTTP_200_OK)
