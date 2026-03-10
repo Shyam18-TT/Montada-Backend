@@ -1,7 +1,12 @@
 import uuid
+import urllib.request
+import urllib.parse
+import urllib.error
+import json
 from datetime import timedelta
 from calendar import monthrange
 
+from django.conf import settings as django_settings
 from django.db import connections
 from django.db.models import Avg, Count, Q
 from django.utils import timezone

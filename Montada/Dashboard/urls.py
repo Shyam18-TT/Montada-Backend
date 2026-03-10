@@ -18,6 +18,7 @@ urlpatterns = [
     path('polls/vote/', views.PollVoteView.as_view(), name='poll_vote'),
 
     path('marketdata/live', views.GetMarketDataFromMT5.as_view(),name='get_market_Data'),
+    
 ]
 
 # Serve media files in development

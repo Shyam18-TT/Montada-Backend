@@ -11,4 +11,5 @@ urlpatterns = [
 
 
     path('market-news/',views.MarketNewsList.as_view(), name='market_news'),
+    path('events/', views.ForexEventsView.as_view(), name='forex_events'),
 ]
