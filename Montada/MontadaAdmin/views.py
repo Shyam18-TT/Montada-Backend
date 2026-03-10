@@ -11,7 +11,7 @@ from datetime import timedelta, datetime
 from django.conf import settings as django_settings
 from django.utils import timezone
 from django.db import connections
-from django.db.models import Avg, Count, Q, OuterRef, Subquery, Prefetch
+from django.db.models import Avg, Count, F, Q, OuterRef, Subquery, Prefetch
 from django.db.models.functions import Coalesce
 from rest_framework import status, generics
 from rest_framework.pagination import PageNumberPagination
@@ -2638,6 +2638,238 @@ class AdminEconomicCalendarView(APIView):
                 "page":        int(params.get("page", 1)),
                 "items":       int(params.get("items", 10)),
                 "events":      raw.get("data", []),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+# ─── helpers ──────────────────────────────────────────────────────────────────
+
+def _safe_pct(numerator, denominator):
+    if not denominator:
+        return 0.0
+    return round(numerator / denominator * 100, 2)
+
+
+def _avg_rr_for_qs(qs):
+    """
+    Average Risk:Reward = abs(TP - entry) / abs(entry - SL).
+    Uses NullIf to skip signals where entry == stop_loss (avoids div-by-zero).
+    Returns float or None.
+    """
+    try:
+        from django.db.models import DecimalField, ExpressionWrapper, F, Value
+        from django.db.models.functions import Abs, NullIf
+        annotated = qs.annotate(
+            rr_ratio=ExpressionWrapper(
+                Abs(F("take_profit") - F("entry_price"))
+                / NullIf(Abs(F("entry_price") - F("stop_loss")), Value(0)),
+                output_field=DecimalField(max_digits=10, decimal_places=4),
+            )
+        )
+        result = annotated.aggregate(avg_rr=Avg("rr_ratio"))
+        val = result.get("avg_rr")
+        return round(float(val), 4) if val is not None else None
+    except Exception:
+        return None
+
+
+class AdminPerformanceAnalyticsView(APIView):
+    """
+    GET  /api/admin/analytics/performance/
+
+    Performance stats for the admin dashboard:
+    - avg_confidence   : average confidence level (0–100) of closed signals in period
+    - average_rr_ratio : average risk:reward (|TP-entry|/|entry-SL|) for closed signals
+    - win_rate         : win rate in % (wins / (wins+losses)) for closed signals
+    - win_rate_trend   : percentage point change vs previous same-length period
+
+    Query params: range (today | last_7_days | last_30_days | custom), from_date, to_date.
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request):
+        if TradingSignal is None:
+            return Response({"error": "Signals module unavailable."}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+        start, end, preset, err = _parse_date_range(request)
+        if err is not None:
+            return err
+        prev_start, prev_end = _prev_period(start, end)
+
+        closed_qs      = TradingSignal.active.filter(status="CLOSED", updated_at__gte=start,      updated_at__lte=end)
+        closed_prev_qs = TradingSignal.active.filter(status="CLOSED", updated_at__gte=prev_start, updated_at__lte=prev_end)
+
+        # Current period: avg_confidence, avg_rr, win_rate
+        agg = closed_qs.aggregate(
+            wins=Count("id", filter=Q(is_win=True)),
+            losses=Count("id", filter=Q(is_loss=True)),
+            avg_confidence=Avg("confidence_level"),
+        )
+        wins = agg["wins"] or 0
+        losses = agg["losses"] or 0
+        outcome_total = wins + losses
+        win_rate = _safe_pct(wins, outcome_total)
+        avg_confidence = round(float(agg["avg_confidence"]), 2) if agg["avg_confidence"] is not None else None
+        avg_rr = _avg_rr_for_qs(closed_qs)
+
+        # Previous period win rate for trend
+        prev_agg = closed_prev_qs.aggregate(
+            wins=Count("id", filter=Q(is_win=True)),
+            losses=Count("id", filter=Q(is_loss=True)),
+        )
+        prev_wins = prev_agg["wins"] or 0
+        prev_losses = prev_agg["losses"] or 0
+        prev_total = prev_wins + prev_losses
+        prev_win_rate = _safe_pct(prev_wins, prev_total)
+        win_rate_trend = round(win_rate - prev_win_rate, 2)
+
+        return Response(
+            {
+                "date_range": {
+                    "preset": preset,
+                    "from_date": start.date().isoformat(),
+                    "to_date": end.date().isoformat(),
+                },
+                "avg_confidence":   avg_confidence,
+                "average_rr_ratio": avg_rr,
+                "win_rate":         win_rate,
+                "win_rate_trend":   win_rate_trend,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+def _closed_signals_last_six_months():
+    """Return start datetime for 6 calendar months ago (inclusive) and now as end."""
+    now = timezone.now()
+    year = now.year
+    month = now.month - 6
+    while month <= 0:
+        month += 12
+        year -= 1
+    start = timezone.make_aware(datetime(year, month, 1))
+    return start, now
+
+
+def _qs_with_rr_ratio(qs):
+    """Annotate signal queryset with rr_ratio = |TP-entry|/|entry-SL|. Skip division by zero."""
+    from django.db.models import DecimalField, ExpressionWrapper, F, Value
+    from django.db.models.functions import Abs, NullIf
+    return qs.annotate(
+        rr_ratio=ExpressionWrapper(
+            Abs(F("take_profit") - F("entry_price"))
+            / NullIf(Abs(F("entry_price") - F("stop_loss")), Value(0)),
+            output_field=DecimalField(max_digits=10, decimal_places=4),
+        )
+    )
+
+
+def _rr_buckets():
+    """Default RR ratio buckets for distribution: (label, low, high). high is exclusive except last (inf)."""
+    return [
+        ("0-0.5", 0.0, 0.5),
+        ("0.5-1", 0.5, 1.0),
+        ("1-1.5", 1.0, 1.5),
+        ("1.5-2", 1.5, 2.0),
+        ("2-3", 2.0, 3.0),
+        ("3+", 3.0, float("inf")),
+    ]
+
+
+class AdminPerformanceGraphsView(APIView):
+    """
+    GET  /api/admin/analytics/performance/graphs/
+
+    Single view returning all graph datasets for the performance analytics page:
+    1. win_rate_trend     : last 6 months — { month, win_rate } (line/bar)
+    2. signals_by_timeframe: count of closed signals per timeframe (bar)
+    3. asset_class_distribution : count per asset class (pie)
+    4. rr_ratio_distribution   : count of signals in RR buckets (bar/histogram)
+
+    All series use closed signals in the last 6 calendar months.
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request):
+        if TradingSignal is None:
+            return Response({"error": "Signals module unavailable."}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+        six_start, six_end = _closed_signals_last_six_months()
+        base_qs = TradingSignal.active.filter(
+            status=TradingSignal.Status.CLOSED,
+            updated_at__gte=six_start,
+            updated_at__lte=six_end,
+        )
+
+        # 1. Win rate trend — last 6 months
+        win_rate_trend = []
+        for start, end, year, month, label in _last_six_months_ranges():
+            m_qs = base_qs.filter(updated_at__gte=start, updated_at__lte=end)
+            agg = m_qs.aggregate(
+                wins=Count("id", filter=Q(is_win=True)),
+                losses=Count("id", filter=Q(is_loss=True)),
+            )
+            w, l = agg["wins"] or 0, agg["losses"] or 0
+            total = w + l
+            win_rate_trend.append({
+                "month": label,
+                "year": year,
+                "month_number": month,
+                "win_rate": _safe_pct(w, total),
+                "wins": w,
+                "losses": l,
+                "total": total,
+            })
+
+        # 2. Signals by timeframe (use timeframe_code to avoid conflict with model field)
+        tf_list = list(
+            base_qs.values("timeframe__code")
+            .annotate(count=Count("id"))
+            .order_by("timeframe__code")
+        )
+        signals_by_timeframe = [
+            {"timeframe": r["timeframe__code"] or "", "count": r["count"]}
+            for r in tf_list
+        ]
+
+        # 3. Asset class distribution / pie (use asset_class_name to avoid conflict with model field)
+        ac_list = list(
+            base_qs.values("asset_class__name")
+            .annotate(count=Count("id"))
+            .order_by("-count")
+        )
+        asset_class_distribution = [
+            {"asset_class": r["asset_class__name"] or "", "count": r["count"]}
+            for r in ac_list
+        ]
+
+        # 4. RR ratio distribution: single annotated query, stream into buckets (no full list in memory)
+        buckets = _rr_buckets()
+        rr_ratio_distribution = [{"bucket": label, "count": 0} for label, _, _ in buckets]
+        try:
+            rr_qs = _qs_with_rr_ratio(base_qs).values_list("rr_ratio", flat=True)
+            for v in rr_qs.iterator(chunk_size=500):
+                if v is None:
+                    continue
+                f = float(v)
+                for i, (label, low, high) in enumerate(buckets):
+                    if high == float("inf"):
+                        if f >= low:
+                            rr_ratio_distribution[i]["count"] += 1
+                            break
+                    elif low <= f < high:
+                        rr_ratio_distribution[i]["count"] += 1
+                        break
+        except Exception:
+            pass
+
+        return Response(
+            {
+                "win_rate_trend": win_rate_trend,
+                "signals_by_timeframe": signals_by_timeframe,
+                "asset_class_distribution": asset_class_distribution,
+                "rr_ratio_distribution": rr_ratio_distribution,
             },
             status=status.HTTP_200_OK,
         )

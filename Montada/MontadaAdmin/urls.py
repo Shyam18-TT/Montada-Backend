@@ -42,6 +42,8 @@ from .views import (
     AdminFCMBroadcastView,
     AdminUserPickerView,
     AdminEconomicCalendarView,
+    AdminPerformanceAnalyticsView,
+    AdminPerformanceGraphsView,
 )
 
 app_name = "MontadaAdmin"
@@ -97,5 +99,8 @@ urlpatterns = [
 
     path("notifications/broadcast/", AdminFCMBroadcastView.as_view(), name="admin_fcm_broadcast"),
     path("notifications/user-picker/", AdminUserPickerView.as_view(), name="admin_user_picker"),
+
+    path("analytics/performance/", AdminPerformanceAnalyticsView.as_view(), name="admin_performance_analytics"),
+    path("analytics/performance/graphs/", AdminPerformanceGraphsView.as_view(), name="admin_performance_graphs"),
 ]
 
