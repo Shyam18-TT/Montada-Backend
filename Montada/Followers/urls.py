@@ -24,4 +24,7 @@ urlpatterns = [
     # Counts & status
     path("counts/", views.CountsView.as_view(), name="counts"),
     path("status/", views.FollowStatusView.as_view(), name="follow_status"),
+
+    # Analyst public profile (for traders)
+    path("analysts/<uuid:analyst_id>/profile/", views.AnalystPublicProfileView.as_view(), name="analyst_public_profile"),
 ]

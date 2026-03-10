@@ -2512,7 +2512,7 @@ class AdminUserPickerView(generics.ListAPIView):
 
     def get_queryset(self):
         qs = (
-            User.objects.filter(is_active=True)
+            User.objects.filter(is_active=True, is_staff=False, is_superuser=False)
             .order_by("username")
             .only("id", "username", "email", "user_type")
         )

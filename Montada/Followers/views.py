@@ -6,9 +6,10 @@ from rest_framework.pagination import PageNumberPagination
 from django.shortcuts import get_object_or_404
 from django.contrib.auth import get_user_model
 from datetime import timedelta
-from django.db.models import Q, Count, OuterRef, Subquery, F, Value, FloatField, ExpressionWrapper
-from django.db.models.functions import Coalesce, NullIf
+from django.db.models import Q, Count, Avg, OuterRef, Subquery, F, Value, FloatField, ExpressionWrapper
+from django.db.models.functions import Coalesce, NullIf, TruncMonth
 from django.utils import timezone
+from django.conf import settings as django_settings
 
 from .models import Follow, Mute
 
@@ -853,3 +854,206 @@ class FollowStatusView(APIView):
             "is_blocked_by_them": is_blocked_by_them,
             "is_muted": is_muted,
         })
+
+
+class AnalystPublicProfileView(APIView):
+    """
+    GET  /api/followers/analysts/<uuid:analyst_id>/profile/
+
+    Returns the public profile of an analyst for trader consumption.
+
+    Response sections:
+    ─ profile         : id, username, name, profile_picture, member_since
+    ─ stats           : total_signals, open_signals, closed_signals,
+                        win_rate, loss_rate, neutral_rate,
+                        avg_confidence, total_followers, total_applied
+    ─ by_asset        : signal counts grouped by asset class
+    ─ by_direction    : BUY / SELL split
+    ─ by_timeframe    : signal counts per timeframe
+    ─ monthly_graph   : last 6 months win / loss / total per month
+    ─ follow_status   : is_following, follow_state (accepted/pending/none)
+    """
+    permission_classes = [IsAuthenticated]
+
+    @staticmethod
+    def _profile_picture_url(request, user):
+        if not user.profile_picture:
+            return None
+        try:
+            base = getattr(django_settings, "PUBLIC_MEDIA_BASE_URL", None)
+            if base:
+                return f"{base.rstrip('/')}/{user.profile_picture}"
+            return request.build_absolute_uri(user.profile_picture.url)
+        except Exception:
+            return None
+
+    def get(self, request, analyst_id):
+        User = get_user_model()
+
+        analyst = get_object_or_404(
+            User, id=analyst_id, user_type="analyst", is_active=True
+        )
+
+        if TradingSignal is None:
+            return Response(
+                {"error": "Signals module unavailable."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        # ── base signal queryset (exclude soft-deleted) ──────────────────────
+        qs = TradingSignal.active.filter(analyst=analyst)
+
+        # Single aggregate pass for all direct-field counts → 1 DB round-trip.
+        # NOTE: Count("applications") is intentionally excluded here because it
+        # introduces a one-to-many JOIN that inflates every other Count("id").
+        # total_applied is fetched via a separate, clean query below.
+        agg = qs.aggregate(
+            total_signals  = Count("id"),
+            open_signals   = Count("id", filter=Q(status="OPEN")),
+            closed_signals = Count("id", filter=Q(status="CLOSED")),
+            win_count      = Count("id", filter=Q(is_win=True)),
+            loss_count     = Count("id", filter=Q(is_loss=True)),
+            neutral_count  = Count("id", filter=Q(is_neutral=True)),
+            avg_confidence = Avg("confidence_level"),
+        )
+
+        total_signals  = agg["total_signals"]   or 0
+        open_signals   = agg["open_signals"]    or 0
+        closed_signals = agg["closed_signals"]  or 0
+        win_count      = agg["win_count"]       or 0
+        loss_count     = agg["loss_count"]      or 0
+        neutral_count  = agg["neutral_count"]   or 0
+        avg_confidence = agg["avg_confidence"]
+
+        # Separate query to avoid JOIN inflation on the main aggregate
+        try:
+            from Signals.models import AppliedSignal
+            total_applied = AppliedSignal.objects.filter(
+                signal__analyst=analyst,
+                signal__deleted_at__isnull=True,
+            ).count()
+        except Exception:
+            total_applied = 0
+
+        def _pct(numerator, denominator):
+            if not denominator:
+                return 0.0
+            return round(numerator / denominator * 100, 2)
+
+        win_rate     = _pct(win_count,     closed_signals)
+        loss_rate    = _pct(loss_count,    closed_signals)
+        neutral_rate = _pct(neutral_count, closed_signals)
+
+        # ── follower count ────────────────────────────────────────────────────
+        # is_active=True is required: unfollow() keeps status=ACCEPTED but
+        # sets is_active=False, so filtering status alone gives wrong count.
+        total_followers = Follow.objects.filter(
+            followed=analyst,
+            status=Follow.Status.ACCEPTED,
+            is_active=True,
+        ).count()
+
+        # ── signals by asset class ────────────────────────────────────────────
+        by_asset = list(
+            qs.values(asset_name=F("asset_class__name"))
+            .annotate(count=Count("id"))
+            .order_by("-count")
+        )
+
+        # ── signals by direction ──────────────────────────────────────────────
+        direction_data = dict(
+            qs.values_list("direction")
+            .annotate(count=Count("id"))
+        )
+        by_direction = {
+            "BUY":  direction_data.get("BUY",  0),
+            "SELL": direction_data.get("SELL", 0),
+        }
+
+        # ── signals by timeframe ──────────────────────────────────────────────
+        by_timeframe = list(
+            qs.values(timeframe_code=F("timeframe__code"))
+            .annotate(count=Count("id"))
+            .order_by("timeframe_code")
+        )
+
+        # ── monthly graph – last 6 months ─────────────────────────────────────
+        now     = timezone.now()
+        six_ago = now - timedelta(days=183)
+        monthly_qs = (
+            qs.filter(created_at__gte=six_ago)
+            .annotate(month=TruncMonth("created_at"))
+            .values("month")
+            .annotate(
+                total  = Count("id"),
+                wins   = Count("id", filter=Q(is_win=True)),
+                losses = Count("id", filter=Q(is_loss=True)),
+            )
+            .order_by("month")
+        )
+        monthly_graph = [
+            {
+                "month":    entry["month"].strftime("%b %Y"),
+                "total":    entry["total"],
+                "wins":     entry["wins"],
+                "losses":   entry["losses"],
+                "win_rate": _pct(entry["wins"], entry["total"]),
+            }
+            for entry in monthly_qs
+        ]
+
+        # ── follow status for the requesting trader ───────────────────────────
+        follow_state = "none"
+        is_following  = False
+        try:
+            follow = Follow.objects.get(follower=request.user, followed=analyst)
+            if follow.status == Follow.Status.ACCEPTED and follow.is_active:
+                # Actively following
+                is_following = True
+                follow_state = "accepted"
+            elif follow.status == Follow.Status.ACCEPTED and not follow.is_active:
+                # Previously followed, then unfollowed
+                follow_state = "unfollowed"
+            elif follow.status == Follow.Status.PENDING:
+                follow_state = "pending"
+            elif follow.status == Follow.Status.BLOCKED:
+                follow_state = "blocked"
+            elif follow.status == Follow.Status.REJECTED:
+                follow_state = "rejected"
+        except Follow.DoesNotExist:
+            pass
+
+        return Response(
+            {
+                "profile": {
+                    "id":              str(analyst.id),
+                    "username":        analyst.username,
+                    "name":            analyst.name or analyst.username,
+                    "profile_picture": self._profile_picture_url(request, analyst),
+                    "member_since":    analyst.created_at.strftime("%b %Y"),
+                },
+                "stats": {
+                    "total_signals":  total_signals,
+                    "open_signals":   open_signals,
+                    "closed_signals": closed_signals,
+                    "win_count":      win_count,
+                    "loss_count":     loss_count,
+                    "neutral_count":  neutral_count,
+                    "win_rate":       win_rate,
+                    "loss_rate":      loss_rate,
+                    "neutral_rate":   neutral_rate,
+                    "avg_confidence": round(avg_confidence, 2) if avg_confidence else 0.0,
+                    "total_followers": total_followers,
+                    "total_applied":   total_applied,
+                },
+                "by_asset":     by_asset,
+                "by_direction": by_direction,
+                "by_timeframe": by_timeframe,
+                "monthly_graph": monthly_graph,
+                "follow_status": {
+                    "is_following": is_following,
+                    "state":        follow_state,
+                },
+            },
+            status=status.HTTP_200_OK,
+        )
