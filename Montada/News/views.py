@@ -195,6 +195,7 @@ class MarketNewsList(APIView):
         params = {
             "api_token": api_token,
             "filter_entities": "true",
+            "language":"en"
         }
         category = (request.query_params.get("category") or "all").strip().lower()
         if category not in MARKET_NEWS_SYMBOLS_BY_CATEGORY:
