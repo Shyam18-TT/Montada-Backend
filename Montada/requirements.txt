@@ -6,6 +6,7 @@ Django==5.2.9
 django-cors-headers==4.3.1
 djangorestframework==3.16.1
 djangorestframework_simplejwt==5.5.1
+MetaTrader5>=5.0.45
 mssql-django==1.6
 pillow==12.1.0
 PyJWT==2.10.1
