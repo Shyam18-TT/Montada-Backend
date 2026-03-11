@@ -40,6 +40,8 @@ ALLOWED_HOSTS = [
 # Application definition
 
 INSTALLED_APPS = [
+    'daphne',  # ASGI server; must be before django.contrib for runserver WebSocket support
+    'channels',
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -59,6 +61,7 @@ INSTALLED_APPS = [
     'Dashboard',
     'MontadaAdmin',
     'News',
+    'chat',
 ]
 
 MIDDLEWARE = [
@@ -116,6 +119,17 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = 'Montada.wsgi.application'
+ASGI_APPLICATION = 'Montada.asgi.application'
+
+# Channels / Redis for live chat WebSockets
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels_redis.core.RedisChannelLayer",
+        "CONFIG": {
+            "hosts": [("127.0.0.1", 6379)],
+        },
+    },
+}
 
 
 # Database
