@@ -228,6 +228,11 @@ class TradingSignal(models.Model):
     is_loss = models.BooleanField(null=True, blank=True)
     is_neutral = models.BooleanField(null=True, blank=True)
 
+    price_alert_fcm_sent = models.BooleanField(
+        default=False,
+        help_text="True after the price-alert FCM push has been sent for this signal (TP/SL hit). Ensures we only send once."
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
