@@ -2084,6 +2084,75 @@ class AdminMarketNewsList(APIView):
         return Response(data, status=status.HTTP_200_OK)
 
 
+class AdminCategoryNewsView(APIView):
+    """
+    GET: Fetch news by category/section from ForexNewsAPI category endpoint (admin-only).
+    Same API as News ForexCategoryNewsView; allows admins to view category news.
+
+    Query params: section (default general), items (default 50), page (default 1).
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    _ALLOWED_PARAMS = {"section", "items", "page"}
+
+    def get(self, request):
+        token = getattr(django_settings, "FOREXNEWS_API_TOKEN", "")
+        base_url = getattr(
+            django_settings,
+            "FOREXNEWS_CATEGORY_URL",
+            "https://forexnewsapi.com/api/v1/category",
+        )
+        if not token:
+            return Response(
+                {"error": "ForexNewsAPI token is not configured."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        params = {"token": token}
+        for key in self._ALLOWED_PARAMS:
+            val = request.query_params.get(key)
+            if val:
+                params[key] = val
+        params.setdefault("section", "general")
+        params.setdefault("items", "50")
+        params.setdefault("page", "1")
+        url = base_url + "?" + urllib.parse.urlencode(params)
+        try:
+            req = urllib.request.Request(url, method="GET")
+            req.add_header(
+                "User-Agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                raw = json.loads(resp.read().decode())
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode() if exc.fp else "{}"
+            try:
+                err_data = json.loads(body)
+            except Exception:
+                err_data = {"error": body or str(exc)}
+            return Response(err_data, status=exc.code)
+        except urllib.error.URLError as exc:
+            return Response(
+                {"error": "Could not reach ForexNewsAPI.", "detail": str(exc.reason)},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        except Exception as exc:
+            return Response(
+                {"error": "Failed to fetch category news.", "detail": str(exc)},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        return Response(
+            {
+                "total_pages": raw.get("total_pages", 1),
+                "page": int(params.get("page", 1)),
+                "section": params.get("section", "general"),
+                "news": raw.get("data", []) if isinstance(raw.get("data"), list) else raw,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
 # ===========================================================================
 # Subscriptions & Revenue – Admin Stats
 # ===========================================================================

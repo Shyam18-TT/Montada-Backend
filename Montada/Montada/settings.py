@@ -283,6 +283,7 @@ EMAIL_HOST_PASSWORD = 'thtchyjfmdndibtd'  # Your email password or app-specific 
 FOREXNEWS_API_TOKEN    = "ix9zm1aqfxqzclsusns6cqsaufji9k3lpdcy0ybs"
 FOREXNEWS_EVENTS_URL   = "https://forexnewsapi.com/api/v1/events"
 FOREXNEWS_TRENDING_URL = "https://forexnewsapi.com/api/v1/trending-headlines"
+FOREXNEWS_CATEGORY_URL = "https://forexnewsapi.com/api/v1/category"
 
 # MT5 Manager API (for run_price_alerts --use-mt5-manager). Optional; can use env vars instead.
 MT5_MANAGER_SERVER   = os.environ.get("MT5_MANAGER_SERVER", "207.97.203.117:443")   # e.g. "192.168.1.100:443"

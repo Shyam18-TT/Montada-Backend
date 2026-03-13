@@ -14,4 +14,5 @@ urlpatterns = [
     path('events/', views.ForexEventsView.as_view(), name='forex_events'),
     path('events/<str:event_id>/', views.ForexEventDetailView.as_view(), name='forex_event_detail'),
     path('trending-headlines/', views.ForexTrendingHeadlinesView.as_view(), name='forex_trending_headlines'),
+    path('category-news/', views.ForexCategoryNewsView.as_view(), name='forex_category_news'),
 ]

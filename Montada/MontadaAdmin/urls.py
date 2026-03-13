@@ -36,6 +36,7 @@ from .views import (
     AdminTraderListView,
     AdminGetMarketDataFromMT5,
     AdminMarketNewsList,
+    AdminCategoryNewsView,
     AdminSubscriptionStatsView,
     AdminMRRView,
     AdminPaymentHistoryView,
@@ -92,6 +93,7 @@ urlpatterns = [
     path("marketdata/live/", AdminGetMarketDataFromMT5.as_view(), name="admin_marketdata_live"),
     path("marketdata/economic-calendar/", AdminEconomicCalendarView.as_view(), name="admin_economic_calendar"),
     path("news/market-news/", AdminMarketNewsList.as_view(), name="admin_market_news"),
+    path("news/category-news/", AdminCategoryNewsView.as_view(), name="admin_category_news"),
 
     path("subscriptions/stats/", AdminSubscriptionStatsView.as_view(), name="admin_subscription_stats"),
     path("subscriptions/mrr/", AdminMRRView.as_view(), name="admin_subscription_mrr"),
