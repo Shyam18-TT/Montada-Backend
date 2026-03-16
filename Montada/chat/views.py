@@ -2,6 +2,8 @@
 REST API for live chat: conversations and messages.
 Sending a message also broadcasts it via the Channel layer (Redis) to connected WebSocket clients.
 """
+import json
+import logging
 from django.utils import timezone
 from rest_framework import status, generics
 from rest_framework.permissions import IsAuthenticated
@@ -10,6 +12,8 @@ from rest_framework.views import APIView
 from rest_framework.pagination import PageNumberPagination
 from django.shortcuts import get_object_or_404
 from django.contrib.auth import get_user_model
+
+logger = logging.getLogger(__name__)
 
 from .models import Conversation, ConversationParticipant, ChatMessage
 from .serializers import (
@@ -30,23 +34,31 @@ def _user_can_access_conversation(user, conversation):
 
 
 def _broadcast_new_message(conversation_id, message_payload):
-    """Send message payload to the conversation's WebSocket group via Redis."""
+    """Send message payload to the conversation's WebSocket group via Redis.
+    Payload must be JSON-serializable (channel layer serializes to Redis).
+    """
     try:
         from channels.layers import get_channel_layer
         from asgiref.sync import async_to_sync
         channel_layer = get_channel_layer()
         if not channel_layer:
+            logger.warning("Chat broadcast: no channel layer configured.")
             return
+        # Channel layer serializes the event to JSON; UUID/datetime break serialization
+        message_serializable = json.loads(
+            json.dumps(message_payload, default=str)
+        )
         group_name = f"chat_conversation_{conversation_id}"
         async_to_sync(channel_layer.group_send)(
             group_name,
             {
                 "type": "chat.message",
-                "message": message_payload,
+                "message": message_serializable,
             },
         )
-    except Exception:
-        pass
+        logger.debug("Chat broadcast sent to group %s", group_name)
+    except Exception as e:
+        logger.exception("Chat broadcast failed for conversation %s: %s", conversation_id, e)
 
 
 class ConversationPagination(PageNumberPagination):
