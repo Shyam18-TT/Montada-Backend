@@ -88,6 +88,8 @@ class ConversationListCreateView(APIView):
                 {"error": "other_user_id is required."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        # Normalize to string so UUID lookup is consistent (avoids duplicate convos from type mismatch)
+        other_id = str(other_id).strip()
         try:
             other = User.objects.get(pk=other_id)
         except User.DoesNotExist:
@@ -105,8 +107,11 @@ class ConversationListCreateView(APIView):
         except ValueError as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
         serializer = ConversationDetailSerializer(conv)
+        data = dict(serializer.data)
+        # Explicit conversation_id so frontend always has it (existing or new)
+        data["conversation_id"] = str(conv.id)
         return Response(
-            serializer.data,
+            data,
             status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
         )
 

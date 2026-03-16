@@ -34,21 +34,31 @@ class Conversation(models.Model):
     def get_or_create_direct(cls, user1, user2):
         """
         Get or create a 1-1 conversation between user1 and user2.
+        If a conversation already exists for this pair, return it (same conversation_id).
         Returns (conversation, created).
         """
         if user1.pk == user2.pk:
             raise ValueError("Cannot create conversation with yourself.")
-        # Find conversation that has exactly these two participants
-        from django.db.models import Count
-        qs = (
-            cls.objects.filter(participants=user1)
-            .filter(participants=user2)
-            .annotate(c=Count("participants"))
-            .filter(c=2)
+        # Lookup via through table: conversation IDs where user1 and user2 are both participants
+        conv_ids_user1 = set(
+            ConversationParticipant.objects.filter(user=user1).values_list("conversation_id", flat=True)
         )
-        conv = qs.first()
-        if conv:
-            return conv, False
+        conv_ids_user2 = set(
+            ConversationParticipant.objects.filter(user=user2).values_list("conversation_id", flat=True)
+        )
+        common_ids = conv_ids_user1 & conv_ids_user2
+        if common_ids:
+            # Only 1-1 conversations (exactly 2 participants); return oldest for consistency
+            from django.db.models import Count
+            conv = (
+                cls.objects.filter(id__in=common_ids)
+                .annotate(c=Count("participant_links"))
+                .filter(c=2)
+                .order_by("created_at")
+                .first()
+            )
+            if conv:
+                return conv, False
         conv = cls.objects.create()
         ConversationParticipant.objects.create(conversation=conv, user=user1)
         ConversationParticipant.objects.create(conversation=conv, user=user2)
