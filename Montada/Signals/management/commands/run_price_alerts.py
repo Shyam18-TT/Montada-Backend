@@ -350,16 +350,23 @@ def _close_signal_and_notify(signal, hit_type, current_price):
 
 def _trigger_user_price_alert(alert, current_price):
     """Mark alert as triggered, create UserNotification and send FCM to the user who set the alert."""
-    from Signals.models import PriceAlert
     from Mainapp.models import UserNotification
 
     alert.refresh_from_db()
     if alert.is_triggered:
         logger.debug("PriceAlert %s already triggered, skipping.", alert.id)
         return
+    effective = alert.get_effective_target_price()
+    if effective is None:
+        logger.warning("PriceAlert %s has no effective target (missing target_price or percentage+reference), skip.", alert.id)
+        return
     symbol = alert.instrument.symbol if alert.instrument else "Unknown"
     cond = (alert.condition or "above").lower()
-    label = alert.label or f"{symbol} {cond} {alert.target_price}"
+    if alert.target_price is not None:
+        target_desc = str(alert.target_price)
+    else:
+        target_desc = f"{alert.target_percentage}% {cond} {alert.reference_price}"
+    label = alert.label or f"{symbol} {cond} {target_desc}"
 
     from django.utils import timezone as tz
     now = tz.now()
@@ -368,7 +375,7 @@ def _trigger_user_price_alert(alert, current_price):
     alert.save(update_fields=["is_triggered", "triggered_at", "updated_at"])
 
     title = f"Price alert – {symbol}"
-    message = f"{symbol} reached your target: price is {current_price} ({cond} {alert.target_price})."
+    message = f"{symbol} reached your target: price is {current_price} ({cond} {target_desc})."
 
     try:
         UserNotification.objects.create(
@@ -380,20 +387,26 @@ def _trigger_user_price_alert(alert, current_price):
     except Exception as e:
         logger.warning("UserNotification create for price alert failed: %s", e)
 
+    fcm_data = {
+        "type": "user_price_alert",
+        "alert_id": str(alert.id),
+        "symbol": symbol,
+        "condition": cond,
+        "current_price": str(current_price),
+        "effective_target": str(effective),
+    }
+    if alert.target_price is not None:
+        fcm_data["target_price"] = str(alert.target_price)
+    else:
+        fcm_data["target_percentage"] = str(alert.target_percentage)
+        fcm_data["reference_price"] = str(alert.reference_price)
     try:
         from firebase import send_push_to_users
         send_push_to_users(
             users=[alert.user],
             title=title,
             body=message,
-            data={
-                "type": "user_price_alert",
-                "alert_id": str(alert.id),
-                "symbol": symbol,
-                "target_price": str(alert.target_price),
-                "condition": cond,
-                "current_price": str(current_price),
-            },
+            data=fcm_data,
         )
     except Exception as e:
         logger.warning("FCM push for user price alert failed: %s", e)
@@ -402,10 +415,12 @@ def _trigger_user_price_alert(alert, current_price):
 
 
 def _check_user_alert_hit(alert, bid):
-    """Return True if current price meets the alert condition (above/below target)."""
+    """Return True if current price meets the alert condition (above/below target). Uses target_price or computed from target_percentage + reference_price."""
     if bid is None:
         return False
-    target = alert.target_price
+    target = alert.get_effective_target_price()
+    if target is None:
+        return False
     cond = (alert.condition or "above").lower()
     if cond == "above":
         return bid >= target

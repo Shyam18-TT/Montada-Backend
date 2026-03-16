@@ -338,7 +338,23 @@ class PriceAlert(models.Model):
     target_price = models.DecimalField(
         max_digits=18,
         decimal_places=5,
-        help_text="Alert when price reaches this level",
+        null=True,
+        blank=True,
+        help_text="Alert when price reaches this level (use this OR target_percentage + reference_price)",
+    )
+    target_percentage = models.DecimalField(
+        max_digits=10,
+        decimal_places=4,
+        null=True,
+        blank=True,
+        help_text="Alert when price moves this %% from reference (e.g. 5 = 5%%)",
+    )
+    reference_price = models.DecimalField(
+        max_digits=18,
+        decimal_places=5,
+        null=True,
+        blank=True,
+        help_text="Base price for percentage; required when target_percentage is set",
     )
     condition = models.CharField(
         max_length=10,
@@ -364,6 +380,27 @@ class PriceAlert(models.Model):
             models.Index(fields=["user", "is_triggered"]),
         ]
 
+    def get_effective_target_price(self):
+        """
+        Return the price level that triggers the alert.
+        - If target_price is set: return it.
+        - If target_percentage and reference_price are set: return reference * (1 ± pct/100).
+        - Otherwise return None.
+        """
+        from decimal import Decimal
+        if self.target_price is not None:
+            return self.target_price
+        if self.target_percentage is not None and self.reference_price is not None:
+            pct = self.target_percentage / Decimal("100")
+            if (self.condition or "").lower() == "below":
+                return self.reference_price * (Decimal("1") - pct)
+            return self.reference_price * (Decimal("1") + pct)
+        return None
+
     def __str__(self):
         sym = self.instrument.symbol if self.instrument else "?"
-        return f"{self.user_id} {sym} {self.condition} {self.target_price}"
+        if self.target_price is not None:
+            return f"{self.user_id} {sym} {self.condition} {self.target_price}"
+        if self.target_percentage is not None and self.reference_price is not None:
+            return f"{self.user_id} {sym} {self.condition} {self.target_percentage}% of {self.reference_price}"
+        return f"{self.user_id} {sym} (incomplete)"

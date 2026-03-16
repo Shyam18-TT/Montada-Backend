@@ -65,7 +65,7 @@ class TradingSignalAdmin(admin.ModelAdmin):
 
 @admin.register(PriceAlert)
 class PriceAlertAdmin(admin.ModelAdmin):
-    list_display = ('id', 'user', 'instrument', 'target_price', 'condition', 'label', 'is_triggered', 'triggered_at', 'created_at')
+    list_display = ('id', 'user', 'instrument', 'target_price', 'target_percentage', 'reference_price', 'condition', 'label', 'is_triggered', 'triggered_at', 'created_at')
     list_filter = ('condition', 'is_triggered', 'created_at')
     search_fields = ('user__email', 'instrument__symbol', 'label')
     readonly_fields = ('created_at', 'updated_at', 'triggered_at')

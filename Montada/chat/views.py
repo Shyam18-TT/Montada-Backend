@@ -147,14 +147,19 @@ class MessageListCreateView(APIView):
                 {"error": "You are not part of this conversation."},
                 status=status.HTTP_403_FORBIDDEN,
             )
+        # Chronological order (oldest first) so the list is natural chat order
         messages = (
             conv.messages.filter(is_deleted=False)
             .select_related("sender")
-            .order_by("-created_at")
+            .order_by("created_at")
         )
         paginator = self.pagination_class()
         page = paginator.paginate_queryset(messages, request)
-        serializer = ChatMessageSerializer(page or messages, many=True)
+        serializer = ChatMessageSerializer(
+            page if page is not None else messages,
+            many=True,
+            context={"request": request},
+        )
         if page is not None:
             return paginator.get_paginated_response(serializer.data)
         return Response(serializer.data)

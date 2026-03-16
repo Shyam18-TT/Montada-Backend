@@ -203,7 +203,10 @@ class AppliedSignalSerializer(serializers.ModelSerializer):
 
 
 class PriceAlertCreateSerializer(serializers.ModelSerializer):
-    """Create a price alert (POST)."""
+    """
+    Create a price alert (POST).
+    Either set target_price (fixed price) OR target_percentage + reference_price (e.g. 5% above 1.05).
+    """
     instrument = serializers.PrimaryKeyRelatedField(
         queryset=Instrument.objects.filter(is_active=True),
         required=True,
@@ -211,13 +214,37 @@ class PriceAlertCreateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = PriceAlert
-        fields = ('instrument', 'target_price', 'condition', 'label')
+        fields = ('instrument', 'target_price', 'target_percentage', 'reference_price', 'condition', 'label')
         read_only_fields = ()
 
     def validate_target_price(self, value):
         if value is not None and value <= 0:
             raise serializers.ValidationError("Target price must be greater than 0.")
         return value
+
+    def validate_target_percentage(self, value):
+        if value is not None and (value <= 0 or value >= 100):
+            raise serializers.ValidationError("Target percentage must be between 0 and 100 (exclusive).")
+        return value
+
+    def validate_reference_price(self, value):
+        if value is not None and value <= 0:
+            raise serializers.ValidationError("Reference price must be greater than 0.")
+        return value
+
+    def validate(self, attrs):
+        has_price = attrs.get('target_price') is not None
+        has_pct = attrs.get('target_percentage') is not None
+        has_ref = attrs.get('reference_price') is not None
+        if has_price and (has_pct or has_ref):
+            raise serializers.ValidationError(
+                "Use either target_price OR (target_percentage + reference_price), not both."
+            )
+        if not has_price and not (has_pct and has_ref):
+            raise serializers.ValidationError(
+                "Provide either target_price or both target_percentage and reference_price."
+            )
+        return attrs
 
     def create(self, validated_data):
         validated_data['user'] = self.context['request'].user
@@ -228,17 +255,24 @@ class PriceAlertSerializer(serializers.ModelSerializer):
     """List/detail price alert (read)."""
     instrument_symbol = serializers.CharField(source='instrument.symbol', read_only=True)
     instrument_name = serializers.CharField(source='instrument.name', read_only=True)
+    effective_target_price = serializers.SerializerMethodField()
 
     class Meta:
         model = PriceAlert
         fields = (
             'id', 'instrument', 'instrument_symbol', 'instrument_name',
-            'target_price', 'condition', 'label',
+            'target_price', 'target_percentage', 'reference_price', 'condition', 'label',
+            'effective_target_price',
             'is_triggered', 'triggered_at', 'created_at', 'updated_at',
         )
         read_only_fields = (
             'id', 'instrument', 'instrument_symbol', 'instrument_name',
-            'target_price', 'condition', 'label',
+            'target_price', 'target_percentage', 'reference_price', 'condition', 'label',
+            'effective_target_price',
             'is_triggered', 'triggered_at', 'created_at', 'updated_at',
         )
+
+    def get_effective_target_price(self, obj):
+        eff = obj.get_effective_target_price()
+        return str(eff) if eff is not None else None
 
