@@ -7,7 +7,7 @@ from rest_framework.pagination import PageNumberPagination
 
 from Subscriptions.models import Subscription
 from Followers.models import Follow
-from .models import TradingSignal, AssetClass, Instrument, Timeframe, AppliedSignal
+from .models import TradingSignal, AssetClass, Instrument, Timeframe, AppliedSignal, PriceAlert
 
 try:
     from Mainapp.models import ActivityLog
@@ -22,6 +22,8 @@ from .serializers import (
     TimeframeSimpleSerializer,
     ApplySignalSerializer,
     AppliedSignalSerializer,
+    PriceAlertCreateSerializer,
+    PriceAlertSerializer,
 )
 
 
@@ -514,6 +516,41 @@ class TraderAppliedSignalsListView(generics.ListAPIView):
         return AppliedSignal.objects.filter(
             trader=self.request.user
         ).select_related('signal', 'signal__analyst', 'signal__asset_class', 'signal__instrument', 'signal__timeframe').order_by('-applied_at')
+
+
+class PriceAlertCreateView(generics.CreateAPIView):
+    """
+    POST: Create a price alert for the authenticated user.
+    Body: { "instrument": "<uuid>", "target_price": <decimal>, "condition": "above"|"below", "label": "optional" }
+    """
+    serializer_class = PriceAlertCreateSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+
+class PriceAlertListView(generics.ListAPIView):
+    """
+    GET: List price alerts for the authenticated user (active and triggered).
+    """
+    serializer_class = PriceAlertSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    pagination_class = AnalystSignalPagination
+
+    def get_queryset(self):
+        return (
+            PriceAlert.objects.filter(user=self.request.user)
+            .select_related("instrument")
+            .order_by("-created_at")
+        )
+
+
+class PriceAlertDestroyView(generics.DestroyAPIView):
+    """
+    DELETE: Remove a price alert (only if it belongs to the user and not yet triggered).
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return PriceAlert.objects.filter(user=self.request.user, is_triggered=False)
 
 
 # ---------------------------------------------------------------------------

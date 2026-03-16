@@ -348,6 +348,72 @@ def _close_signal_and_notify(signal, hit_type, current_price):
     logger.info("Signal %s %s hit for %s at %s – analyst notified", signal.id, hit_type, symbol, current_price)
 
 
+def _trigger_user_price_alert(alert, current_price):
+    """Mark alert as triggered, create UserNotification and send FCM to the user who set the alert."""
+    from Signals.models import PriceAlert
+    from Mainapp.models import UserNotification
+
+    alert.refresh_from_db()
+    if alert.is_triggered:
+        logger.debug("PriceAlert %s already triggered, skipping.", alert.id)
+        return
+    symbol = alert.instrument.symbol if alert.instrument else "Unknown"
+    cond = (alert.condition or "above").lower()
+    label = alert.label or f"{symbol} {cond} {alert.target_price}"
+
+    from django.utils import timezone as tz
+    now = tz.now()
+    alert.is_triggered = True
+    alert.triggered_at = now
+    alert.save(update_fields=["is_triggered", "triggered_at", "updated_at"])
+
+    title = f"Price alert – {symbol}"
+    message = f"{symbol} reached your target: price is {current_price} ({cond} {alert.target_price})."
+
+    try:
+        UserNotification.objects.create(
+            user=alert.user,
+            title=title,
+            message=message,
+            notification_type="SUCCESS",
+        )
+    except Exception as e:
+        logger.warning("UserNotification create for price alert failed: %s", e)
+
+    try:
+        from firebase import send_push_to_users
+        send_push_to_users(
+            users=[alert.user],
+            title=title,
+            body=message,
+            data={
+                "type": "user_price_alert",
+                "alert_id": str(alert.id),
+                "symbol": symbol,
+                "target_price": str(alert.target_price),
+                "condition": cond,
+                "current_price": str(current_price),
+            },
+        )
+    except Exception as e:
+        logger.warning("FCM push for user price alert failed: %s", e)
+
+    logger.info("PriceAlert %s triggered for %s at %s – user %s notified", alert.id, symbol, current_price, alert.user_id)
+
+
+def _check_user_alert_hit(alert, bid):
+    """Return True if current price meets the alert condition (above/below target)."""
+    if bid is None:
+        return False
+    target = alert.target_price
+    cond = (alert.condition or "above").lower()
+    if cond == "above":
+        return bid >= target
+    if cond == "below":
+        return bid <= target
+    return False
+
+
 class Command(BaseCommand):
     help = "Run price alerts: check open signals against MT5 prices and notify analysts when TP/SL is hit."
 
@@ -502,7 +568,7 @@ class Command(BaseCommand):
     def _run_check(self):
         from django.utils import timezone as tz
 
-        from Signals.models import TradingSignal
+        from Signals.models import TradingSignal, PriceAlert
 
         now = tz.now().strftime("%Y-%m-%d %H:%M:%S")
         if getattr(self, "_use_mt5_manager", False):
@@ -512,8 +578,8 @@ class Command(BaseCommand):
         else:
             price_source = "DB (mt5_prices)"
 
-        # [CHECK] Step 1: Get open signals
-        self.stdout.write("[CHECK] Step 1: Fetching open signals from DB...")
+        # [CHECK] Step 1: Get open signals and active user price alerts
+        self.stdout.write("[CHECK] Step 1: Fetching open signals and active price alerts from DB...")
         signals = list(
             TradingSignal.active.filter(status=TradingSignal.Status.OPEN)
             .select_related("analyst", "instrument")
@@ -522,15 +588,16 @@ class Command(BaseCommand):
                 "instrument_id", "status", "is_win", "is_loss",
             )
         )
-        self.stdout.write("[CHECK] Step 1 done: %d open signal(s) found." % len(signals))
+        alerts = list(
+            PriceAlert.objects.filter(is_triggered=False)
+            .select_related("instrument", "user")
+        )
+        self.stdout.write("[CHECK] Step 1 done: %d open signal(s), %d active price alert(s)." % (len(signals), len(alerts)))
 
-        if not signals:
-            self.stdout.write("[%s] No open signals in DB. Skipping check." % now)
-            return
-
-        # Unique MT5 symbols and mapping signal -> mt5_symbol
+        # Unique MT5 symbols from signals and alerts; mappings for both
         mt5_symbols = set()
         signal_to_mt5 = {}
+        alert_to_mt5 = {}
         for s in signals:
             inst = s.instrument
             if not inst or not inst.symbol:
@@ -540,9 +607,18 @@ class Command(BaseCommand):
                 continue
             mt5_symbols.add(mt5_sym)
             signal_to_mt5[s.id] = mt5_sym
+        for a in alerts:
+            inst = a.instrument
+            if not inst or not inst.symbol:
+                continue
+            mt5_sym = _normalize_mt5_symbol(inst.symbol)
+            if not mt5_sym:
+                continue
+            mt5_symbols.add(mt5_sym)
+            alert_to_mt5[a.id] = mt5_sym
 
         if not mt5_symbols:
-            self.stdout.write("[%s] %d open signal(s) but no valid symbols. Skipping." % (now, len(signals)))
+            self.stdout.write("[%s] No open signals or active alerts with valid symbols. Skipping." % now)
             return
 
         symbol_list = sorted(mt5_symbols)
@@ -624,8 +700,8 @@ class Command(BaseCommand):
 
         # Stats line every run
         self.stdout.write(
-            "[%s] Open signals: %d | Symbols: %s | Prices from %s: %s"
-            % (now, len(signals), symbol_list, price_source, {s: prices[s].get("bid") for s in symbol_list if s in prices})
+            "[%s] Open signals: %d | Alerts: %d | Symbols: %s | Prices from %s: %s"
+            % (now, len(signals), len(alerts), symbol_list, price_source, {s: prices[s].get("bid") for s in symbol_list if s in prices})
         )
 
         self.stdout.write("[CHECK] Step 3: Checking each signal (current price vs TP/SL)...")
@@ -663,3 +739,20 @@ class Command(BaseCommand):
             if hit:
                 _close_signal_and_notify(signal, hit, used_price)
                 self.stdout.write(self.style.SUCCESS("  >>> Closed signal %s (%s) at %s" % (signal.id, hit, used_price)))
+
+        # Step 4: Check user price alerts
+        if alerts:
+            self.stdout.write("[CHECK] Step 4: Checking user price alerts...")
+            for alert in alerts:
+                mt5_sym = alert_to_mt5.get(alert.id)
+                if not mt5_sym:
+                    continue
+                quote = prices.get(mt5_sym)
+                if not quote:
+                    continue
+                bid = quote.get("bid")
+                if _check_user_alert_hit(alert, bid):
+                    _trigger_user_price_alert(alert, bid)
+                    self.stdout.write(
+                        self.style.SUCCESS("  >>> Price alert %s triggered for %s at %s (user %s)" % (alert.id, mt5_sym, bid, alert.user_id))
+                    )

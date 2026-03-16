@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import TradingSignal, AssetClass, Instrument, Timeframe
+from .models import TradingSignal, AssetClass, Instrument, Timeframe, PriceAlert
 
 
 @admin.register(AssetClass)
@@ -61,3 +61,12 @@ class TradingSignalAdmin(admin.ModelAdmin):
             'fields': ('created_at', 'updated_at')
         }),
     )
+
+
+@admin.register(PriceAlert)
+class PriceAlertAdmin(admin.ModelAdmin):
+    list_display = ('id', 'user', 'instrument', 'target_price', 'condition', 'label', 'is_triggered', 'triggered_at', 'created_at')
+    list_filter = ('condition', 'is_triggered', 'created_at')
+    search_fields = ('user__email', 'instrument__symbol', 'label')
+    readonly_fields = ('created_at', 'updated_at', 'triggered_at')
+    ordering = ('-created_at',)

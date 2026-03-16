@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import TradingSignal, AssetClass, Instrument, Timeframe, AppliedSignal
+from .models import TradingSignal, AssetClass, Instrument, Timeframe, AppliedSignal, PriceAlert
 
 
 class AssetClassSerializer(serializers.ModelSerializer):
@@ -200,4 +200,45 @@ class AppliedSignalSerializer(serializers.ModelSerializer):
         model = AppliedSignal
         fields = ('id', 'signal', 'applied_at', 'note')
         read_only_fields = ('id', 'applied_at')
+
+
+class PriceAlertCreateSerializer(serializers.ModelSerializer):
+    """Create a price alert (POST)."""
+    instrument = serializers.PrimaryKeyRelatedField(
+        queryset=Instrument.objects.filter(is_active=True),
+        required=True,
+    )
+
+    class Meta:
+        model = PriceAlert
+        fields = ('instrument', 'target_price', 'condition', 'label')
+        read_only_fields = ()
+
+    def validate_target_price(self, value):
+        if value is not None and value <= 0:
+            raise serializers.ValidationError("Target price must be greater than 0.")
+        return value
+
+    def create(self, validated_data):
+        validated_data['user'] = self.context['request'].user
+        return super().create(validated_data)
+
+
+class PriceAlertSerializer(serializers.ModelSerializer):
+    """List/detail price alert (read)."""
+    instrument_symbol = serializers.CharField(source='instrument.symbol', read_only=True)
+    instrument_name = serializers.CharField(source='instrument.name', read_only=True)
+
+    class Meta:
+        model = PriceAlert
+        fields = (
+            'id', 'instrument', 'instrument_symbol', 'instrument_name',
+            'target_price', 'condition', 'label',
+            'is_triggered', 'triggered_at', 'created_at', 'updated_at',
+        )
+        read_only_fields = (
+            'id', 'instrument', 'instrument_symbol', 'instrument_name',
+            'target_price', 'condition', 'label',
+            'is_triggered', 'triggered_at', 'created_at', 'updated_at',
+        )
 

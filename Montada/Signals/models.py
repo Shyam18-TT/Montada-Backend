@@ -311,3 +311,59 @@ class AppliedSignal(models.Model):
 
     def __str__(self):
         return f"{self.trader} applied {self.signal}"
+
+
+class PriceAlert(models.Model):
+    """
+    User-set price alert: notify when market price reaches a target level.
+    Checked by run_price_alerts management command; when triggered, user gets
+    in-app notification and FCM push.
+    """
+    class Condition(models.TextChoices):
+        ABOVE = "above", "Price goes above target"
+        BELOW = "below", "Price goes below target"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="price_alerts",
+    )
+    instrument = models.ForeignKey(
+        Instrument,
+        on_delete=models.CASCADE,
+        related_name="price_alerts",
+        help_text="Market/symbol to watch (e.g. EUR/USD, GOLD)",
+    )
+    target_price = models.DecimalField(
+        max_digits=18,
+        decimal_places=5,
+        help_text="Alert when price reaches this level",
+    )
+    condition = models.CharField(
+        max_length=10,
+        choices=Condition.choices,
+        default=Condition.ABOVE,
+        help_text="Trigger when price goes above or below target",
+    )
+    label = models.CharField(
+        max_length=120,
+        blank=True,
+        null=True,
+        help_text="Optional label for the alert",
+    )
+    is_triggered = models.BooleanField(default=False)
+    triggered_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        db_table = "price_alert"
+        indexes = [
+            models.Index(fields=["user", "is_triggered"]),
+        ]
+
+    def __str__(self):
+        sym = self.instrument.symbol if self.instrument else "?"
+        return f"{self.user_id} {sym} {self.condition} {self.target_price}"

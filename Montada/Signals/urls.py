@@ -12,6 +12,9 @@ from .views import (
     TraderApplySignalView,
     TraderAppliedSignalsListView,
     SignalPushNotificationView,
+    PriceAlertCreateView,
+    PriceAlertListView,
+    PriceAlertDestroyView,
 )
 
 app_name = 'Signals'
@@ -30,5 +33,10 @@ urlpatterns = [
     path('apply-signal/', TraderApplySignalView.as_view(), name='trader_apply_signal'),
     path('my-applied-signals/', TraderAppliedSignalsListView.as_view(), name='trader_applied_signals_list'),
     path('<str:pk>/notify/', SignalPushNotificationView.as_view(), name='signal_push_notify'),
+
+    # User price alerts (market alerts)
+    path('price-alerts/', PriceAlertListView.as_view(), name='price_alert_list'),
+    path('price-alerts/create/', PriceAlertCreateView.as_view(), name='price_alert_create'),
+    path('price-alerts/<uuid:pk>/', PriceAlertDestroyView.as_view(), name='price_alert_destroy'),
 ]
 
