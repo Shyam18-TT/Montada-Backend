@@ -37,6 +37,29 @@ class User(AbstractUser):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    # Analyst profile (optional; used when user_type='analyst')
+    experience = models.TextField(
+        blank=True,
+        null=True,
+        help_text="Years or description of trading/finance experience",
+    )
+    company = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True,
+        help_text="Current company or institution",
+    )
+    contact_details = models.TextField(
+        blank=True,
+        null=True,
+        help_text="Additional contact info (e.g. secondary phone, address)",
+    )
+    social_links = models.JSONField(
+        blank=True,
+        null=True,
+        help_text='Social media URLs e.g. {"twitter": "...", "linkedin": "...", "facebook": "...", "instagram": "..."}',
+    )
+
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS = ['username']
 

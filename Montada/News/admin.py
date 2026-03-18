@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import NewsCategory, Tag, NewsArticle
+from .models import NewsCategory, Tag, NewsArticle, NewsArticleLike, NewsArticleComment
 
 
 @admin.register(NewsCategory)
@@ -26,3 +26,22 @@ class NewsArticleAdmin(admin.ModelAdmin):
     filter_horizontal = ("tags",)
     readonly_fields = ("created_at", "updated_at", "views_count")
     date_hierarchy = "published_at"
+
+
+@admin.register(NewsArticleLike)
+class NewsArticleLikeAdmin(admin.ModelAdmin):
+    list_display = ("user", "article", "created_at")
+    list_filter = ("created_at",)
+    raw_id_fields = ("user", "article")
+
+
+@admin.register(NewsArticleComment)
+class NewsArticleCommentAdmin(admin.ModelAdmin):
+    list_display = ("user", "article", "content_preview", "is_deleted", "created_at")
+    list_filter = ("is_deleted", "created_at")
+    raw_id_fields = ("user", "article")
+    readonly_fields = ("created_at", "updated_at")
+
+    def content_preview(self, obj):
+        return (obj.content or "")[:60] + ("..." if len(obj.content or "") > 60 else "")
+    content_preview.short_description = "Content"

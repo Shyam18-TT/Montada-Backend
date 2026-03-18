@@ -2,14 +2,20 @@ import urllib.request
 import urllib.parse
 import json
 from django.conf import settings
-from django.db.models import Q
+from django.db.models import Q, Count, Exists, OuterRef
+from django.shortcuts import get_object_or_404
 from rest_framework import status, generics, permissions
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import NewsArticle, NewsCategory
-from .serializers import NewsArticleCreateSerializer, NewsArticleListSerializer, NewsCategorySerializer
+from .models import NewsArticle, NewsCategory, NewsArticleLike, NewsArticleComment
+from .serializers import (
+    NewsArticleCreateSerializer,
+    NewsArticleListSerializer,
+    NewsCategorySerializer,
+    NewsArticleCommentSerializer,
+)
 
 try:
     from Signals.views import IsAnalystPermission
@@ -87,6 +93,16 @@ class NewsArticleListView(generics.ListAPIView):
         category_id = self.request.query_params.get("category")
         if category_id:
             qs = qs.filter(category_id=category_id)
+
+        # Annotate like_count, comment_count, current_user_liked for list
+        qs = qs.annotate(
+            like_count=Count("likes", distinct=True),
+            comment_count=Count("comments", filter=Q(comments__is_deleted=False), distinct=True),
+        )
+        if self.request.user and self.request.user.is_authenticated:
+            qs = qs.annotate(
+                current_user_liked=Exists(NewsArticleLike.objects.filter(article=OuterRef("pk"), user=self.request.user)),
+            )
         return qs
 
 
@@ -94,6 +110,7 @@ class AnalystNewsArticleDetailView(generics.RetrieveUpdateAPIView):
     """
     GET: Retrieve a news article. PUT/PATCH: Update the article.
     Only the analyst who created the article (author) can retrieve or update it.
+    GET response includes like_count, comment_count.
     """
     permission_classes = [permissions.IsAuthenticated, IsAnalystPermission]
     serializer_class = NewsArticleCreateSerializer
@@ -107,6 +124,14 @@ class AnalystNewsArticleDetailView(generics.RetrieveUpdateAPIView):
             .prefetch_related("tags")
         )
 
+    def retrieve(self, request, *args, **kwargs):
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        data = dict(serializer.data)
+        data["like_count"] = instance.likes.count()
+        data["comment_count"] = instance.comments.filter(is_deleted=False).count()
+        return Response(data)
+
     def update(self, request, *args, **kwargs):
         partial = kwargs.pop("partial", False)
         instance = self.get_object()
@@ -117,6 +142,131 @@ class AnalystNewsArticleDetailView(generics.RetrieveUpdateAPIView):
             {"message": "Article updated successfully.", "article": serializer.data},
             status=status.HTTP_200_OK,
         )
+
+
+def _get_article_for_engagement(request, pk):
+    """Return article if user can like/comment (published or author). Else None."""
+    article = get_object_or_404(NewsArticle.objects.filter(is_deleted=False), pk=pk)
+    if article.status == "published":
+        return article
+    if getattr(request.user, "id", None) and article.author_id == request.user.id:
+        return article
+    return None
+
+
+class ArticleLikeView(APIView):
+    """
+    POST: Like the article (idempotent).
+    DELETE: Unlike the article.
+    URL: .../articles/<pk>/like/
+    Article must be published or be the author.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk):
+        article = _get_article_for_engagement(request, pk)
+        if not article:
+            return Response(
+                {"error": "Article not found or not available for likes."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        _, created = NewsArticleLike.objects.get_or_create(user=request.user, article=article)
+        return Response(
+            {"message": "Liked." if created else "Already liked.", "liked": True},
+            status=status.HTTP_200_OK,
+        )
+
+    def delete(self, request, pk):
+        article = _get_article_for_engagement(request, pk)
+        if not article:
+            return Response(
+                {"error": "Article not found or not available."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        deleted, _ = NewsArticleLike.objects.filter(user=request.user, article=article).delete()
+        return Response(
+            {"message": "Unliked." if deleted else "Was not liked.", "liked": False},
+            status=status.HTTP_200_OK,
+        )
+
+
+class ArticleCommentListCreateView(APIView):
+    """
+    GET: List comments for the article (paginated, excludes deleted).
+    POST: Add a comment. Body: { "content": "..." }
+    URL: .../articles/<pk>/comments/
+    Article must be published or be the author.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    pagination_class = NewsArticleListPagination
+
+    def get_article(self, request, pk):
+        return _get_article_for_engagement(request, pk)
+
+    def get(self, request, pk):
+        article = self.get_article(request, pk)
+        if not article:
+            return Response(
+                {"error": "Article not found or not available for comments."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        qs = NewsArticleComment.objects.filter(article=article, is_deleted=False).select_related("user").order_by("created_at")
+        paginator = self.pagination_class()
+        page = paginator.paginate_queryset(qs, request)
+        serializer = NewsArticleCommentSerializer(page if page is not None else qs, many=True)
+        if page is not None:
+            return paginator.get_paginated_response(serializer.data)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request, pk):
+        article = self.get_article(request, pk)
+        if not article:
+            return Response(
+                {"error": "Article not found or not available for comments."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        content = (request.data.get("content") or "").strip()
+        if not content:
+            return Response(
+                {"error": "content is required and cannot be empty."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        comment = NewsArticleComment.objects.create(
+            user=request.user,
+            article=article,
+            content=content,
+        )
+        serializer = NewsArticleCommentSerializer(comment)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class ArticleCommentDestroyView(APIView):
+    """
+    DELETE: Remove own comment. Soft-delete (is_deleted=True).
+    URL: .../articles/<article_pk>/comments/<comment_pk>/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def delete(self, request, pk, comment_pk):
+        article = _get_article_for_engagement(request, pk)
+        if not article:
+            return Response(
+                {"error": "Article not found or not available."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        comment = NewsArticleComment.objects.filter(
+            article=article,
+            user=request.user,
+            is_deleted=False,
+        ).filter(pk=comment_pk).first()
+        if not comment:
+            return Response(
+                {"error": "Comment not found or you cannot delete it."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        comment.is_deleted = True
+        comment.save(update_fields=["is_deleted"])
+        return Response({"message": "Comment removed."}, status=status.HTTP_200_OK)
 
 
 class NewsCategoryListView(generics.ListAPIView):

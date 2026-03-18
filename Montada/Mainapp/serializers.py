@@ -15,9 +15,12 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ('id', 'username', 'email', 'password', 
-                  'name', 'phone_number', 'date_of_birth', 
-                  'user_type', 'is_subscribed')
+        fields = (
+            'id', 'username', 'email', 'password',
+            'name', 'phone_number', 'date_of_birth',
+            'user_type', 'is_subscribed',
+            'experience', 'company', 'contact_details', 'social_links',
+        )
         extra_kwargs = {
             'username': {'required': False},
             'name': {'required': False},
@@ -25,6 +28,10 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
             'date_of_birth': {'required': False},
             'user_type': {'required': True},
             'is_subscribed': {'required': False},
+            'experience': {'required': False},
+            'company': {'required': False},
+            'contact_details': {'required': False},
+            'social_links': {'required': False},
         }
 
     def validate(self, attrs):
@@ -93,14 +100,17 @@ class UserLoginSerializer(serializers.Serializer):
 
 class UserProfileSerializer(serializers.ModelSerializer):
     """
-    Serializer for user profile
+    Serializer for user profile. Includes analyst fields when user_type is analyst.
     """
     class Meta:
         model = User
-        fields = ('id', 'username', 'email', 'name',
-                  'phone_number', 'profile_picture', 'date_of_birth',
-                  'user_type', 'is_subscribed', 'is_verified', 
-                  'created_at', 'updated_at')
+        fields = (
+            'id', 'username', 'email', 'name',
+            'phone_number', 'profile_picture', 'date_of_birth',
+            'user_type', 'is_subscribed', 'is_verified',
+            'experience', 'company', 'contact_details', 'social_links',
+            'created_at', 'updated_at',
+        )
         read_only_fields = ('id', 'email', 'is_verified', 'created_at', 'updated_at')
 
 

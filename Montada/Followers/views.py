@@ -863,7 +863,8 @@ class AnalystPublicProfileView(APIView):
     Returns the public profile of an analyst for trader consumption.
 
     Response sections:
-    ─ profile         : id, username, name, profile_picture, member_since
+    ─ profile         : id, username, name, profile_picture, member_since,
+                        phone_number, experience, company, contact_details, social_links
     ─ stats           : total_signals, open_signals, closed_signals,
                         win_rate, loss_rate, neutral_rate,
                         avg_confidence, total_followers, total_applied
@@ -1031,6 +1032,11 @@ class AnalystPublicProfileView(APIView):
                     "name":            analyst.name or analyst.username,
                     "profile_picture": self._profile_picture_url(request, analyst),
                     "member_since":    analyst.created_at.strftime("%b %Y"),
+                    "phone_number":    getattr(analyst, "phone_number", None) or None,
+                    "experience":      getattr(analyst, "experience", None) or None,
+                    "company":         getattr(analyst, "company", None) or None,
+                    "contact_details": getattr(analyst, "contact_details", None) or None,
+                    "social_links":    getattr(analyst, "social_links", None) or None,
                 },
                 "stats": {
                     "total_signals":  total_signals,

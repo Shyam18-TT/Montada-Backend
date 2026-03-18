@@ -113,3 +113,59 @@ class NewsArticle(models.Model):
     def __str__(self):
         return self.title
 
+
+class NewsArticleLike(models.Model):
+    """User like on an analyst news article. One like per user per article."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="news_article_likes",
+    )
+    article = models.ForeignKey(
+        NewsArticle,
+        on_delete=models.CASCADE,
+        related_name="likes",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        unique_together = [("user", "article")]
+        indexes = [
+            models.Index(fields=["article"]),
+        ]
+        db_table = "news_article_like"
+
+    def __str__(self):
+        return f"{self.user_id} likes {self.article_id}"
+
+
+class NewsArticleComment(models.Model):
+    """Comment on an analyst news article."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="news_article_comments",
+    )
+    article = models.ForeignKey(
+        NewsArticle,
+        on_delete=models.CASCADE,
+        related_name="comments",
+    )
+    content = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    is_deleted = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ["created_at"]
+        indexes = [
+            models.Index(fields=["article"]),
+        ]
+        db_table = "news_article_comment"
+
+    def __str__(self):
+        return f"{self.user_id} on {self.article_id}"
+
