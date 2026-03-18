@@ -656,22 +656,34 @@ class GetMarketDataFromMT5(APIView):
 
 class UnreadNotificationsView(APIView):
     """
-    GET: List unread notifications for the authenticated user.
-    Returns notifications where is_read=False and is_deleted=False, newest first.
-    Pagination: page, page_size (default 20, max 100).
+    GET: List notifications for the authenticated user, filterable by read status.
+
+    Query params:
+    - is_read: "true" | "false" | "all"
+      - "false" or omitted → unread only (default, backward compatible)
+      - "true" → read only
+      - "all" → all notifications (read + unread)
+    - page, page_size: pagination (default 20, max 100).
+
+    Always excludes is_deleted=True. Order: newest first.
     """
     permission_classes = [IsAuthenticated]
     pagination_class = DashboardPageNumberPagination
 
     def get(self, request):
-        qs = (
-            UserNotification.objects.filter(
-                user=request.user,
-                is_read=False,
-                is_deleted=False,
-            )
-            .order_by("-created_at")
+        qs = UserNotification.objects.filter(
+            user=request.user,
+            is_deleted=False,
         )
+        is_read_param = (request.query_params.get("is_read") or "").strip().lower()
+        if is_read_param == "true":
+            qs = qs.filter(is_read=True)
+        elif is_read_param == "all":
+            pass  # no filter on is_read
+        else:
+            # "false" or empty → unread only
+            qs = qs.filter(is_read=False)
+        qs = qs.order_by("-created_at")
         paginator = self.pagination_class()
         page = paginator.paginate_queryset(qs, request)
         serializer = UserNotificationSerializer(page if page is not None else qs, many=True)
@@ -682,9 +694,14 @@ class UnreadNotificationsView(APIView):
 
 class MarkNotificationReadView(APIView):
     """
-    POST: Mark a single notification as read (is_read=True, read_at=now).
+    POST: Set a single notification as read or unread from request data.
     URL: .../notifications/<notification_id>/read/
-    Only the notification owner can mark it read.
+
+    Body (JSON): { "is_read": true } or { "is_read": false }
+    - is_read=true  → mark as read (read_at=now)
+    - is_read=false → mark as unread (read_at=null)
+
+    Only the notification owner can update. Response includes data.message and data.notification.
     """
     permission_classes = [IsAuthenticated]
 
@@ -699,16 +716,30 @@ class MarkNotificationReadView(APIView):
                 {"error": "Notification not found or you do not have permission."},
                 status=status.HTTP_404_NOT_FOUND,
             )
-        if notification.is_read:
+        is_read = request.data.get("is_read")
+        if is_read is None:
             return Response(
-                {"message": "Notification already marked as read.", "notification": UserNotificationSerializer(notification).data},
-                status=status.HTTP_200_OK,
+                {"error": "Missing 'is_read'. Send {\"is_read\": true} or {\"is_read\": false}."},
+                status=status.HTTP_400_BAD_REQUEST,
             )
-        notification.is_read = True
-        notification.read_at = timezone.now()
+        try:
+            is_read = bool(is_read)
+        except (TypeError, ValueError):
+            return Response(
+                {"error": "'is_read' must be a boolean (true/false)."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        notification.is_read = is_read
+        notification.read_at = timezone.now() if is_read else None
         notification.save(update_fields=["is_read", "read_at"])
+        message = "Notification marked as read." if is_read else "Notification marked as unread."
         return Response(
-            {"message": "Notification marked as read.", "notification": UserNotificationSerializer(notification).data},
+            {
+                "data": {
+                    "message": message,
+                    "notification": UserNotificationSerializer(notification).data,
+                },
+            },
             status=status.HTTP_200_OK,
         )
 

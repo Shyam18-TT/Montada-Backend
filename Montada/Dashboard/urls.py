@@ -20,7 +20,7 @@ urlpatterns = [
     path('marketdata/live', views.GetMarketDataFromMT5.as_view(),name='get_market_Data'),
 
     # User notifications (unread list + mark as read)
-    path('notifications/unread/', views.UnreadNotificationsView.as_view(), name='notifications_unread'),
+    path('notifications/', views.UnreadNotificationsView.as_view(), name='notifications_unread'),
     path('notifications/mark-all-read/', views.MarkAllNotificationsReadView.as_view(), name='notifications_mark_all_read'),
     path('notifications/<uuid:notification_id>/read/', views.MarkNotificationReadView.as_view(), name='notification_mark_read'),
 ]
