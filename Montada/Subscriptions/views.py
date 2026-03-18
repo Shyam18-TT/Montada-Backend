@@ -1,6 +1,9 @@
+import logging
 from rest_framework import status, generics, permissions
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
+from rest_framework.views import APIView
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from datetime import timedelta
@@ -12,6 +15,7 @@ from .serializers import (
 )
 
 User = get_user_model()
+logger = logging.getLogger(__name__)
 
 
 class SubscriptionStatusView(generics.RetrieveAPIView):
@@ -208,3 +212,91 @@ def confirm_subscription_view(request):
         },
         status=status.HTTP_200_OK,
     )
+
+
+class StripeAnalyticsView(APIView):
+    """
+    GET: Stripe payment analytics (balance, recent payment intents, charges, payouts).
+    Requires admin/staff. Set STRIPE_SECRET_KEY in settings or env.
+    Query params (optional): limit_pi=50, limit_charges=50, limit_payouts=20
+    """
+    permission_classes = [permissions.IsAuthenticated, permissions.IsAdminUser]
+
+    def get(self, request):
+        secret_key = getattr(settings, "STRIPE_SECRET_KEY", None) or ""
+        if not secret_key or not secret_key.strip():
+            return Response(
+                {"error": "STRIPE_SECRET_KEY is not configured. Set it in environment or settings."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        limit_pi = min(int(request.query_params.get("limit_pi", 50)), 100)
+        limit_charges = min(int(request.query_params.get("limit_charges", 50)), 100)
+        limit_payouts = min(int(request.query_params.get("limit_payouts", 20)), 100)
+        try:
+            import stripe
+            stripe.api_key = secret_key
+            # Balance
+            balance = stripe.Balance.retrieve()
+            balance_data = {
+                "available": [{"amount": b.amount, "currency": b.currency} for b in (balance.available or [])],
+                "pending": [{"amount": b.amount, "currency": b.currency} for b in (balance.pending or [])],
+            }
+            # Recent payment intents (succeeded)
+            pi_list = stripe.PaymentIntent.list(limit=limit_pi)
+            payment_intents = [
+                {
+                    "id": pi.id,
+                    "amount": pi.amount,
+                    "currency": (pi.currency or "usd").lower(),
+                    "status": pi.status,
+                    "created": pi.created,
+                }
+                for pi in (pi_list.data or [])
+            ]
+            # Recent charges
+            charges_list = stripe.Charge.list(limit=limit_charges)
+            charges = [
+                {
+                    "id": c.id,
+                    "amount": c.amount,
+                    "currency": (c.currency or "usd").lower(),
+                    "status": c.status,
+                    "paid": getattr(c, "paid", None),
+                    "created": c.created,
+                }
+                for c in (charges_list.data or [])
+            ]
+            # Recent payouts
+            payouts_list = stripe.Payout.list(limit=limit_payouts)
+            payouts = [
+                {
+                    "id": p.id,
+                    "amount": p.amount,
+                    "currency": (p.currency or "usd").lower(),
+                    "status": p.status,
+                    "arrival_date": getattr(p, "arrival_date", None),
+                    "created": p.created,
+                }
+                for p in (payouts_list.data or [])
+            ]
+            return Response(
+                {
+                    "balance": balance_data,
+                    "payment_intents": payment_intents,
+                    "charges": charges,
+                    "payouts": payouts,
+                },
+                status=status.HTTP_200_OK,
+            )
+        except stripe.error.StripeError as e:
+            logger.warning("Stripe analytics API error: %s", e)
+            return Response(
+                {"error": "Stripe API error.", "detail": str(e)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        except Exception as e:
+            logger.exception("Stripe analytics failed: %s", e)
+            return Response(
+                {"error": "Failed to fetch Stripe analytics.", "detail": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )

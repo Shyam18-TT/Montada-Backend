@@ -289,3 +289,6 @@ FOREXNEWS_CATEGORY_URL = "https://forexnewsapi.com/api/v1/category"
 MT5_MANAGER_SERVER   = os.environ.get("MT5_MANAGER_SERVER", "207.97.203.117:443")   # e.g. "192.168.1.100:443"
 MT5_MANAGER_LOGIN    = os.environ.get("MT5_MANAGER_LOGIN", "5022")    # e.g. 1002
 MT5_MANAGER_PASSWORD = os.environ.get("MT5_MANAGER_PASSWORD", "YlCcG-3u") # manager password
+
+# Stripe (payments / subscriptions analytics). Set STRIPE_SECRET_KEY in env.
+STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "sk_test_51T79CYJlmDfI5Mb0v0PjsqsbeicOthHS4XdDfbxECjt7FM2rmXJwKKNgGism4ycwAZIkjdxdo0upCmoZS8amckEg00Y5BnIeP0")

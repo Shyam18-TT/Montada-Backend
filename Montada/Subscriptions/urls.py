@@ -5,6 +5,7 @@ from .views import (
     cancel_subscription_view,
     check_subscription_status_view,
     confirm_subscription_view,
+    StripeAnalyticsView,
 )
 
 app_name = 'Subscriptions'
@@ -15,5 +16,6 @@ urlpatterns = [
     path('confirm/', confirm_subscription_view, name='confirm_subscription'),
     path('cancel/', cancel_subscription_view, name='cancel_subscription'),
     path('check/', check_subscription_status_view, name='check_subscription'),
+    path('stripe-analytics/', StripeAnalyticsView.as_view(), name='stripe_analytics'),
 ]
 

@@ -142,6 +142,12 @@ def send_push_to_tokens(
         total_success,
         total_failure,
     )
+    if total_failure > 0 and errors:
+        logger.warning(
+            "FCM failure reason(s): %s",
+            "; ".join(errors),
+            extra={"fcm_errors": errors, "failed_token_count": len(failed_tokens)},
+        )
     return {
         "success_count": total_success,
         "failure_count": total_failure,

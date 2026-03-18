@@ -16,12 +16,12 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from Mainapp.models import ActivityLog
+from Mainapp.models import ActivityLog, UserNotification
 from Followers.models import Follow
 from Signals.models import TradingSignal, AssetClass, Timeframe
 from Signals.views import IsAnalystPermission
 
-from .serializers import ActivityLogSerializer
+from .serializers import ActivityLogSerializer, UserNotificationSerializer
 
 
 class DashboardPageNumberPagination(PageNumberPagination):
@@ -652,4 +652,83 @@ class GetMarketDataFromMT5(APIView):
                         arr_symbols[symbol]['flag'] = ''
 
         return Response({'live_quote': arr_symbols}, status=status.HTTP_200_OK)
+
+
+class UnreadNotificationsView(APIView):
+    """
+    GET: List unread notifications for the authenticated user.
+    Returns notifications where is_read=False and is_deleted=False, newest first.
+    Pagination: page, page_size (default 20, max 100).
+    """
+    permission_classes = [IsAuthenticated]
+    pagination_class = DashboardPageNumberPagination
+
+    def get(self, request):
+        qs = (
+            UserNotification.objects.filter(
+                user=request.user,
+                is_read=False,
+                is_deleted=False,
+            )
+            .order_by("-created_at")
+        )
+        paginator = self.pagination_class()
+        page = paginator.paginate_queryset(qs, request)
+        serializer = UserNotificationSerializer(page if page is not None else qs, many=True)
+        if page is not None:
+            return paginator.get_paginated_response(serializer.data)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class MarkNotificationReadView(APIView):
+    """
+    POST: Mark a single notification as read (is_read=True, read_at=now).
+    URL: .../notifications/<notification_id>/read/
+    Only the notification owner can mark it read.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, notification_id):
+        notification = UserNotification.objects.filter(
+            user=request.user,
+            id=notification_id,
+            is_deleted=False,
+        ).first()
+        if not notification:
+            return Response(
+                {"error": "Notification not found or you do not have permission."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        if notification.is_read:
+            return Response(
+                {"message": "Notification already marked as read.", "notification": UserNotificationSerializer(notification).data},
+                status=status.HTTP_200_OK,
+            )
+        notification.is_read = True
+        notification.read_at = timezone.now()
+        notification.save(update_fields=["is_read", "read_at"])
+        return Response(
+            {"message": "Notification marked as read.", "notification": UserNotificationSerializer(notification).data},
+            status=status.HTTP_200_OK,
+        )
+
+
+class MarkAllNotificationsReadView(APIView):
+    """
+    POST: Mark all unread notifications for the current user as read (is_read=True, read_at=now).
+    URL: .../notifications/mark-all-read/
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        now = timezone.now()
+        updated = UserNotification.objects.filter(
+            user=request.user,
+            is_read=False,
+            is_deleted=False,
+        ).update(is_read=True, read_at=now)
+        return Response(
+            {"message": "All unread notifications marked as read.", "marked_count": updated},
+            status=status.HTTP_200_OK,
+        )
 
