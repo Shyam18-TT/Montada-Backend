@@ -9,7 +9,9 @@ User = get_user_model()
 
 class Subscription(models.Model):
     """
-    Model to manage user subscriptions
+    Paid (or trial) access to **market news** (third-party feeds) and **live market data**
+    (e.g. MT5 quotes via the dashboard). Analyst trading signals and follow/social features
+    do not depend on this subscription.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     
@@ -146,4 +148,135 @@ class Subscription(models.Model):
         self.user.is_subscribed = False
         self.user.save()
         
+        return self
+
+
+# ---------------------------------------------------------------------------
+# Per-analyst content plans (separate from app-wide Subscription above).
+# Analysts offer paid access to their articles and/or signals; traders subscribe
+# per plan. Unrelated to market data / Marketaux app subscription.
+# ---------------------------------------------------------------------------
+
+
+class AnalystContentPlan(models.Model):
+    """
+    A plan created by an analyst: access to their articles only, signals only, or both.
+    """
+
+    class Scope(models.TextChoices):
+        ARTICLES = "articles", "Articles only"
+        SIGNALS = "signals", "Signals only"
+        ALL = "all", "Articles and signals"
+
+    class BillingPeriod(models.TextChoices):
+        MONTHLY = "monthly", "Monthly"
+        YEARLY = "yearly", "Yearly"
+        ONE_TIME = "one_time", "One time"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    analyst = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="content_plans",
+        help_text="Analyst who owns and receives this offering",
+    )
+    title = models.CharField(max_length=200)
+    description = models.TextField(blank=True)
+    scope = models.CharField(
+        max_length=20,
+        choices=Scope.choices,
+        help_text="What this plan unlocks: articles, signals, or both",
+    )
+    price = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+        help_text="Display/charge amount (0 for free tier)",
+    )
+    currency = models.CharField(max_length=10, default="usd", blank=True)
+    billing_period = models.CharField(
+        max_length=20,
+        choices=BillingPeriod.choices,
+        default=BillingPeriod.MONTHLY,
+    )
+    is_active = models.BooleanField(
+        default=True,
+        help_text="Inactive plans are hidden from catalog and do not enforce paywall",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["analyst", "is_active"]),
+            models.Index(fields=["scope"]),
+        ]
+        verbose_name = "Analyst content plan"
+        verbose_name_plural = "Analyst content plans"
+
+    def __str__(self):
+        return f"{self.title} ({self.get_scope_display()}) — {self.analyst_id}"
+
+
+class UserAnalystPlanSubscription(models.Model):
+    """
+    A user's subscription to a specific AnalystContentPlan (one analyst offering).
+    """
+
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        EXPIRED = "expired", "Expired"
+        CANCELLED = "cancelled", "Cancelled"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    subscriber = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="analyst_content_subscriptions",
+        help_text="User who purchased / activated this plan",
+    )
+    plan = models.ForeignKey(
+        AnalystContentPlan,
+        on_delete=models.CASCADE,
+        related_name="user_subscriptions",
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.ACTIVE,
+    )
+    start_date = models.DateTimeField(auto_now_add=True)
+    end_date = models.DateTimeField()
+    payment_intent_id = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        help_text="Optional Stripe payment intent for this purchase",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["subscriber", "status"]),
+            models.Index(fields=["plan", "status"]),
+            models.Index(fields=["end_date"]),
+        ]
+        verbose_name = "User analyst plan subscription"
+        verbose_name_plural = "User analyst plan subscriptions"
+
+    def __str__(self):
+        return f"{self.subscriber_id} → {self.plan_id} ({self.status})"
+
+    def is_effective(self):
+        """True if subscription currently grants access."""
+        if self.status != self.Status.ACTIVE:
+            return False
+        return timezone.now() <= self.end_date
+
+    def cancel(self):
+        self.status = self.Status.CANCELLED
+        self.save(update_fields=["status", "updated_at"])
         return self

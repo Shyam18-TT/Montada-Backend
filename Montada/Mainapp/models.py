@@ -31,7 +31,7 @@ class User(AbstractUser):
     )
     is_subscribed = models.BooleanField(
         default=False,
-        help_text='Subscription status of the user'
+        help_text='True when the user has an active subscription for market news and live market data (includes in-date free trial).',
     )
     is_verified = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)

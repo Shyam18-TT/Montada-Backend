@@ -24,11 +24,6 @@ except ImportError:
     ActivityLog = None
     UserNotification = None
 
-try:
-    from Subscriptions.models import Subscription
-except ImportError:
-    Subscription = None
-
 from .serializers import (
     FollowSerializer,
     FollowRequestSerializer,
@@ -58,29 +53,10 @@ def _notify_analyst_follow(analyst_user, follower_user, title, message=None):
 
 
 class FollowRequestView(APIView):
-    """Follow a user (direct follow, no analyst acceptance). Only allowed for users with an active subscription."""
+    """Follow a user (direct follow, no analyst acceptance). Does not require a subscription."""
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        # Only users with an active subscription can follow
-        if Subscription is None:
-            return Response(
-                {"error": "Subscription module not available."},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
-        try:
-            subscription = Subscription.objects.get(user=request.user)
-        except Subscription.DoesNotExist:
-            return Response(
-                {"error": "Follow is only allowed for users with an active subscription."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-        if not subscription.is_active():
-            return Response(
-                {"error": "Follow is only allowed for users with an active subscription."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-
         serializer = FollowRequestSerializer(data=request.data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

@@ -2,7 +2,9 @@ import urllib.request
 import urllib.parse
 import json
 from django.conf import settings
+from django.contrib.auth import get_user_model
 from django.db.models import Q, Count, Exists, OuterRef
+from django.utils import timezone as django_timezone
 from django.shortcuts import get_object_or_404
 from rest_framework import status, generics, permissions
 from rest_framework.pagination import PageNumberPagination
@@ -10,12 +12,14 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import NewsArticle, NewsCategory, NewsArticleLike, NewsArticleComment
+from Subscriptions.models import AnalystContentPlan, UserAnalystPlanSubscription
 from .serializers import (
     NewsArticleCreateSerializer,
     NewsArticleListSerializer,
     NewsCategorySerializer,
     NewsArticleCommentSerializer,
 )
+from Subscriptions.access import check_active_subscription
 
 try:
     from Signals.views import IsAnalystPermission
@@ -62,7 +66,8 @@ class NewsArticleListPagination(PageNumberPagination):
 class NewsArticleListView(generics.ListAPIView):
     """
     GET: List news articles. Paginated.
-    - Trader: only published articles.
+    - Trader: published articles; analyst-authored posts only if the trader has an active
+      per-analyst subscription (articles or all). Non-analyst authors' articles stay visible.
     - Analyst: only articles created by himself; optional ?status=draft|published|archived to filter.
     Query params: search, category (UUID), status (analyst only), page, page_size.
     """
@@ -76,6 +81,25 @@ class NewsArticleListView(generics.ListAPIView):
 
         if user_type == "trader":
             qs = qs.filter(status="published")
+            # Analyst-authored articles: only if trader has an active per-analyst subscription
+            # (articles or all). Non-analyst authors remain visible without a plan.
+            User = get_user_model()
+            now = django_timezone.now()
+            is_analyst_author = Exists(
+                User.objects.filter(pk=OuterRef("author_id"), user_type="analyst")
+            )
+            article_access = UserAnalystPlanSubscription.objects.filter(
+                subscriber=self.request.user,
+                status=UserAnalystPlanSubscription.Status.ACTIVE,
+                end_date__gte=now,
+                plan__is_active=True,
+                plan__analyst_id=OuterRef("author_id"),
+                plan__scope__in=[
+                    AnalystContentPlan.Scope.ARTICLES,
+                    AnalystContentPlan.Scope.ALL,
+                ],
+            )
+            qs = qs.filter(~is_analyst_author | Exists(article_access))
         else:
             # Analyst: only articles created by himself; optional status filter
             qs = qs.filter(author=self.request.user)
@@ -146,8 +170,14 @@ class AnalystNewsArticleDetailView(generics.RetrieveUpdateAPIView):
 
 def _get_article_for_engagement(request, pk):
     """Return article if user can like/comment (published or author). Else None."""
+    from Subscriptions.analyst_plan_access import user_has_analyst_article_access
+
     article = get_object_or_404(NewsArticle.objects.filter(is_deleted=False), pk=pk)
     if article.status == "published":
+        uid = getattr(request.user, "id", None)
+        if uid and article.author_id != uid:
+            if not user_has_analyst_article_access(request.user, article.author_id):
+                return None
         return article
     if getattr(request.user, "id", None) and article.author_id == request.user.id:
         return article
@@ -327,14 +357,20 @@ MARKET_NEWS_SYMBOLS_BY_CATEGORY = {
 class MarketNewsList(APIView):
     """
     GET: Fetch market/finance news from Marketaux API (same URL style as official docs).
+    Requires an active subscription (market news is a premium feature).
+
     Query param: category = all | forex | shares | equity | stocks | crypto | cryptocurrency |
                  metals | indices | commodity | commodities | energy | menashares.
     Optional: language, limit, page, symbols (overrides category symbols), etc.
     Example: ?category=forex&filter_entities=true&language=en&limit=10
     """
-    permission_classes = [permissions.AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request):
+        denied = check_active_subscription(request.user)
+        if denied is not None:
+            return denied
+
         api_token = getattr(settings, "MARKETAUX_API_TOKEN", None)
         if not api_token:
             return Response(
@@ -432,6 +468,10 @@ class ForexEventsView(APIView):
     _ALLOWED_PARAMS = {"page", "currency", "date", "from_date", "to_date"}
 
     def get(self, request):
+        denied = check_active_subscription(request.user)
+        if denied is not None:
+            return denied
+
         token = getattr(settings, "FOREXNEWS_API_TOKEN", "ix9zm1aqfxqzclsusns6cqsaufji9k3lpdcy0ybs")
         base_url = getattr(settings, "FOREXNEWS_EVENTS_URL", "https://forexnewsapi.com/api/v1/events")
 
@@ -528,6 +568,10 @@ class ForexEventDetailView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request, event_id):
+        denied = check_active_subscription(request.user)
+        if denied is not None:
+            return denied
+
         token = getattr(settings, "FOREXNEWS_API_TOKEN", "ix9zm1aqfxqzclsusns6cqsaufji9k3lpdcy0ybs")
         base_url = getattr(settings, "FOREXNEWS_EVENTS_URL", "https://forexnewsapi.com/api/v1/events")
 
@@ -629,6 +673,10 @@ class ForexTrendingHeadlinesView(APIView):
     _ALLOWED_PARAMS = {"page", "currency", "date", "from_date", "to_date", "sentiment"}
 
     def get(self, request):
+        denied = check_active_subscription(request.user)
+        if denied is not None:
+            return denied
+
         token    = getattr(settings, "FOREXNEWS_API_TOKEN", "")
         base_url = getattr(settings, "FOREXNEWS_TRENDING_URL",
                            "https://forexnewsapi.com/api/v1/trending-headlines")
@@ -705,6 +753,10 @@ class ForexCategoryNewsView(APIView):
     _ALLOWED_PARAMS = {"section", "items", "page"}
 
     def get(self, request):
+        denied = check_active_subscription(request.user)
+        if denied is not None:
+            return denied
+
         token = getattr(settings, "FOREXNEWS_API_TOKEN", "")
         base_url = getattr(
             settings,

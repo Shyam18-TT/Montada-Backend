@@ -9,6 +9,7 @@ from .views import (
     AnalystSignalSoftDeleteView,
     TimeframeListView,
     TraderSignalListView,
+    SubscribedAnalystSignalsListView,
     TraderApplySignalView,
     TraderAppliedSignalsListView,
     SignalPushNotificationView,
@@ -30,6 +31,11 @@ urlpatterns = [
     path('assets-instruments/', AssetClassWithInstrumentsView.as_view(), name='assets_instruments'),
 
     path('view-signals/', TraderSignalListView.as_view(), name='trader_signals_list'),
+    path(
+        'analyst/<uuid:analyst_id>/signals/',
+        SubscribedAnalystSignalsListView.as_view(),
+        name='subscribed_analyst_signals',
+    ),
     path('apply-signal/', TraderApplySignalView.as_view(), name='trader_apply_signal'),
     path('my-applied-signals/', TraderAppliedSignalsListView.as_view(), name='trader_applied_signals_list'),
     path('<str:pk>/notify/', SignalPushNotificationView.as_view(), name='signal_push_notify'),

@@ -20,6 +20,7 @@ from Mainapp.models import ActivityLog, UserNotification
 from Followers.models import Follow
 from Signals.models import TradingSignal, AssetClass, Timeframe
 from Signals.views import IsAnalystPermission
+from Subscriptions.access import check_active_subscription
 
 from .serializers import ActivityLogSerializer, UserNotificationSerializer
 
@@ -590,6 +591,8 @@ class GetMarketDataFromMT5(APIView):
     """
     Returns mt5_prices data as a single object:
     - live_quote: dict of symbol -> { dir, bid, ask, digits, flag, ask_today, bid_today, change, change_percentage }
+    Requires an active subscription (live market data is a premium feature).
+
     Query param category (optional): forex | shares | metals | indices | commodity | energy | menashares
     When category is passed: only that category's symbols; exclude_flags not applied.
     When category is omitted: all symbols; exclude_flags applied.
@@ -597,6 +600,10 @@ class GetMarketDataFromMT5(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        denied = check_active_subscription(request.user)
+        if denied is not None:
+            return denied
+
         category = (request.query_params.get('category') or '').strip().lower()
         if category:
             if category not in MARKET_DATA_SYMBOLS_BY_CATEGORY:

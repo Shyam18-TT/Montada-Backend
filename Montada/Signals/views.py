@@ -1,12 +1,17 @@
 from django.utils import timezone
-from django.db.models import Count
+from django.db.models import Count, Q
+from django.contrib.auth import get_user_model
+from django.shortcuts import get_object_or_404
 from rest_framework import status, generics, permissions
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
 
-from Subscriptions.models import Subscription
 from Followers.models import Follow
+from Subscriptions.analyst_plan_access import (
+    filter_visible_analyst_ids_for_signals,
+    user_has_analyst_signal_access,
+)
 from .models import TradingSignal, AssetClass, Instrument, Timeframe, AppliedSignal, PriceAlert
 
 try:
@@ -330,75 +335,78 @@ class AnalystSignalSoftDeleteView(generics.RetrieveAPIView):
 class TraderSignalListView(generics.ListAPIView):
     """
     API endpoint for traders to view signals from analysts they follow.
-    - Active subscription: all signals from followed analysts.
-    - Expired subscription: only signals created on or before subscription end_date,
-      plus message to subscribe for new signals.
-    - No subscription: no signals, with message.
+    Only analysts where the trader has an **active per-analyst subscription**
+    (plan scope signals or all) are included—follow alone is not enough.
+
+    Query params:
+        status — optional OPEN | CLOSED | DRAFT
+        search or q — optional free-text match across instrument symbol/name, asset class
+        name, timeframe code/name, direction, status, analyst note, analyst name/email
+        (case-insensitive, partial match).
     """
     serializer_class = TradingSignalSerializer
     permission_classes = [permissions.IsAuthenticated]
     pagination_class = AnalystSignalPagination
 
-    def _get_subscription_status(self, user):
-        """
-        Return (is_active, end_date).
-        is_active: True if subscription is active (before end_date).
-        end_date: subscription end_date or None if no subscription.
-        """
-        try:
-            subscription = Subscription.objects.get(user=user)
-            return (subscription.is_active(), subscription.end_date)
-        except Subscription.DoesNotExist:
-            return (False, None)
-
     def get_queryset(self):
         """
-        Return signals from analysts the trader follows.
-        Active subscription: all such signals.
-        Expired subscription: only signals with created_at <= subscription.end_date.
-        No subscription: none.
+        Return signals from followed analysts who also have an active analyst-plan
+        subscription (signals or all) for the current user.
         """
         if not self.request.user.is_authenticated:
             return TradingSignal.active.none()
 
         user = self.request.user
-        is_active, end_date = self._get_subscription_status(user)
 
         # Analysts the trader is following (accepted and active follow)
-        following_analyst_ids = Follow.objects.filter(
-            follower=user,
-            status=Follow.Status.ACCEPTED,
-            is_active=True,
-        ).values_list('followed_id', flat=True)
-
-        queryset = TradingSignal.active.filter(
-            analyst_id__in=following_analyst_ids
-        ).select_related(
-            'analyst', 'asset_class', 'instrument', 'timeframe', 
+        following_analyst_ids = list(
+            Follow.objects.filter(
+                follower=user,
+                status=Follow.Status.ACCEPTED,
+                is_active=True,
+            ).values_list("followed_id", flat=True)
+        )
+        visible_analyst_ids = filter_visible_analyst_ids_for_signals(
+            user, following_analyst_ids
         )
 
-        if not is_active:
-            if end_date is None:
-                return TradingSignal.active.none()
-            # Expired: only signals created on or before subscription end_date
-            queryset = queryset.filter(created_at__lte=end_date)
+        queryset = TradingSignal.active.filter(
+            analyst_id__in=visible_analyst_ids
+        ).select_related(
+            'analyst', 'asset_class', 'instrument', 'timeframe',
+        )
 
         status_param = self.request.query_params.get('status')
         if status_param:
             queryset = queryset.filter(status=status_param)
 
+        search = (
+            self.request.query_params.get("search")
+            or self.request.query_params.get("q")
+            or ""
+        ).strip()
+        if search:
+            queryset = queryset.filter(
+                Q(instrument__symbol__icontains=search)
+                | Q(instrument__name__icontains=search)
+                | Q(asset_class__name__icontains=search)
+                | Q(timeframe__code__icontains=search)
+                | Q(timeframe__name__icontains=search)
+                | Q(direction__icontains=search)
+                | Q(status__icontains=search)
+                | Q(analyst_note__icontains=search)
+                | Q(analyst__name__icontains=search)
+                | Q(analyst__email__icontains=search)
+            )
+
         return queryset.order_by('-created_at')
 
     def list(self, request, *args, **kwargs):
         """
-        Return paginated signals. For expired (or missing) subscription, add message
-        to subscribe for new signals. Also adds is_applied field to each signal.
+        Return paginated signals with is_applied on each row.
         """
         response = super().list(request, *args, **kwargs)
-        is_active, _ = self._get_subscription_status(request.user)
-        if not is_active:
-            response.data['message'] = 'To view new signals you have to subscribe.'
-        
+
         # Add is_applied field to each signal in results
         if 'results' in response.data and response.data['results']:
             signal_ids = [signal['id'] for signal in response.data['results']]
@@ -418,45 +426,125 @@ class TraderSignalListView(generics.ListAPIView):
         return response
 
 
+class SubscribedAnalystSignalsListView(generics.ListAPIView):
+    """
+    GET: Signals from a **single** analyst (paginated).
+
+    Access: the viewer must have an active **per-analyst** subscription with scope
+    ``signals`` or ``all`` to that analyst. The analyst themself may list without
+    a subscription (same data as ``my-signals``).
+
+    Query params (all optional):
+        status       — OPEN | CLOSED | DRAFT
+        asset_class  — UUID of asset class
+        instrument   — UUID of instrument
+        timeframe    — UUID of timeframe
+        direction    — BUY | SELL
+        symbol       — partial match on instrument symbol (case-insensitive)
+    """
+
+    serializer_class = TradingSignalSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    pagination_class = AnalystSignalPagination
+
+    def list(self, request, *args, **kwargs):
+        analyst_id = self.kwargs["analyst_id"]
+        User = get_user_model()
+        analyst = get_object_or_404(User, pk=analyst_id)
+        if getattr(analyst, "user_type", "") != "analyst":
+            return Response(
+                {
+                    "error": "No analyst found with this id.",
+                    "code": "not_analyst",
+                },
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        if request.user.id != analyst.id and not user_has_analyst_signal_access(
+            request.user, analyst.id
+        ):
+            return Response(
+                {
+                    "error": (
+                        "You need an active subscription to this analyst's signals "
+                        "(or all-access) plan to view their signals."
+                    ),
+                    "code": "analyst_subscription_required",
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        response = super().list(request, *args, **kwargs)
+        if (
+            isinstance(response.data, dict)
+            and response.data.get("results")
+            and request.user.is_authenticated
+        ):
+            signal_ids = [row["id"] for row in response.data["results"]]
+            applied_signal_ids = set(
+                str(sid)
+                for sid in AppliedSignal.objects.filter(
+                    trader=request.user,
+                    signal_id__in=signal_ids,
+                ).values_list("signal_id", flat=True)
+            )
+            for row in response.data["results"]:
+                row["is_applied"] = str(row["id"]) in applied_signal_ids
+        return response
+
+    def get_queryset(self):
+        analyst_id = self.kwargs["analyst_id"]
+        qs = (
+            TradingSignal.active.filter(analyst_id=analyst_id)
+            .select_related("analyst", "asset_class", "instrument", "timeframe")
+        )
+        params = self.request.query_params
+        st = (params.get("status") or "").strip().upper()
+        if st in ("OPEN", "CLOSED", "DRAFT"):
+            qs = qs.filter(status=st)
+        asset_class = (params.get("asset_class") or "").strip()
+        if asset_class:
+            qs = qs.filter(asset_class_id=asset_class)
+        instrument = (params.get("instrument") or "").strip()
+        if instrument:
+            qs = qs.filter(instrument_id=instrument)
+        timeframe = (params.get("timeframe") or "").strip()
+        if timeframe:
+            qs = qs.filter(timeframe_id=timeframe)
+        direction = (params.get("direction") or "").strip().upper()
+        if direction in ("BUY", "SELL"):
+            qs = qs.filter(direction=direction)
+        symbol = (params.get("symbol") or "").strip()
+        if symbol:
+            qs = qs.filter(instrument__symbol__icontains=symbol)
+        return qs.order_by("-created_at")
+
+
 def _get_trader_visible_signals_queryset(user):
     """
     Return queryset of signals the trader is allowed to see (and thus apply).
-    Same rules as TraderSignalListView: follow + subscription.
+    Same rules as TraderSignalListView: follow + active per-analyst subscription (signals or all).
     """
-    is_active, end_date = _get_subscription_status_for_trader(user)
-    following_analyst_ids = Follow.objects.filter(
-        follower=user,
-        status=Follow.Status.ACCEPTED,
-        is_active=True,
-    ).values_list('followed_id', flat=True)
-
-    queryset = TradingSignal.active.filter(
-        analyst_id__in=following_analyst_ids
+    following_analyst_ids = list(
+        Follow.objects.filter(
+            follower=user,
+            status=Follow.Status.ACCEPTED,
+            is_active=True,
+        ).values_list("followed_id", flat=True)
+    )
+    visible_analyst_ids = filter_visible_analyst_ids_for_signals(
+        user, following_analyst_ids
+    )
+    return TradingSignal.active.filter(
+        analyst_id__in=visible_analyst_ids
     ).select_related('analyst', 'asset_class', 'instrument', 'timeframe')
-
-    if not is_active:
-        if end_date is None:
-            return TradingSignal.active.none()
-        queryset = queryset.filter(created_at__lte=end_date)
-
-    return queryset
-
-
-def _get_subscription_status_for_trader(user):
-    """Return (is_active, end_date) for the user's subscription."""
-    try:
-        subscription = Subscription.objects.get(user=user)
-        return (subscription.is_active(), subscription.end_date)
-    except Subscription.DoesNotExist:
-        return (False, None)
 
 
 class TraderApplySignalView(generics.GenericAPIView):
     """
     API endpoint for traders to apply (take) a signal.
     POST with { "signal": "<uuid>", "note": "optional" }.
-    Trader must follow the analyst, have subscription access to the signal,
-    and the signal must be OPEN. Each signal can be applied only once per trader.
+    Trader must follow the analyst, have an active per-analyst subscription covering signals,
+    and the signal must be OPEN.
+    Each signal can be applied only once per trader.
     """
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = ApplySignalSerializer
