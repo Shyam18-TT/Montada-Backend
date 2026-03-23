@@ -846,6 +846,9 @@ class AnalystPublicProfileView(APIView):
     ─ stats           : total_signals, open_signals, closed_signals,
                         win_rate, loss_rate, neutral_rate,
                         avg_confidence, total_followers, total_applied
+    ─ review_stats    : average_rating (1–5, null if no reviews), total_reviews (public only)
+    ─ reviews         : recent public reviews (newest first, max 20), each with reviewer summary
+    ─ my_review       : current user's review of this analyst, if any (always included when set)
     ─ by_asset        : signal counts grouped by asset class
     ─ by_direction    : BUY / SELL split
     ─ by_timeframe    : signal counts per timeframe
@@ -1002,6 +1005,56 @@ class AnalystPublicProfileView(APIView):
         except Follow.DoesNotExist:
             pass
 
+        # ── reviews & rating (public reviews only for aggregates and list) ─────
+        public_reviews = AnalystReview.objects.filter(
+            analyst=analyst,
+            is_public=True,
+        )
+        review_agg = public_reviews.aggregate(
+            avg_rating=Avg("rating"),
+            total_reviews=Count("id"),
+        )
+        avg_review_rating = review_agg["avg_rating"]
+        total_review_count = review_agg["total_reviews"] or 0
+        average_rating_out = (
+            round(float(avg_review_rating), 2)
+            if avg_review_rating is not None
+            else None
+        )
+
+        recent_reviews_qs = (
+            public_reviews.select_related("reviewer")
+            .order_by("-created_at")[:20]
+        )
+        reviews_list = []
+        for rv in recent_reviews_qs:
+            rev_user = rv.reviewer
+            reviews_list.append(
+                {
+                    "id": str(rv.id),
+                    "rating": rv.rating,
+                    "title": rv.title,
+                    "review_text": rv.review_text,
+                    "created_at": rv.created_at,
+                    "updated_at": rv.updated_at,
+                    "reviewer": {
+                        "id": str(rev_user.id),
+                        "username": rev_user.username,
+                        "name": (rev_user.name or rev_user.username or ""),
+                        "profile_picture": self._profile_picture_url(request, rev_user),
+                    },
+                }
+            )
+
+        my_review_out = None
+        mine = (
+            AnalystReview.objects.filter(analyst=analyst, reviewer=request.user)
+            .select_related("reviewer")
+            .first()
+        )
+        if mine:
+            my_review_out = AnalystReviewReadSerializer(mine).data
+
         return Response(
             {
                 "profile": {
@@ -1030,6 +1083,12 @@ class AnalystPublicProfileView(APIView):
                     "total_followers": total_followers,
                     "total_applied":   total_applied,
                 },
+                "review_stats": {
+                    "average_rating": average_rating_out,
+                    "total_reviews": total_review_count,
+                },
+                "reviews": reviews_list,
+                "my_review": my_review_out,
                 "by_asset":     by_asset,
                 "by_direction": by_direction,
                 "by_timeframe": by_timeframe,
