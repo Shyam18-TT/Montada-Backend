@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
-from .models import Follow, Mute
+from .models import Follow, Mute, AnalystReview
 
 User = get_user_model()
 
@@ -62,3 +62,45 @@ class MuteSerializer(serializers.ModelSerializer):
 
 class MuteActionSerializer(serializers.Serializer):
     user_id = serializers.UUIDField(required=True, help_text="ID of user to mute/unmute")
+
+
+class AnalystReviewSubmitSerializer(serializers.Serializer):
+    """Body for POST /followers/reviews/ — create or update review for an analyst."""
+
+    analyst_id = serializers.UUIDField(help_text="UUID of the analyst being reviewed")
+    rating = serializers.IntegerField(min_value=1, max_value=5, help_text="1–5 stars")
+    title = serializers.CharField(
+        max_length=200,
+        required=False,
+        allow_blank=True,
+        default="",
+    )
+    review_text = serializers.CharField(
+        max_length=4000,
+        required=False,
+        allow_blank=True,
+        default="",
+    )
+    is_public = serializers.BooleanField(default=True, required=False)
+
+
+class AnalystReviewReadSerializer(serializers.ModelSerializer):
+    """Saved review row returned to the client."""
+
+    analyst_id = serializers.UUIDField(read_only=True)
+    reviewer_id = serializers.UUIDField(read_only=True)
+
+    class Meta:
+        model = AnalystReview
+        fields = (
+            "id",
+            "analyst_id",
+            "reviewer_id",
+            "rating",
+            "title",
+            "review_text",
+            "is_public",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = fields

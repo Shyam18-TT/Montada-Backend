@@ -27,4 +27,6 @@ urlpatterns = [
 
     # Analyst public profile (for traders)
     path("analysts/<uuid:analyst_id>/profile/", views.AnalystPublicProfileView.as_view(), name="analyst_public_profile"),
+    # Analyst reviews (rating + text)
+    path("reviews/", views.AnalystReviewSubmitView.as_view(), name="analyst_review_submit"),
 ]

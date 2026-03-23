@@ -1,5 +1,7 @@
 from django.db import models
 from django.conf import settings
+from django.core.exceptions import ValidationError
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.utils import timezone
 import uuid
 
@@ -101,3 +103,83 @@ class Mute(models.Model):
 
     def __str__(self):
         return f"{self.muter} mutes {self.muted}"
+
+
+class AnalystReview(models.Model):
+    """
+    Star rating (1–5) and optional written review for an analyst profile.
+    Each user can submit at most one review per analyst (update overwrites).
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    analyst = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="reviews_received",
+        help_text="The analyst being reviewed (must have user_type=analyst).",
+    )
+    reviewer = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="analyst_reviews_written",
+        help_text="The user submitting the review (typically a trader).",
+    )
+
+    rating = models.PositiveSmallIntegerField(
+        validators=[MinValueValidator(1), MaxValueValidator(5)],
+        help_text="1 (worst) to 5 (best) stars.",
+    )
+
+    title = models.CharField(
+        max_length=200,
+        blank=True,
+        null=True,
+        help_text="Optional short headline for the review.",
+    )
+
+    review_text = models.TextField(
+        max_length=4000,
+        blank=True,
+        null=True,
+        help_text="Optional detailed feedback.",
+    )
+
+    is_public = models.BooleanField(
+        default=True,
+        help_text="If False, hidden from public listings (e.g. moderation).",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Analyst review"
+        verbose_name_plural = "Analyst reviews"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["reviewer", "analyst"],
+                name="followers_analystreview_unique_reviewer_per_analyst",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["analyst", "-created_at"]),
+            models.Index(fields=["reviewer"]),
+            models.Index(fields=["analyst", "is_public"]),
+        ]
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.reviewer_id} → {self.analyst_id}: {self.rating}★"
+
+    def clean(self):
+        super().clean()
+        if self.analyst_id and self.reviewer_id and self.analyst_id == self.reviewer_id:
+            raise ValidationError("You cannot review yourself.")
+        analyst = getattr(self, "analyst", None)
+        if analyst is not None and getattr(analyst, "user_type", None) != "analyst":
+            raise ValidationError("Reviews can only be submitted for analyst accounts.")
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)

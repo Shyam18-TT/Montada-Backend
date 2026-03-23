@@ -11,7 +11,7 @@ from django.db.models.functions import Coalesce, NullIf, TruncMonth
 from django.utils import timezone
 from django.conf import settings as django_settings
 
-from .models import Follow, Mute
+from .models import AnalystReview, Follow, Mute
 
 try:
     from Signals.models import TradingSignal
@@ -32,6 +32,8 @@ from .serializers import (
     MuteActionSerializer,
     UserMinimalSerializer,
     FollowerListItemSerializer,
+    AnalystReviewSubmitSerializer,
+    AnalystReviewReadSerializer,
 )
 
 User = get_user_model()
@@ -1038,4 +1040,68 @@ class AnalystPublicProfileView(APIView):
                 },
             },
             status=status.HTTP_200_OK,
+        )
+
+
+class AnalystReviewSubmitView(APIView):
+    """
+    POST: Create or update the authenticated user's review for an analyst (1–5 stars).
+
+    One row per (reviewer, analyst); submitting again updates the same review.
+
+    Body (JSON):
+        analyst_id   — UUID of the analyst
+        rating       — integer 1–5 (required)
+        title        — optional string (max 200)
+        review_text  — optional string (max 4000)
+        is_public    — optional bool (default true)
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = AnalystReviewSubmitSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        data = serializer.validated_data
+        analyst_id = data["analyst_id"]
+        analyst = get_object_or_404(User, pk=analyst_id)
+
+        if getattr(analyst, "user_type", "") != "analyst":
+            return Response(
+                {
+                    "error": "Reviews can only be submitted for analyst accounts.",
+                    "code": "invalid_analyst",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if analyst.id == request.user.id:
+            return Response(
+                {"error": "You cannot review yourself.", "code": "cannot_review_self"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        title = (data.get("title") or "").strip() or None
+        review_text = (data.get("review_text") or "").strip() or None
+
+        review, created = AnalystReview.objects.update_or_create(
+            reviewer=request.user,
+            analyst=analyst,
+            defaults={
+                "rating": data["rating"],
+                "title": title,
+                "review_text": review_text,
+                "is_public": data.get("is_public", True),
+            },
+        )
+
+        out = AnalystReviewReadSerializer(review)
+        return Response(
+            {
+                "message": "Review saved successfully.",
+                "created": created,
+                "review": out.data,
+            },
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
         )
