@@ -343,6 +343,9 @@ class TraderSignalListView(generics.ListAPIView):
         search or q — optional free-text match across instrument symbol/name, asset class
         name, timeframe code/name, direction, status, analyst note, analyst name/email
         (case-insensitive, partial match).
+
+    Each signal includes close_outcome for CLOSED rows: "profit" | "loss" | "neutral"
+    (from is_win / is_loss / is_neutral); null for OPEN/DRAFT.
     """
     serializer_class = TradingSignalSerializer
     permission_classes = [permissions.IsAuthenticated]
