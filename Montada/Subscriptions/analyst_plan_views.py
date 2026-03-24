@@ -42,6 +42,67 @@ def _end_date_for_plan(plan: AnalystContentPlan, duration_days: int | None = Non
     return now + timedelta(days=30)
 
 
+def _ensure_follow_analyst_after_subscribe(subscriber, analyst_user):
+    """
+    Ensure *subscriber* has an active ACCEPTED Follow row to *analyst_user*.
+    Mirrors Followers follow behaviour: pending → accepted; unfollowed/rejected → reactivated.
+
+    Returns:
+        dict with keys:
+        - follows_analyst (bool): True if the user is following after this call (or was already).
+        - action (str): "created" | "already_following" | "accepted_pending" | "reactivated" | "skipped_blocked"
+    """
+    from Followers.models import Follow
+
+    if Follow.objects.filter(
+        follower=subscriber,
+        followed=analyst_user,
+        status=Follow.Status.BLOCKED,
+    ).exists():
+        return {"follows_analyst": False, "action": "skipped_blocked"}
+
+    existing = Follow.objects.filter(
+        follower=subscriber, followed=analyst_user
+    ).first()
+
+    if existing:
+        if existing.status == Follow.Status.ACCEPTED and existing.is_active:
+            return {"follows_analyst": True, "action": "already_following"}
+        if existing.status == Follow.Status.PENDING:
+            existing.accept()
+            return {"follows_analyst": True, "action": "accepted_pending"}
+        if existing.status in (Follow.Status.REJECTED,) or (
+            existing.status == Follow.Status.ACCEPTED and not existing.is_active
+        ):
+            existing.status = Follow.Status.ACCEPTED
+            existing.is_active = True
+            existing.accepted_at = timezone.now()
+            existing.requested_at = timezone.now()
+            existing.rejected_at = None
+            existing.unfollowed_at = None
+            existing.save(
+                update_fields=[
+                    "status",
+                    "is_active",
+                    "accepted_at",
+                    "requested_at",
+                    "rejected_at",
+                    "unfollowed_at",
+                ]
+            )
+            return {"follows_analyst": True, "action": "reactivated"}
+
+    follow = Follow.objects.create(
+        follower=subscriber,
+        followed=analyst_user,
+        status=Follow.Status.ACCEPTED,
+        is_active=True,
+    )
+    follow.accepted_at = timezone.now()
+    follow.save(update_fields=["accepted_at"])
+    return {"follows_analyst": True, "action": "created"}
+
+
 class AnalystContentPlanListCreateView(generics.ListCreateAPIView):
     """
     GET: List plans created by the authenticated analyst (empty for non-analysts).
@@ -140,6 +201,9 @@ class SubscribeToAnalystPlanView(APIView):
     """
     POST: Start a subscription to an analyst plan (payment flow can attach payment_intent_id later).
     Body: { "plan_id": "<uuid>", "payment_intent_id": optional, "duration_days": optional }
+
+    On success, the subscriber is also set to follow the analyst (active ACCEPTED Follow),
+    unless the pair is in a BLOCKED follow state.
     """
 
     permission_classes = [permissions.IsAuthenticated]
@@ -151,7 +215,7 @@ class SubscribeToAnalystPlanView(APIView):
         payment_intent_id = (ser.validated_data.get("payment_intent_id") or "").strip() or None
 
         plan = get_object_or_404(
-            AnalystContentPlan.objects.filter(is_active=True),
+            AnalystContentPlan.objects.filter(is_active=True).select_related("analyst"),
             pk=plan_id,
         )
         if plan.analyst_id == request.user.id:
@@ -178,10 +242,14 @@ class SubscribeToAnalystPlanView(APIView):
             end_date=end_date,
             payment_intent_id=payment_intent_id,
         )
+
+        follow_info = _ensure_follow_analyst_after_subscribe(request.user, plan.analyst)
+
         return Response(
             {
                 "message": "Subscribed to analyst plan.",
                 "subscription": UserAnalystPlanSubscriptionSerializer(sub, context={"request": request}).data,
+                "follow": follow_info,
             },
             status=status.HTTP_201_CREATED,
         )
