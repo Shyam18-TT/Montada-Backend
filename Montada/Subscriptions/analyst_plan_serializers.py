@@ -8,6 +8,7 @@ class AnalystContentPlanSerializer(serializers.ModelSerializer):
 
     analyst_id = serializers.UUIDField(read_only=True)
     active_subscribers_count = serializers.SerializerMethodField()
+    has_active_subscription = serializers.SerializerMethodField()
 
     class Meta:
         model = AnalystContentPlan
@@ -22,10 +23,18 @@ class AnalystContentPlanSerializer(serializers.ModelSerializer):
             "billing_period",
             "is_active",
             "active_subscribers_count",
+            "has_active_subscription",
             "created_at",
             "updated_at",
         )
-        read_only_fields = ("id", "analyst_id", "created_at", "updated_at", "active_subscribers_count")
+        read_only_fields = (
+            "id",
+            "analyst_id",
+            "created_at",
+            "updated_at",
+            "active_subscribers_count",
+            "has_active_subscription",
+        )
 
     def get_active_subscribers_count(self, obj):
         request = self.context.get("request")
@@ -40,6 +49,16 @@ class AnalystContentPlanSerializer(serializers.ModelSerializer):
             status=UserAnalystPlanSubscription.Status.ACTIVE,
             end_date__gte=now,
         ).count()
+
+    def get_has_active_subscription(self, obj):
+        """
+        True if the request user has an active subscription to this plan.
+        Set via context['subscribed_plan_ids'] (catalog view); otherwise False.
+        """
+        ids = self.context.get("subscribed_plan_ids")
+        if not ids:
+            return False
+        return obj.pk in ids
 
 
 class AnalystContentPlanCreateUpdateSerializer(serializers.ModelSerializer):

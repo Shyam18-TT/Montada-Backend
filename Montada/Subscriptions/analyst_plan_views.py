@@ -96,11 +96,33 @@ class PublicAnalystContentPlanCatalogView(generics.ListAPIView):
     URL includes analyst user id (UUID).
 
     Returns 404 if the user does not exist or is not an analyst.
+
+    Each plan includes ``has_active_subscription``: whether the requesting user
+    currently has an active UserAnalystPlanSubscription for that plan.
     """
 
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = AnalystContentPlanSerializer
     pagination_class = None  # typically few plans per analyst; return full list
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        request = self.request
+        analyst_id = self.kwargs.get("analyst_id")
+        if request.user.is_authenticated and analyst_id:
+            now = timezone.now()
+            subscribed_ids = set(
+                UserAnalystPlanSubscription.objects.filter(
+                    subscriber=request.user,
+                    status=UserAnalystPlanSubscription.Status.ACTIVE,
+                    end_date__gte=now,
+                    plan__analyst_id=analyst_id,
+                ).values_list("plan_id", flat=True)
+            )
+            context["subscribed_plan_ids"] = subscribed_ids
+        else:
+            context["subscribed_plan_ids"] = set()
+        return context
 
     def get_queryset(self):
         analyst_id = self.kwargs.get("analyst_id")

@@ -854,6 +854,10 @@ class AnalystPublicProfileView(APIView):
     ─ by_timeframe    : signal counts per timeframe
     ─ monthly_graph   : last 6 months win / loss / total per month
     ─ follow_status   : is_following, follow_state (accepted/pending/none)
+    ─ analyst_plan_subscription : is_subscribed, plan (full AnalystContentPlan payload
+                        if subscribed), subscription (id, dates, status for the active row).
+                        At most one active subscription per analyst for the viewer; if several
+                        exist, the newest by created_at is used.
     """
     permission_classes = [IsAuthenticated]
 
@@ -1055,6 +1059,51 @@ class AnalystPublicProfileView(APIView):
         if mine:
             my_review_out = AnalystReviewReadSerializer(mine).data
 
+        # ── per-analyst content plan: one active subscription → plan details + sub row ─
+        analyst_plan_subscription = {
+            "is_subscribed": False,
+            "plan": None,
+            "subscription": None,
+        }
+        try:
+            from Subscriptions.models import UserAnalystPlanSubscription
+            from Subscriptions.analyst_plan_serializers import AnalystContentPlanSerializer
+        except ImportError:
+            pass
+        else:
+            sub_row = (
+                UserAnalystPlanSubscription.objects.filter(
+                    subscriber=request.user,
+                    plan__analyst=analyst,
+                    status=UserAnalystPlanSubscription.Status.ACTIVE,
+                    end_date__gte=now,
+                )
+                .select_related("plan")
+                .order_by("-created_at")
+                .first()
+            )
+            if sub_row and sub_row.plan_id:
+                plan_obj = sub_row.plan
+                plan_payload = AnalystContentPlanSerializer(
+                    plan_obj,
+                    context={
+                        "request": request,
+                        "subscribed_plan_ids": {plan_obj.pk},
+                    },
+                ).data
+                analyst_plan_subscription = {
+                    "is_subscribed": True,
+                    "plan": plan_payload,
+                    "subscription": {
+                        "id": str(sub_row.id),
+                        "status": sub_row.status,
+                        "start_date": sub_row.start_date,
+                        "end_date": sub_row.end_date,
+                        "is_effective": sub_row.is_effective(),
+                        "payment_intent_id": sub_row.payment_intent_id or None,
+                    },
+                }
+
         return Response(
             {
                 "profile": {
@@ -1097,6 +1146,7 @@ class AnalystPublicProfileView(APIView):
                     "is_following": is_following,
                     "state":        follow_state,
                 },
+                "analyst_plan_subscription": analyst_plan_subscription,
             },
             status=status.HTTP_200_OK,
         )
