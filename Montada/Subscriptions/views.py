@@ -1,4 +1,5 @@
 import logging
+from django.db.models import Count, Sum, Max
 from rest_framework import status, generics, permissions
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
@@ -7,12 +8,14 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from datetime import timedelta
-from .models import Subscription
+from .models import Subscription, UserAnalystPlanSubscription, AnalystPlanPurchase
 from .serializers import (
     SubscriptionSerializer,
     SubscribeSerializer,
     ConfirmSubscriptionSerializer,
 )
+from .analyst_plan_serializers import UserAnalystPlanSubscriptionSerializer
+from .analyst_plan_views import IsAnalystUser
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
@@ -300,3 +303,113 @@ class StripeAnalyticsView(APIView):
                 {"error": "Failed to fetch Stripe analytics.", "detail": str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+
+class AnalystPlanRevenueView(APIView):
+    """
+    GET: Revenue from all purchases of this analyst's plans.
+
+    Totals use ``AnalystPlanPurchase`` (immutable snapshot at checkout), not current plan prices.
+
+    Query params:
+    - ``status``: ``active`` | ``expired`` | ``cancelled`` | ``all`` (default ``all``)
+    - ``limit`` / ``offset``: paginate the ``subscriptions`` list (default limit 50, max 200)
+    """
+
+    permission_classes = [permissions.IsAuthenticated, IsAnalystUser]
+
+    def get(self, request):
+        status_param = (request.query_params.get("status") or "all").lower()
+        if status_param != "all":
+            allowed = {
+                UserAnalystPlanSubscription.Status.ACTIVE,
+                UserAnalystPlanSubscription.Status.EXPIRED,
+                UserAnalystPlanSubscription.Status.CANCELLED,
+            }
+            if status_param not in allowed:
+                return Response(
+                    {
+                        "error": "Invalid status. Use active, expired, cancelled, or all.",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        qs = (
+            UserAnalystPlanSubscription.objects.filter(plan__analyst=request.user)
+            .select_related("plan", "subscriber", "purchase")
+            .order_by("-created_at")
+        )
+        if status_param != "all":
+            qs = qs.filter(status=status_param)
+
+        purchase_qs = AnalystPlanPurchase.objects.filter(analyst=request.user)
+        if status_param != "all":
+            purchase_qs = purchase_qs.filter(subscription__status=status_param)
+
+        by_currency = (
+            purchase_qs.values("currency")
+            .annotate(
+                total_revenue=Sum("amount"),
+                subscription_count=Count("id"),
+            )
+            .order_by()
+        )
+
+        by_plan = (
+            purchase_qs.values("subscription__plan_id")
+            .annotate(
+                subscription_count=Count("id"),
+                revenue=Sum("amount"),
+                plan_title=Max("plan_title"),
+                currency=Max("currency"),
+            )
+            .order_by("-revenue")
+        )
+
+        try:
+            limit = min(int(request.query_params.get("limit", 50)), 200)
+        except (TypeError, ValueError):
+            limit = 50
+        try:
+            offset = max(int(request.query_params.get("offset", 0)), 0)
+        except (TypeError, ValueError):
+            offset = 0
+
+        page_qs = qs[offset : offset + limit]
+        sub_ser = UserAnalystPlanSubscriptionSerializer(
+            page_qs, many=True, context={"request": request}
+        )
+
+        return Response(
+            {
+                "summary": {
+                    "total_subscriptions": qs.count(),
+                    "by_currency": [
+                        {
+                            "currency": (row["currency"] or "usd").lower(),
+                            "subscription_count": row["subscription_count"],
+                            "total_revenue": str(row["total_revenue"] or 0),
+                        }
+                        for row in by_currency
+                    ],
+                },
+                "by_plan": [
+                    {
+                        "plan_id": str(row["subscription__plan_id"]),
+                        "plan_title": row["plan_title"],
+                        "currency": (row["currency"] or "usd").lower(),
+                        "subscription_count": row["subscription_count"],
+                        "revenue": str(row["revenue"] or 0),
+                    }
+                    for row in by_plan
+                ],
+                "subscriptions": sub_ser.data,
+                "pagination": {
+                    "limit": limit,
+                    "offset": offset,
+                    "returned": len(sub_ser.data),
+                    "total": qs.count(),
+                },
+            },
+            status=status.HTTP_200_OK,
+        )

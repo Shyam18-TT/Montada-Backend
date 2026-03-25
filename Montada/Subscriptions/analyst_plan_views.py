@@ -13,7 +13,11 @@ from rest_framework.exceptions import NotFound
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import AnalystContentPlan, UserAnalystPlanSubscription
+from .models import (
+    AnalystContentPlan,
+    UserAnalystPlanSubscription,
+    create_analyst_plan_purchase,
+)
 from .analyst_plan_serializers import (
     AnalystContentPlanSerializer,
     AnalystContentPlanCreateUpdateSerializer,
@@ -242,6 +246,11 @@ class SubscribeToAnalystPlanView(APIView):
             end_date=end_date,
             payment_intent_id=payment_intent_id,
         )
+        create_analyst_plan_purchase(sub, plan)
+        sub = (
+            UserAnalystPlanSubscription.objects.select_related("plan", "plan__analyst", "purchase")
+            .get(pk=sub.pk)
+        )
 
         follow_info = _ensure_follow_analyst_after_subscribe(request.user, plan.analyst)
 
@@ -264,7 +273,7 @@ class MyAnalystPlanSubscriptionsListView(generics.ListAPIView):
     def get_queryset(self):
         return (
             UserAnalystPlanSubscription.objects.filter(subscriber=self.request.user)
-            .select_related("plan", "plan__analyst")
+            .select_related("plan", "plan__analyst", "purchase")
             .order_by("-created_at")
         )
 

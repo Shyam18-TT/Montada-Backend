@@ -280,3 +280,61 @@ class UserAnalystPlanSubscription(models.Model):
         self.status = self.Status.CANCELLED
         self.save(update_fields=["status", "updated_at"])
         return self
+
+
+class AnalystPlanPurchase(models.Model):
+    """
+    Immutable revenue snapshot for one analyst-plan subscription checkout.
+
+    Amount and plan metadata are copied from ``AnalystContentPlan`` at purchase time so
+    analyst revenue and purchase history stay correct if the plan price or title changes later.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    subscription = models.OneToOneField(
+        UserAnalystPlanSubscription,
+        on_delete=models.CASCADE,
+        related_name="purchase",
+        help_text="The subscription row this payment belongs to.",
+    )
+    analyst = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="analyst_plan_purchases",
+        help_text="Analyst who received this purchase (denormalized for reporting).",
+    )
+    amount = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        help_text="Price charged for this purchase (snapshot).",
+    )
+    currency = models.CharField(max_length=10, default="usd")
+    plan_title = models.CharField(max_length=200)
+    plan_scope = models.CharField(max_length=20)
+    billing_period = models.CharField(max_length=20)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["analyst", "created_at"]),
+            models.Index(fields=["analyst", "currency"]),
+        ]
+        verbose_name = "Analyst plan purchase"
+        verbose_name_plural = "Analyst plan purchases"
+
+    def __str__(self):
+        return f"{self.amount} {self.currency} — sub {self.subscription_id}"
+
+
+def create_analyst_plan_purchase(subscription: UserAnalystPlanSubscription, plan: AnalystContentPlan):
+    """Persist an immutable purchase record from the current plan fields."""
+    return AnalystPlanPurchase.objects.create(
+        subscription=subscription,
+        analyst_id=plan.analyst_id,
+        amount=plan.price,
+        currency=(plan.currency or "usd").strip().lower() or "usd",
+        plan_title=plan.title,
+        plan_scope=plan.scope,
+        billing_period=plan.billing_period,
+    )

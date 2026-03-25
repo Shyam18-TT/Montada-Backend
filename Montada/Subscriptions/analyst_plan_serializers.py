@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import AnalystContentPlan, UserAnalystPlanSubscription
+from .models import AnalystContentPlan, AnalystPlanPurchase, UserAnalystPlanSubscription
 
 
 class AnalystContentPlanSerializer(serializers.ModelSerializer):
@@ -77,8 +77,26 @@ class AnalystContentPlanCreateUpdateSerializer(serializers.ModelSerializer):
         )
 
 
+class AnalystPlanPurchaseSerializer(serializers.ModelSerializer):
+    """Immutable snapshot of what was paid when the subscription was created."""
+
+    class Meta:
+        model = AnalystPlanPurchase
+        fields = (
+            "id",
+            "amount",
+            "currency",
+            "plan_title",
+            "plan_scope",
+            "billing_period",
+            "created_at",
+        )
+        read_only_fields = fields
+
+
 class UserAnalystPlanSubscriptionSerializer(serializers.ModelSerializer):
     plan = AnalystContentPlanSerializer(read_only=True)
+    purchase = AnalystPlanPurchaseSerializer(read_only=True, allow_null=True)
     is_effective = serializers.SerializerMethodField()
 
     class Meta:
@@ -86,6 +104,7 @@ class UserAnalystPlanSubscriptionSerializer(serializers.ModelSerializer):
         fields = (
             "id",
             "plan",
+            "purchase",
             "status",
             "start_date",
             "end_date",
@@ -97,6 +116,7 @@ class UserAnalystPlanSubscriptionSerializer(serializers.ModelSerializer):
         read_only_fields = (
             "id",
             "plan",
+            "purchase",
             "status",
             "start_date",
             "end_date",

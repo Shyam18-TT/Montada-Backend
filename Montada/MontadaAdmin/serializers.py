@@ -8,6 +8,12 @@ from django.contrib.auth.password_validation import validate_password
 
 User = get_user_model()
 
+try:
+    from Subscriptions.models import AnalystContentPlan, UserAnalystPlanSubscription
+except ImportError:
+    AnalystContentPlan = None
+    UserAnalystPlanSubscription = None
+
 
 class AdminLoginSerializer(serializers.Serializer):
     """Email and password for admin login; validates credentials and sets user."""
@@ -44,6 +50,18 @@ class AdminSuspendUserSerializer(serializers.Serializer):
     """Admin suspend or unsuspend a user. Body: user_id (UUID), suspend (boolean)."""
     user_id = serializers.UUIDField(required=True)
     suspend = serializers.BooleanField(required=True)
+
+
+class AdminAssignAnalystPlanSubscriptionSerializer(serializers.Serializer):
+    """
+    Admin assigns a trader to an analyst plan without creating a purchase row (excluded from revenue).
+    Body: subscriber_id, plan_id, optional duration_days, optional ensure_follow (default true).
+    """
+
+    subscriber_id = serializers.UUIDField()
+    plan_id = serializers.UUIDField()
+    duration_days = serializers.IntegerField(required=False, min_value=1, max_value=3650)
+    ensure_follow = serializers.BooleanField(required=False, default=True)
 
 
 class AdminUserProfileSerializer(serializers.ModelSerializer):
@@ -168,6 +186,151 @@ class AdminCreateTraderSerializer(serializers.Serializer):
         return user
 
 
+if AnalystContentPlan is not None:
+
+    class AdminAnalystContentPlanDetailSerializer(serializers.ModelSerializer):
+        """
+        One analyst content plan with subscriber metrics (admin can read any analyst's plans).
+        """
+
+        analyst_id = serializers.UUIDField(read_only=True)
+        active_subscribers_count = serializers.SerializerMethodField()
+        total_subscriptions_count = serializers.SerializerMethodField()
+
+        class Meta:
+            model = AnalystContentPlan
+            fields = (
+                "id",
+                "analyst_id",
+                "title",
+                "description",
+                "scope",
+                "price",
+                "currency",
+                "billing_period",
+                "is_active",
+                "active_subscribers_count",
+                "total_subscriptions_count",
+                "created_at",
+                "updated_at",
+            )
+            read_only_fields = fields
+
+        def get_active_subscribers_count(self, obj):
+            from django.utils import timezone
+
+            if UserAnalystPlanSubscription is None:
+                return 0
+            now = timezone.now()
+            return obj.user_subscriptions.filter(
+                status=UserAnalystPlanSubscription.Status.ACTIVE,
+                end_date__gte=now,
+            ).count()
+
+        def get_total_subscriptions_count(self, obj):
+            return obj.user_subscriptions.count()
+
+else:
+    AdminAnalystContentPlanDetailSerializer = None
+
+
+if UserAnalystPlanSubscription is not None:
+
+    class AdminAnalystSubscriberSubscriptionSerializer(serializers.ModelSerializer):
+        """
+        One subscription row for admin: subscriber identity + plan snapshot + subscription fields.
+        No full user profile beyond what is needed for subscription context.
+        """
+
+        subscriber = serializers.SerializerMethodField()
+        plan = serializers.SerializerMethodField()
+        purchase = serializers.SerializerMethodField()
+        is_effective = serializers.SerializerMethodField()
+
+        class Meta:
+            model = UserAnalystPlanSubscription
+            fields = (
+                "id",
+                "subscriber",
+                "plan",
+                "status",
+                "start_date",
+                "end_date",
+                "purchase",
+                "payment_intent_id",
+                "is_effective",
+                "created_at",
+                "updated_at",
+            )
+            read_only_fields = fields
+
+        def get_subscriber(self, obj):
+            u = obj.subscriber
+            return {
+                "id": str(u.id),
+                "email": u.email,
+                "name": u.name or "",
+            }
+
+        def get_plan(self, obj):
+            p = obj.plan
+            return {
+                "id": str(p.id),
+                "title": p.title,
+                "scope": p.scope,
+                "billing_period": p.billing_period,
+            }
+
+        def get_purchase(self, obj):
+            pu = getattr(obj, "purchase", None)
+            if pu is None:
+                return None
+            return {
+                "amount": str(pu.amount),
+                "currency": pu.currency,
+                "plan_title_at_purchase": pu.plan_title,
+            }
+
+        def get_is_effective(self, obj):
+            return obj.is_effective()
+
+else:
+    AdminAnalystSubscriberSubscriptionSerializer = None
+
+
+class AdminAnalystWithPlansTableSerializer(serializers.ModelSerializer):
+    """
+    Analyst row for admin table: users with at least one content plan.
+    Expects annotated total_plans, active_plans, distinct_subscribers, total_plan_subscriptions.
+    """
+
+    status = serializers.SerializerMethodField()
+    total_plans = serializers.IntegerField(read_only=True)
+    active_plans = serializers.IntegerField(read_only=True)
+    distinct_subscribers = serializers.IntegerField(read_only=True)
+    total_plan_subscriptions = serializers.IntegerField(read_only=True)
+    registered_at = serializers.DateTimeField(source="created_at", read_only=True)
+
+    class Meta:
+        model = User
+        fields = (
+            "id",
+            "name",
+            "email",
+            "status",
+            "is_active",
+            "is_verified",
+            "total_plans",
+            "active_plans",
+            "distinct_subscribers",
+            "total_plan_subscriptions",
+            "registered_at",
+        )
+
+    def get_status(self, obj):
+        return "active" if obj.is_active else "inactive"
+
+
 class AdminAnalystListSerializer(serializers.ModelSerializer):
     """Read-only serializer for analyst list; expects annotated wins, losses, signals_count, followers_count."""
     id = serializers.SerializerMethodField()
@@ -254,6 +417,43 @@ class AdminTraderListSerializer(serializers.ModelSerializer):
         if getattr(sub, "is_trial", True) or sub.plan_type == "free_trial":
             return "trial"
         return "subscribed"
+
+    def get_registered_at(self, obj):
+        return obj.created_at.isoformat() if obj.created_at else None
+
+
+class AdminTraderForAnalystSubscriptionSerializer(serializers.ModelSerializer):
+    """
+    Trader row for admin subscription assignment UI.
+    ``is_subscribed`` reflects ``has_active_analyst_plan_subscription`` (annotated; active analyst-plan row).
+    """
+
+    id = serializers.SerializerMethodField()
+    status = serializers.SerializerMethodField()
+    is_subscribed = serializers.BooleanField(
+        read_only=True,
+        source="has_active_analyst_plan_subscription",
+    )
+    registered_at = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = (
+            "id",
+            "name",
+            "email",
+            "status",
+            "is_active",
+            "is_verified",
+            "is_subscribed",
+            "registered_at",
+        )
+
+    def get_id(self, obj):
+        return str(obj.id)
+
+    def get_status(self, obj):
+        return "active" if obj.is_active else "inactive"
 
     def get_registered_at(self, obj):
         return obj.created_at.isoformat() if obj.created_at else None

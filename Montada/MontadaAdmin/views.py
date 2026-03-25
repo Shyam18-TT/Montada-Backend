@@ -11,7 +11,20 @@ from datetime import timedelta, datetime
 from django.conf import settings as django_settings
 from django.utils import timezone
 from django.db import connections
-from django.db.models import Avg, Count, F, Q, OuterRef, Subquery, Prefetch
+from django.db.models import (
+    Avg,
+    BooleanField,
+    Count,
+    Exists,
+    F,
+    IntegerField,
+    OuterRef,
+    Prefetch,
+    Q,
+    Subquery,
+    Sum,
+    Value,
+)
 from django.db.models.functions import Coalesce
 from rest_framework import status, generics
 from rest_framework.pagination import PageNumberPagination
@@ -40,6 +53,17 @@ try:
     from Subscriptions.models import Subscription
 except ImportError:
     Subscription = None
+
+try:
+    from Subscriptions.models import (
+        UserAnalystPlanSubscription,
+        AnalystPlanPurchase,
+        AnalystContentPlan,
+    )
+except ImportError:
+    UserAnalystPlanSubscription = None
+    AnalystPlanPurchase = None
+    AnalystContentPlan = None
 
 try:
     from Signals.models import AssetClass, Instrument, Timeframe
@@ -83,7 +107,11 @@ except ImportError:
 
 from .serializers import (
     AdminAnalystListSerializer,
+    AdminAnalystWithPlansTableSerializer,
+    AdminAnalystContentPlanDetailSerializer,
+    AdminAnalystSubscriberSubscriptionSerializer,
     AdminTraderListSerializer,
+    AdminTraderForAnalystSubscriptionSerializer,
     AdminLoginSerializer,
     AdminCreateAnalystSerializer,
     AdminCreateTraderSerializer,
@@ -92,6 +120,7 @@ from .serializers import (
     AdminNewsArticleListSerializer,
     AdminChangeUserPasswordSerializer,
     AdminSuspendUserSerializer,
+    AdminAssignAnalystPlanSubscriptionSerializer,
     AdminUserProfileSerializer,
 )
 
@@ -858,6 +887,299 @@ class AdminAnalystListView(generics.ListAPIView):
         return qs
 
 
+class AdminAnalystsWithPlansTableView(generics.ListAPIView):
+    """
+    GET: Paginated analysts who have at least one analyst content plan (subscription offering).
+
+    Query params: page, page_size (optional), search (name or email).
+
+    Each row: identity, account status, plan counts, subscriber metrics (for table UI).
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+    pagination_class = AdminPageNumberPagination
+    serializer_class = AdminAnalystWithPlansTableSerializer
+
+    def list(self, request, *args, **kwargs):
+        if UserAnalystPlanSubscription is None:
+            return Response(
+                {"error": "Analyst plan subscriptions are not available."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        return super().list(request, *args, **kwargs)
+
+    def get_queryset(self):
+        # .order_by() clears UserAnalystPlanSubscription.Meta.ordering; otherwise SQL Server
+        # rejects ORDER BY created_at on aggregates that use GROUP BY (error 8127).
+        subscriber_subq = (
+            UserAnalystPlanSubscription.objects.filter(plan__analyst_id=OuterRef("pk"))
+            .order_by()
+            .values("plan__analyst_id")
+            .annotate(n=Count("subscriber_id", distinct=True))
+            .values("n")[:1]
+        )
+        subs_rows_subq = (
+            UserAnalystPlanSubscription.objects.filter(plan__analyst_id=OuterRef("pk"))
+            .order_by()
+            .values("plan__analyst_id")
+            .annotate(n=Count("id"))
+            .values("n")[:1]
+        )
+        qs = (
+            User.objects.filter(user_type="analyst")
+            .annotate(
+                total_plans=Count("content_plans", distinct=True),
+                active_plans=Count(
+                    "content_plans",
+                    filter=Q(content_plans__is_active=True),
+                    distinct=True,
+                ),
+            )
+            .filter(total_plans__gt=0)
+            .annotate(
+                distinct_subscribers=Coalesce(
+                    Subquery(subscriber_subq, output_field=IntegerField()),
+                    0,
+                ),
+                total_plan_subscriptions=Coalesce(
+                    Subquery(subs_rows_subq, output_field=IntegerField()),
+                    0,
+                ),
+            )
+            .order_by("-created_at")
+        )
+        search = (self.request.query_params.get("search") or "").strip()
+        if search:
+            qs = qs.filter(
+                Q(name__icontains=search) | Q(email__icontains=search)
+            )
+        return qs
+
+
+class AdminAnalystPlansDetailView(generics.ListAPIView):
+    """
+    GET: All analyst content plans for one analyst (admin).
+
+    Path: analyst_id — user with user_type=analyst.
+
+    Query params:
+        is_active: true | false — filter plans by visibility flag
+        page, page_size — pagination
+
+    Response includes ``analyst`` (id, name, email) plus paginated ``results`` (plan rows).
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+    pagination_class = AdminPageNumberPagination
+
+    def get_serializer_class(self):
+        if AdminAnalystContentPlanDetailSerializer is None:
+            from rest_framework import serializers
+
+            return serializers.Serializer
+        return AdminAnalystContentPlanDetailSerializer
+
+    def list(self, request, *args, **kwargs):
+        if AnalystContentPlan is None or AdminAnalystContentPlanDetailSerializer is None:
+            return Response(
+                {"error": "Analyst content plans are not available."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        analyst = get_object_or_404(User, pk=self.kwargs["analyst_id"], user_type="analyst")
+        response = super().list(request, *args, **kwargs)
+        if isinstance(response.data, dict):
+            response.data["analyst"] = {
+                "id": str(analyst.id),
+                "name": analyst.name or "",
+                "email": analyst.email,
+            }
+        return response
+
+    def get_queryset(self):
+        qs = AnalystContentPlan.objects.filter(analyst_id=self.kwargs["analyst_id"]).order_by(
+            "-created_at"
+        )
+        active = (self.request.query_params.get("is_active") or "").strip().lower()
+        if active in ("true", "1", "yes"):
+            qs = qs.filter(is_active=True)
+        elif active in ("false", "0", "no"):
+            qs = qs.filter(is_active=False)
+        if UserAnalystPlanSubscription is not None:
+            qs = qs.prefetch_related(
+                Prefetch(
+                    "user_subscriptions",
+                    queryset=UserAnalystPlanSubscription.objects.order_by().only(
+                        "id",
+                        "status",
+                        "end_date",
+                        "plan_id",
+                    ),
+                ),
+            )
+        return qs
+
+
+class AdminAnalystSubscribersListView(generics.ListAPIView):
+    """
+    GET: Users who subscribed to this analyst's content plans (one row per subscription).
+
+    Path: analyst_id — user with user_type=analyst.
+
+    Query params:
+        status: active | expired | cancelled — filter subscription status
+        plan_id: UUID — filter to one plan
+        search: matches subscriber name or email (icontains)
+        page, page_size — pagination
+
+    Each result: subscriber (id, email, name), plan snapshot, subscription dates/status,
+    optional purchase snapshot, is_effective.
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+    pagination_class = AdminPageNumberPagination
+
+    def get_serializer_class(self):
+        if AdminAnalystSubscriberSubscriptionSerializer is None:
+            from rest_framework import serializers
+
+            return serializers.Serializer
+        return AdminAnalystSubscriberSubscriptionSerializer
+
+    def list(self, request, *args, **kwargs):
+        if UserAnalystPlanSubscription is None or AdminAnalystSubscriberSubscriptionSerializer is None:
+            return Response(
+                {"error": "Analyst plan subscriptions are not available."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        analyst = get_object_or_404(User, pk=self.kwargs["analyst_id"], user_type="analyst")
+        response = super().list(request, *args, **kwargs)
+        if isinstance(response.data, dict):
+            response.data["analyst"] = {
+                "id": str(analyst.id),
+                "name": analyst.name or "",
+                "email": analyst.email,
+            }
+        return response
+
+    def get_queryset(self):
+        qs = (
+            UserAnalystPlanSubscription.objects.filter(plan__analyst_id=self.kwargs["analyst_id"])
+            .select_related("subscriber", "plan", "purchase")
+            .order_by("-created_at")
+        )
+
+        status_param = (self.request.query_params.get("status") or "").strip().lower()
+        if status_param:
+            St = UserAnalystPlanSubscription.Status
+            allowed = {St.ACTIVE, St.EXPIRED, St.CANCELLED}
+            if status_param in allowed:
+                qs = qs.filter(status=status_param)
+
+        plan_id = (self.request.query_params.get("plan_id") or "").strip()
+        if plan_id:
+            qs = qs.filter(plan_id=plan_id)
+
+        search = (self.request.query_params.get("search") or "").strip()
+        if search:
+            qs = qs.filter(
+                Q(subscriber__email__icontains=search)
+                | Q(subscriber__name__icontains=search)
+            )
+        return qs
+
+
+class AdminAssignAnalystPlanSubscriptionView(APIView):
+    """
+    POST: Assign a trader to an analyst content plan from the admin (complimentary / manual).
+
+    Creates ``UserAnalystPlanSubscription`` only — **does not** create ``AnalystPlanPurchase``,
+    so amounts are **not** included in analyst revenue or purchase-based growth graphs.
+
+    Path: ``analyst_id`` must match the plan's owner.
+
+    Body: ``subscriber_id`` (trader), ``plan_id``, optional ``duration_days``, optional ``ensure_follow`` (default true).
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def post(self, request, analyst_id):
+        if (
+            UserAnalystPlanSubscription is None
+            or AnalystContentPlan is None
+        ):
+            return Response(
+                {"error": "Analyst plan subscriptions are not available."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        from Subscriptions.analyst_plan_views import (
+            _end_date_for_plan,
+            _ensure_follow_analyst_after_subscribe,
+        )
+        from Subscriptions.analyst_plan_serializers import UserAnalystPlanSubscriptionSerializer
+
+        ser = AdminAssignAnalystPlanSubscriptionSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        subscriber_id = ser.validated_data["subscriber_id"]
+        plan_id = ser.validated_data["plan_id"]
+        duration_days = ser.validated_data.get("duration_days")
+        ensure_follow = ser.validated_data.get("ensure_follow", True)
+
+        analyst = get_object_or_404(User, pk=analyst_id, user_type="analyst")
+        plan = get_object_or_404(
+            AnalystContentPlan.objects.filter(is_active=True),
+            pk=plan_id,
+            analyst_id=analyst.id,
+        )
+        subscriber = get_object_or_404(User, pk=subscriber_id, user_type="trader")
+
+        if subscriber.id == plan.analyst_id:
+            return Response(
+                {"error": "An analyst cannot be subscribed to their own plan."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        now = timezone.now()
+        St = UserAnalystPlanSubscription.Status
+        if UserAnalystPlanSubscription.objects.filter(
+            subscriber=subscriber,
+            plan=plan,
+            status=St.ACTIVE,
+            end_date__gte=now,
+        ).exists():
+            return Response(
+                {"error": "This user already has an active subscription to this plan."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        end_date = _end_date_for_plan(plan, duration_days=duration_days)
+        sub = UserAnalystPlanSubscription.objects.create(
+            subscriber=subscriber,
+            plan=plan,
+            status=St.ACTIVE,
+            end_date=end_date,
+            payment_intent_id=None,
+        )
+        # Intentionally no create_analyst_plan_purchase(sub, plan) — revenue stays unchanged.
+
+        follow_info = None
+        if ensure_follow:
+            follow_info = _ensure_follow_analyst_after_subscribe(subscriber, plan.analyst)
+
+        sub = (
+            UserAnalystPlanSubscription.objects.select_related("plan", "plan__analyst", "purchase")
+            .get(pk=sub.pk)
+        )
+
+        return Response(
+            {
+                "message": "Subscription assigned. No purchase record was created; this is excluded from revenue analytics.",
+                "revenue_excluded": True,
+                "subscription": UserAnalystPlanSubscriptionSerializer(
+                    sub, context={"request": request}
+                ).data,
+                "follow": follow_info,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
 class AdminTraderListView(generics.ListAPIView):
     """
     GET: Paginated list of traders for admin dashboard.
@@ -913,6 +1235,59 @@ class AdminTraderListView(generics.ListAPIView):
 
         if Subscription is not None:
             qs = qs.select_related("subscription")
+
+        return qs
+
+
+class AdminTradersForSubscriptionPickerView(generics.ListAPIView):
+    """
+    GET: Paginated traders for admin when assigning analyst-plan subscriptions.
+
+    Query params:
+        analyst_id (optional): if set, ``is_subscribed`` is true when the trader has an
+            active ``UserAnalystPlanSubscription`` to any plan owned by this analyst.
+            If omitted, ``is_subscribed`` is true when the trader has any active analyst-plan
+            subscription (any analyst).
+        search: filter by name or email (icontains)
+        page, page_size
+
+    Each item includes ``is_subscribed`` (bool) for active analyst-plan access as above.
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+    pagination_class = AdminPageNumberPagination
+    serializer_class = AdminTraderForAnalystSubscriptionSerializer
+
+    def get_queryset(self):
+        qs = User.objects.filter(user_type="trader").order_by("-created_at")
+
+        search = (self.request.query_params.get("search") or "").strip()
+        if search:
+            qs = qs.filter(
+                Q(name__icontains=search) | Q(email__icontains=search)
+            )
+
+        analyst_id = (self.request.query_params.get("analyst_id") or "").strip()
+        if analyst_id:
+            get_object_or_404(User, pk=analyst_id, user_type="analyst")
+
+        # Name must not be ``is_subscribed`` — User model already has that field (app subscription).
+        if UserAnalystPlanSubscription is None:
+            qs = qs.annotate(
+                has_active_analyst_plan_subscription=Value(False, output_field=BooleanField())
+            )
+        else:
+            now = timezone.now()
+            St = UserAnalystPlanSubscription.Status
+            subs_qs = UserAnalystPlanSubscription.objects.filter(
+                subscriber_id=OuterRef("pk"),
+                status=St.ACTIVE,
+                end_date__gte=now,
+            ).order_by()
+            if analyst_id:
+                subs_qs = subs_qs.filter(plan__analyst_id=analyst_id)
+            qs = qs.annotate(
+                has_active_analyst_plan_subscription=Exists(subs_qs)
+            )
 
         return qs
 
@@ -2219,6 +2594,212 @@ class AdminSubscriptionStatsView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class AdminAnalystPlanSubscriptionStatsView(APIView):
+    """
+    GET  /api/admin/subscriptions/analyst-plans/stats/
+
+    Counts for per-analyst content plan subscriptions (trader → analyst plans) and
+    optional purchase-record revenue. Does not modify app-wide ``Subscription`` metrics.
+
+    Response includes:
+    - Row counts by stored status (active / expired / cancelled).
+    - ``currently_effective``: status active and end_date not passed.
+    - ``active_but_lapsed``: status still active but end_date passed (pending expiry update).
+    - Distinct analysts (with at least one row) and distinct subscribers.
+    - Purchase snapshots: totals and revenue grouped by currency when ``AnalystPlanPurchase`` exists.
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request):
+        if UserAnalystPlanSubscription is None:
+            return Response(
+                {"error": "Analyst plan subscriptions are not available (Subscriptions app)."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        now = timezone.now()
+        St = UserAnalystPlanSubscription.Status
+        base = UserAnalystPlanSubscription.objects
+
+        total = base.count()
+        by_status = {
+            "active": base.filter(status=St.ACTIVE).count(),
+            "expired": base.filter(status=St.EXPIRED).count(),
+            "cancelled": base.filter(status=St.CANCELLED).count(),
+        }
+        currently_effective = base.filter(status=St.ACTIVE, end_date__gte=now).count()
+        active_but_lapsed = base.filter(status=St.ACTIVE, end_date__lt=now).count()
+
+        distinct = base.aggregate(
+            analysts=Count("plan__analyst", distinct=True),
+            subscribers=Count("subscriber", distinct=True),
+        )
+
+        payload = {
+            "analyst_plan_subscriptions": {
+                "total": total,
+                "by_status": by_status,
+                "currently_effective": currently_effective,
+                "active_but_lapsed": active_but_lapsed,
+                "distinct_analysts_with_subscriptions": distinct["analysts"] or 0,
+                "distinct_subscribers": distinct["subscribers"] or 0,
+            },
+            "purchase_records": {
+                "total": 0,
+                "revenue_by_currency": [],
+            },
+        }
+
+        if AnalystPlanPurchase is not None:
+            pr = AnalystPlanPurchase.objects
+            payload["purchase_records"]["total"] = pr.count()
+            rows = (
+                pr.values("currency")
+                .annotate(
+                    total_amount=Sum("amount"),
+                    purchase_count=Count("id"),
+                )
+                .order_by("currency")
+            )
+            payload["purchase_records"]["revenue_by_currency"] = [
+                {
+                    "currency": (row["currency"] or "usd").lower(),
+                    "purchase_count": row["purchase_count"],
+                    "total_amount": str(row["total_amount"] or 0),
+                }
+                for row in rows
+            ]
+
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+def _six_month_windows(now):
+    """Yield (year, month, m_start, m_end) for each of the last 6 calendar months, oldest first."""
+    for i in range(5, -1, -1):
+        year = now.year
+        month = now.month - i
+        while month <= 0:
+            month += 12
+            year -= 1
+        last_day = monthrange(year, month)[1]
+        m_start = timezone.make_aware(datetime(year, month, 1))
+        m_end = timezone.make_aware(
+            datetime(year, month, last_day, 23, 59, 59, 999999)
+        )
+        if m_end > now:
+            m_end = now
+        yield year, month, m_start, m_end
+
+
+class AdminSubscriptionGrowthGraphView(APIView):
+    """
+    GET  /api/admin/subscriptions/growth-graph/
+
+    Last 6 calendar months for **analyst content plan** data only (not the app-wide
+    ``Subscription`` / market-news product).
+
+    Query params:
+        metric (required):
+            subscriptions | count  → new ``UserAnalystPlanSubscription`` rows per month (created_at)
+            revenue | amount       → sum of ``AnalystPlanPurchase.amount`` per month (created_at)
+
+    Each series point includes month label, value, and change vs the previous month in the window.
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request):
+        import calendar
+
+        if UserAnalystPlanSubscription is None:
+            return Response(
+                {"error": "Analyst plan subscriptions are not available."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        raw_metric = (request.query_params.get("metric") or "").strip().lower()
+
+        metric_map = {
+            "subscriptions": "subscriptions",
+            "subscription": "subscriptions",
+            "count": "subscriptions",
+            "subscription_count": "subscriptions",
+            "revenue": "revenue",
+            "amount": "revenue",
+            "revenue_growth": "revenue",
+        }
+        metric = metric_map.get(raw_metric)
+        if not metric:
+            return Response(
+                {
+                    "error": "Query param 'metric' is required. Use subscriptions (or count), or revenue (or amount).",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if metric == "revenue" and AnalystPlanPurchase is None:
+            return Response(
+                {"error": "Analyst plan purchase records are not available."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        now = timezone.now()
+        series = []
+        prev_value = None
+        dominant_currency = "usd"
+
+        if metric == "revenue":
+            mode = (
+                AnalystPlanPurchase.objects.values("currency")
+                .annotate(cnt=Count("id"))
+                .order_by("-cnt")
+                .first()
+            )
+            if mode and mode.get("currency"):
+                dominant_currency = (mode["currency"] or "usd").lower()
+
+        for year, month, m_start, m_end in _six_month_windows(now):
+            if metric == "subscriptions":
+                value = UserAnalystPlanSubscription.objects.filter(
+                    created_at__gte=m_start,
+                    created_at__lte=m_end,
+                ).count()
+            else:
+                agg = AnalystPlanPurchase.objects.filter(
+                    created_at__gte=m_start,
+                    created_at__lte=m_end,
+                ).aggregate(t=Sum("amount"))
+                value = float(agg["t"] or 0)
+
+            delta = None if prev_value is None else round(value - prev_value, 2)
+            pct = None
+            if prev_value is not None and prev_value != 0:
+                pct = round((value - prev_value) / prev_value * 100.0, 2)
+
+            series.append(
+                {
+                    "month": f"{year}-{month:02d}",
+                    "month_name": calendar.month_name[month],
+                    "value": value if metric == "subscriptions" else round(value, 2),
+                    "delta_from_previous": delta,
+                    "pct_change_from_previous": pct,
+                }
+            )
+            prev_value = value
+
+        payload = {
+            "metric": metric,
+            "source": "analyst_plans",
+            "series": series,
+        }
+        if metric == "revenue":
+            payload["currency"] = dominant_currency
+            payload["note"] = (
+                "Analyst plan purchase revenue per month (AnalystPlanPurchase.created_at). "
+                "Dominant currency is informational if multiple currencies exist."
+            )
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class AdminMRRView(APIView):

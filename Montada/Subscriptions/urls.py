@@ -6,6 +6,7 @@ from .views import (
     check_subscription_status_view,
     confirm_subscription_view,
     StripeAnalyticsView,
+    AnalystPlanRevenueView,
 )
 from .analyst_plan_views import (
     AnalystContentPlanListCreateView,
@@ -70,6 +71,11 @@ urlpatterns = [
         'analyst-content-plans/<uuid:pk>/',
         AnalystContentPlanDetailView.as_view(),
         name='analyst_content_plan_detail',
+    ),
+    path(
+        'analyst-content-plans/revenue/',
+        AnalystPlanRevenueView.as_view(),
+        name='analyst_plan_revenue',
     ),
 ]
 

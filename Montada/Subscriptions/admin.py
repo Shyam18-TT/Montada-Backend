@@ -3,6 +3,7 @@ from .models import (
     Subscription,
     AnalystContentPlan,
     UserAnalystPlanSubscription,
+    AnalystPlanPurchase,
 )
 
 
@@ -54,3 +55,11 @@ class UserAnalystPlanSubscriptionAdmin(admin.ModelAdmin):
     list_filter = ("status",)
     search_fields = ("subscriber__email", "plan__title")
     readonly_fields = ("created_at", "updated_at")
+
+
+@admin.register(AnalystPlanPurchase)
+class AnalystPlanPurchaseAdmin(admin.ModelAdmin):
+    list_display = ("subscription", "analyst", "amount", "currency", "plan_title", "created_at")
+    list_filter = ("currency",)
+    search_fields = ("plan_title", "analyst__email", "subscription__subscriber__email")
+    readonly_fields = ("created_at",)
