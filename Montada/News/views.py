@@ -843,7 +843,7 @@ def eodhd_category_news_response_for_request(request):
     Shared GET handler for category news (EODHD). Same JSON shape for app and admin:
     ``{ total_pages, page, section, news }``.
     """
-    _allowed = {"section", "items", "page"}
+    _allowed = {"section", "category", "items", "page"}
     token = getattr(settings, "EODHD_API_TOKEN", None) or getattr(
         settings, "FOREXNEWS_API_TOKEN", ""
     )
@@ -859,13 +859,17 @@ def eodhd_category_news_response_for_request(request):
         val = request.query_params.get(key)
         if val:
             params[key] = val
-    params.setdefault("section", "general")
+    selected_category = (
+        params.get("category")
+        or params.get("section")
+        or "general"
+    )
     params.setdefault("items", "50")
     params.setdefault("page", "1")
 
     try:
         payload, err = fetch_eodhd_category_news_dict(
-            params.get("section", "general"),
+            selected_category,
             params.get("items", "50"),
             params.get("page", "1"),
             token,
@@ -902,11 +906,12 @@ class ForexCategoryNewsView(APIView):
     ForexNewsAPI category endpoint.
 
     Query params:
-        section : category / topic (default "general" → EURUSD.FOREX ticker news)
+        category: category / topic mapped to EODHD ``t`` parameter
+        section : backward-compatible alias for ``category``
         items   : number of items per page (default 50, max 1000)
         page    : page number (default 1)
 
-    Example: ?section=general&items=50&page=1
+    Example: ?category=CRYPTO&items=10&page=1
     """
     permission_classes = [permissions.IsAuthenticated]
 

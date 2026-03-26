@@ -2465,7 +2465,11 @@ class AdminCategoryNewsView(APIView):
     """
     GET: Same response as ``/api/news/category-news/`` (EODHD ``/api/news``), admin-only.
 
-    Query params: section (default general), items (default 50), page (default 1).
+    Query params:
+        category: category / topic mapped to EODHD ``t`` parameter
+        section : backward-compatible alias for ``category``
+        items   : number of items per page (default 50)
+        page    : page number (default 1)
     """
     permission_classes = [IsAuthenticated, IsAdminUser]
 
