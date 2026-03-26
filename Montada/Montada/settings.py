@@ -279,11 +279,16 @@ EMAIL_HOST_PASSWORD = 'thtchyjfmdndibtd'  # Your email password or app-specific 
 # For Gmail, you may need to use an App Password instead of your regular password
 # For other providers, adjust EMAIL_HOST, EMAIL_PORT, EMAIL_USE_TLS/EMAIL_USE_SSL accordingly
 
-# ForexNewsAPI
+# ForexNewsAPI (events / trending-headlines still use this provider unless overridden)
 FOREXNEWS_API_TOKEN    = "ix9zm1aqfxqzclsusns6cqsaufji9k3lpdcy0ybs"
 FOREXNEWS_EVENTS_URL   = "https://forexnewsapi.com/api/v1/events"
 FOREXNEWS_TRENDING_URL = "https://forexnewsapi.com/api/v1/trending-headlines"
 FOREXNEWS_CATEGORY_URL = "https://forexnewsapi.com/api/v1/category"
+
+# EODHD Financial News API — used for category news (see News.ForexCategoryNewsView)
+# https://eodhd.com/financial-apis/stock-market-financial-news-api/
+EODHD_API_TOKEN = os.environ.get("EODHD_API_TOKEN", "69ba6abb136cc3.30994192") or FOREXNEWS_API_TOKEN
+EODHD_NEWS_URL = os.environ.get("EODHD_NEWS_URL", "https://eodhd.com/api/news")
 
 # MT5 Manager API (for run_price_alerts --use-mt5-manager). Optional; can use env vars instead.
 MT5_MANAGER_SERVER   = os.environ.get("MT5_MANAGER_SERVER", "207.97.203.117:443")   # e.g. "192.168.1.100:443"

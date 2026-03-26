@@ -734,88 +734,185 @@ class ForexTrendingHeadlinesView(APIView):
         )
 
 
+def _normalize_eodhd_category_article(article, idx):
+    """
+    Map one EODHD /api/news article to the legacy category-news item shape
+    (aligned with ForexTrendingHeadlinesView headline fields).
+    """
+    sent = article.get("sentiment") or {}
+    polarity = sent.get("polarity") if isinstance(sent, dict) else None
+    if polarity is not None:
+        if polarity > 0.1:
+            sentiment = "Positive"
+        elif polarity < -0.1:
+            sentiment = "Negative"
+        else:
+            sentiment = "Neutral"
+    else:
+        sentiment = "Neutral"
+
+    title = article.get("title") or ""
+    content = article.get("content") or ""
+    link = article.get("link") or ""
+    date = article.get("date") or ""
+    symbols = article.get("symbols") or []
+    tags = article.get("tags") or []
+    h = hash((link, date, title)) % (10**9)
+    news_id = h if h else idx + 1
+
+    return {
+        "id": idx + 1,
+        "headline": title,
+        "text": content,
+        "news_id": news_id,
+        "sentiment": sentiment,
+        "date": date,
+        "currency": symbols,
+        "tags": tags,
+        "link": link,
+    }
+
+
+def fetch_eodhd_category_news_dict(section, items, page, api_token):
+    """
+    Call EODHD ``GET /api/news`` and return the same envelope as the old ForexNewsAPI
+    category endpoint: ``{ total_pages, page, section, news }``.
+
+    https://eodhd.com/financial-apis/stock-market-financial-news-api/
+
+    Returns:
+        (payload_dict, None) on success, or (None, error_dict) when the API returns an error body.
+
+    Raises:
+        urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError — caller should handle.
+    """
+    limit = min(max(int(items), 1), 1000)
+    page_i = max(int(page), 1)
+    offset = (page_i - 1) * limit
+    params = {
+        "api_token": api_token,
+        "fmt": "json",
+        "limit": str(limit),
+        "offset": str(offset),
+    }
+    sec = (section or "general").strip().lower()
+    if sec == "general":
+        params["s"] = "EURUSD.FOREX"
+    else:
+        params["t"] = str(section).strip()
+
+    base_url = getattr(settings, "EODHD_NEWS_URL", "https://eodhd.com/api/news")
+    url = base_url + "?" + urllib.parse.urlencode(params)
+
+    req = urllib.request.Request(url, method="GET")
+    req.add_header(
+        "User-Agent",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        raw = json.loads(resp.read().decode())
+
+    if isinstance(raw, dict) and (raw.get("error") or raw.get("errors")):
+        return None, raw if isinstance(raw, dict) else {"error": str(raw)}
+
+    if isinstance(raw, dict):
+        items_list = raw.get("data") or raw.get("news") or []
+    elif isinstance(raw, list):
+        items_list = raw
+    else:
+        items_list = []
+
+    news = [_normalize_eodhd_category_article(a, i) for i, a in enumerate(items_list)]
+    has_more = len(items_list) >= limit
+    total_pages = max(1, page_i + (1 if has_more else 0))
+
+    return (
+        {
+            "total_pages": total_pages,
+            "page": page_i,
+            "section": section or "general",
+            "news": news,
+        },
+        None,
+    )
+
+
+def eodhd_category_news_response_for_request(request):
+    """
+    Shared GET handler for category news (EODHD). Same JSON shape for app and admin:
+    ``{ total_pages, page, section, news }``.
+    """
+    _allowed = {"section", "items", "page"}
+    token = getattr(settings, "EODHD_API_TOKEN", None) or getattr(
+        settings, "FOREXNEWS_API_TOKEN", ""
+    )
+    if not token:
+        return Response(
+            {
+                "error": "EODHD API token is not configured (set EODHD_API_TOKEN or FOREXNEWS_API_TOKEN).",
+            },
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    params = {}
+    for key in _allowed:
+        val = request.query_params.get(key)
+        if val:
+            params[key] = val
+    params.setdefault("section", "general")
+    params.setdefault("items", "50")
+    params.setdefault("page", "1")
+
+    try:
+        payload, err = fetch_eodhd_category_news_dict(
+            params.get("section", "general"),
+            params.get("items", "50"),
+            params.get("page", "1"),
+            token,
+        )
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode() if exc.fp else "{}"
+        try:
+            err_data = json.loads(body)
+        except Exception:
+            err_data = {"error": body or str(exc)}
+        return Response(err_data, status=exc.code)
+    except urllib.error.URLError as exc:
+        return Response(
+            {"error": "Could not reach EODHD API.", "detail": str(exc.reason)},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    except Exception as exc:
+        return Response(
+            {"error": "Failed to fetch category news.", "detail": str(exc)},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+
+    if err is not None:
+        return Response(err, status=status.HTTP_400_BAD_REQUEST)
+    return Response(payload, status=status.HTTP_200_OK)
+
+
 class ForexCategoryNewsView(APIView):
     """
     GET  /api/news/category-news/
 
-    Fetches news by category/section from ForexNewsAPI category endpoint.
-    Separate from events/trending-headlines; does not alter existing URLs.
+    Fetches news by category/section from the EODHD Financial News API
+    (``https://eodhd.com/api/news``). Response shape unchanged from the legacy
+    ForexNewsAPI category endpoint.
 
     Query params:
-        section : category section (default "general")
-        items   : number of items per page (default 50)
+        section : category / topic (default "general" → EURUSD.FOREX ticker news)
+        items   : number of items per page (default 50, max 1000)
         page    : page number (default 1)
 
     Example: ?section=general&items=50&page=1
     """
     permission_classes = [permissions.IsAuthenticated]
 
-    _ALLOWED_PARAMS = {"section", "items", "page"}
-
     def get(self, request):
         denied = check_active_subscription(request.user)
         if denied is not None:
             return denied
-
-        token = getattr(settings, "FOREXNEWS_API_TOKEN", "")
-        base_url = getattr(
-            settings,
-            "FOREXNEWS_CATEGORY_URL",
-            "https://forexnewsapi.com/api/v1/category",
-        )
-
-        if not token:
-            return Response(
-                {"error": "ForexNewsAPI token is not configured."},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
-
-        params = {"token": token}
-        for key in self._ALLOWED_PARAMS:
-            val = request.query_params.get(key)
-            if val:
-                params[key] = val
-        params.setdefault("section", "general")
-        params.setdefault("items", "50")
-        params.setdefault("page", "1")
-
-        url = base_url + "?" + urllib.parse.urlencode(params)
-
-        try:
-            req = urllib.request.Request(url, method="GET")
-            req.add_header(
-                "User-Agent",
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            )
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                raw = json.loads(resp.read().decode())
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode() if exc.fp else "{}"
-            try:
-                err_data = json.loads(body)
-            except Exception:
-                err_data = {"error": body or str(exc)}
-            return Response(err_data, status=exc.code)
-        except urllib.error.URLError as exc:
-            return Response(
-                {"error": "Could not reach ForexNewsAPI.", "detail": str(exc.reason)},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
-        except Exception as exc:
-            return Response(
-                {"error": "Failed to fetch category news.", "detail": str(exc)},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
-
-        # Pass through API response; common keys: data (list), total_pages
-        return Response(
-            {
-                "total_pages": raw.get("total_pages", 1),
-                "page": int(params.get("page", 1)),
-                "section": params.get("section", "general"),
-                "news": raw.get("data", []) if isinstance(raw.get("data"), list) else raw,
-            },
-            status=status.HTTP_200_OK,
-        )
+        return eodhd_category_news_response_for_request(request)
 
