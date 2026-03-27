@@ -31,6 +31,7 @@ class AnalystNewsArticleCreateView(generics.CreateAPIView):
     """
     POST: Create a news article. Only analysts can create.
     Sets author to the authenticated user. Body fields per NewsArticle model.
+    Optional content_access: "free" (any authenticated trader) or "premium" (plan required); default premium.
     """
     permission_classes = [permissions.IsAuthenticated, IsAnalystPermission]
     serializer_class = NewsArticleCreateSerializer
@@ -66,8 +67,9 @@ class NewsArticleListPagination(PageNumberPagination):
 class NewsArticleListView(generics.ListAPIView):
     """
     GET: List news articles. Paginated.
-    - Trader: published articles; analyst-authored posts only if the trader has an active
-      per-analyst subscription (articles or all). Non-analyst authors' articles stay visible.
+    - Trader: published articles; analyst-authored posts require an active per-analyst
+      subscription (articles or all), unless the article is content_access=free.
+      Non-analyst authors' articles stay visible.
     - Analyst: only articles created by himself; optional ?status=draft|published|archived to filter.
     Query params: search, category (UUID), status (analyst only), page, page_size.
     """
@@ -99,7 +101,8 @@ class NewsArticleListView(generics.ListAPIView):
                     AnalystContentPlan.Scope.ALL,
                 ],
             )
-            qs = qs.filter(~is_analyst_author | Exists(article_access))
+            is_free_article = Q(content_access=NewsArticle.ContentAccess.FREE)
+            qs = qs.filter(~is_analyst_author | is_free_article | Exists(article_access))
         else:
             # Analyst: only articles created by himself; optional status filter
             qs = qs.filter(author=self.request.user)
@@ -176,7 +179,10 @@ def _get_article_for_engagement(request, pk):
     if article.status == "published":
         uid = getattr(request.user, "id", None)
         if uid and article.author_id != uid:
-            if not user_has_analyst_article_access(request.user, article.author_id):
+            article_is_free = article.content_access == NewsArticle.ContentAccess.FREE
+            if not user_has_analyst_article_access(
+                request.user, article.author_id, article_is_free=article_is_free
+            ):
                 return None
         return article
     if getattr(request.user, "id", None) and article.author_id == request.user.id:

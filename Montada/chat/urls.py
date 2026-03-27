@@ -4,6 +4,11 @@ from . import views
 app_name = "chat"
 
 urlpatterns = [
+    path(
+        "broadcast/",
+        views.AnalystBroadcastMessageView.as_view(),
+        name="analyst_broadcast",
+    ),
     path("conversations/", views.ConversationListCreateView.as_view(), name="conversation_list_create"),
     path("conversations/<uuid:conversation_id>/", views.ConversationDetailView.as_view(), name="conversation_detail"),
     path(

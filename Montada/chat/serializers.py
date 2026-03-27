@@ -45,6 +45,16 @@ class ChatMessageCreateSerializer(serializers.ModelSerializer):
         extra_kwargs = {"content": {"allow_blank": False, "trim_whitespace": True}}
 
 
+class AnalystBroadcastSerializer(serializers.Serializer):
+    """Analyst mass message: same text to all followers or all active plan subscribers."""
+    content = serializers.CharField(required=True, allow_blank=False, trim_whitespace=True)
+    audience = serializers.ChoiceField(
+        choices=[("followers", "followers"), ("subscribers", "subscribers")],
+        required=False,
+        help_text="Can also be sent as query param ?audience=followers|subscribers",
+    )
+
+
 class ConversationListSerializer(serializers.ModelSerializer):
     """Conversation in list: id, participants, last_message, unread_count, updated_at."""
     participants = UserChatSerializer(many=True, read_only=True)

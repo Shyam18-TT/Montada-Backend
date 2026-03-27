@@ -37,6 +37,7 @@ from .views import (
     AdminAnalystPlansDetailView,
     AdminAnalystSubscribersListView,
     AdminAssignAnalystPlanSubscriptionView,
+    AdminRemoveAnalystPlanSubscriptionView,
     AdminTradersForSubscriptionPickerView,
     AdminTraderListView,
     AdminGetMarketDataFromMT5,
@@ -122,6 +123,11 @@ urlpatterns = [
         "subscriptions/analysts/<uuid:analyst_id>/assign-subscription/",
         AdminAssignAnalystPlanSubscriptionView.as_view(),
         name="admin_assign_analyst_plan_subscription",
+    ),
+    path(
+        "subscriptions/analysts/<uuid:analyst_id>/remove-subscription/",
+        AdminRemoveAnalystPlanSubscriptionView.as_view(),
+        name="admin_remove_analyst_plan_subscription",
     ),
     path(
         "subscriptions/traders-for-assignment/",

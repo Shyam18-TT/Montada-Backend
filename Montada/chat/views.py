@@ -21,6 +21,7 @@ from .serializers import (
     ConversationDetailSerializer,
     ChatMessageSerializer,
     ChatMessageCreateSerializer,
+    AnalystBroadcastSerializer,
 )
 
 User = get_user_model()
@@ -219,3 +220,100 @@ class MessageMarkReadView(APIView):
             read_at__isnull=True,
         ).exclude(sender=request.user).update(read_at=now)
         return Response({"marked_read": updated})
+
+
+def _analyst_broadcast_recipient_ids(analyst, audience):
+    """
+    User ids that should receive a broadcast for the given audience segment.
+    followers: accepted active Follow rows where this user is the followed analyst.
+    subscribers: users with at least one active (non-expired) plan subscription to this analyst.
+    """
+    if audience == "followers":
+        from Followers.models import Follow
+
+        return list(
+            Follow.objects.filter(
+                followed=analyst,
+                status=Follow.Status.ACCEPTED,
+                is_active=True,
+            ).values_list("follower_id", flat=True)
+        )
+    if audience == "subscribers":
+        from Subscriptions.models import UserAnalystPlanSubscription
+
+        return list(
+            UserAnalystPlanSubscription.objects.filter(
+                plan__analyst=analyst,
+                status=UserAnalystPlanSubscription.Status.ACTIVE,
+                end_date__gte=timezone.now(),
+            )
+            .values_list("subscriber_id", flat=True)
+            .distinct()
+        )
+    return []
+
+
+class AnalystBroadcastMessageView(APIView):
+    """
+    POST: Analyst sends one message; it is delivered in parallel to every user in the chosen segment.
+    Each recipient gets a ChatMessage in their existing (or new) direct conversation with the analyst.
+    Body: { "content": "...", "audience": "followers" | "subscribers" }
+    Query (optional): ?audience=followers — overrides body if both present.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if getattr(request.user, "user_type", None) != "analyst":
+            return Response(
+                {"error": "Only analysts can send audience broadcasts."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        ser = AnalystBroadcastSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        content = ser.validated_data["content"].strip()
+        audience = (request.query_params.get("audience") or ser.validated_data.get("audience") or "").strip().lower()
+        if audience not in ("followers", "subscribers"):
+            return Response(
+                {
+                    "error": "audience is required: use query ?audience=followers|subscribers "
+                    "or JSON body \"audience\": \"followers\" | \"subscribers\"."
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        recipient_ids = _analyst_broadcast_recipient_ids(request.user, audience)
+        if not recipient_ids:
+            return Response(
+                {
+                    "audience": audience,
+                    "sent": 0,
+                    "message": "No recipients in this segment.",
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        recipients = User.objects.filter(pk__in=recipient_ids).exclude(pk=request.user.pk)
+        sent = 0
+        now = timezone.now()
+        for recipient in recipients:
+            conv, _ = Conversation.get_or_create_direct(request.user, recipient)
+            msg = ChatMessage.objects.create(
+                conversation=conv,
+                sender=request.user,
+                content=content,
+            )
+            conv.updated_at = now
+            conv.save(update_fields=["updated_at"])
+            payload = ChatMessageSerializer(msg, context={"request": request}).data
+            _broadcast_new_message(str(conv.id), payload)
+            sent += 1
+
+        return Response(
+            {
+                "audience": audience,
+                "sent": sent,
+                "content": content,
+            },
+            status=status.HTTP_201_CREATED,
+        )

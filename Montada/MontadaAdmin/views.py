@@ -123,6 +123,7 @@ from .serializers import (
     AdminChangeUserPasswordSerializer,
     AdminSuspendUserSerializer,
     AdminAssignAnalystPlanSubscriptionSerializer,
+    AdminRemoveAnalystPlanSubscriptionSerializer,
     AdminUserProfileSerializer,
 )
 
@@ -1179,6 +1180,75 @@ class AdminAssignAnalystPlanSubscriptionView(APIView):
                 "follow": follow_info,
             },
             status=status.HTTP_201_CREATED,
+        )
+
+
+class AdminRemoveAnalystPlanSubscriptionView(APIView):
+    """
+    POST: Cancel an existing trader subscription to one analyst plan from admin side.
+
+    Path: ``analyst_id`` must match the plan owner.
+    Body: ``subscriber_id`` (trader), ``plan_id``.
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def post(self, request, analyst_id):
+        if (
+            UserAnalystPlanSubscription is None
+            or AnalystContentPlan is None
+        ):
+            return Response(
+                {"error": "Analyst plan subscriptions are not available."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        from Subscriptions.analyst_plan_serializers import UserAnalystPlanSubscriptionSerializer
+
+        ser = AdminRemoveAnalystPlanSubscriptionSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        subscriber_id = ser.validated_data["subscriber_id"]
+        plan_id = ser.validated_data["plan_id"]
+
+        analyst = get_object_or_404(User, pk=analyst_id, user_type="analyst")
+        plan = get_object_or_404(
+            AnalystContentPlan.objects.filter(analyst_id=analyst.id),
+            pk=plan_id,
+        )
+        subscriber = get_object_or_404(User, pk=subscriber_id, user_type="trader")
+
+        # Cancel the most recent active/effective subscription for this trader-plan pair.
+        now = timezone.now()
+        St = UserAnalystPlanSubscription.Status
+        sub = (
+            UserAnalystPlanSubscription.objects.filter(
+                subscriber=subscriber,
+                plan=plan,
+                status=St.ACTIVE,
+                end_date__gte=now,
+            )
+            .order_by("-created_at")
+            .first()
+        )
+        if sub is None:
+            return Response(
+                {"error": "No active subscription found for this user on the selected plan."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        sub.cancel()
+        sub = (
+            UserAnalystPlanSubscription.objects.select_related("plan", "plan__analyst", "purchase")
+            .get(pk=sub.pk)
+        )
+
+        return Response(
+            {
+                "message": "Subscription removed (cancelled) successfully.",
+                "subscription": UserAnalystPlanSubscriptionSerializer(
+                    sub, context={"request": request}
+                ).data,
+            },
+            status=status.HTTP_200_OK,
         )
 
 

@@ -18,8 +18,8 @@ class TagAdmin(admin.ModelAdmin):
 
 @admin.register(NewsArticle)
 class NewsArticleAdmin(admin.ModelAdmin):
-    list_display = ("title", "category", "author", "status", "is_featured", "published_at", "created_at")
-    list_filter = ("status", "is_featured", "is_deleted")
+    list_display = ("title", "category", "author", "status", "content_access", "is_featured", "published_at", "created_at")
+    list_filter = ("status", "content_access", "is_featured", "is_deleted")
     search_fields = ("title", "summary", "content")
     prepopulated_fields = {"slug": ("title",)}
     raw_id_fields = ("author", "category")

@@ -7,7 +7,8 @@ Trader listings require an **active UserAnalystPlanSubscription** with the right
 - **Signals**: visible only for analysts the user follows *and* has an active subscription
   covering signals (scope `signals` or `all`).
 - **Articles**: published articles from **analyst** authors require an active subscription
-  covering articles (`articles` or `all`). Non-analyst authors are shown without a plan.
+  covering articles (`articles` or `all`), unless the article is marked **free** on
+  `NewsArticle.content_access`. Non-analyst authors are shown without a plan.
 """
 from __future__ import annotations
 
@@ -71,11 +72,16 @@ def user_has_analyst_signal_access(subscriber, analyst_id) -> bool:
     ).exists()
 
 
-def user_has_analyst_article_access(subscriber, author_id) -> bool:
+def user_has_analyst_article_access(
+    subscriber, author_id, *, article_is_free: bool = False
+) -> bool:
     """
     Published articles: non-analyst authors are public to authenticated users.
-    Analyst authors require an active subscription (articles or all) to that analyst.
+    Analyst authors: free articles are visible without a plan; premium requires an active
+    subscription (articles or all) to that analyst.
     """
+    if article_is_free:
+        return True
     User = get_user_model()
     try:
         author = User.objects.only("user_type").get(pk=author_id)

@@ -53,6 +53,7 @@ class NewsArticleListSerializer(serializers.ModelSerializer):
             "category_name",
             "tags",
             "status",
+            "content_access",
             "published_at",
             "like_count",
             "comment_count",
@@ -117,6 +118,7 @@ class NewsArticleCreateSerializer(serializers.ModelSerializer):
             "tags",
             "status",
             "is_featured",
+            "content_access",
             "published_at",
             "created_at",
             "updated_at",
@@ -130,6 +132,7 @@ class NewsArticleCreateSerializer(serializers.ModelSerializer):
             "tags": {"required": False},
             "status": {"default": "draft"},
             "is_featured": {"default": False},
+            "content_access": {"default": NewsArticle.ContentAccess.PREMIUM},
         }
 
     def validate_status(self, value):

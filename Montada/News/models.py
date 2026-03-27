@@ -47,6 +47,11 @@ class NewsArticle(models.Model):
         ('published', 'Published'),
         ('archived', 'Archived'),
     )
+
+    class ContentAccess(models.TextChoices):
+        FREE = "free", "Free"
+        PREMIUM = "premium", "Premium"
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
     title = models.CharField(max_length=255)
@@ -81,6 +86,13 @@ class NewsArticle(models.Model):
 
     is_featured = models.BooleanField(default=False)
 
+    content_access = models.CharField(
+        max_length=20,
+        choices=ContentAccess.choices,
+        default=ContentAccess.PREMIUM,
+        help_text="Free: visible to all authenticated traders. Premium: requires an active analyst plan covering articles.",
+    )
+
     published_at = models.DateTimeField(blank=True, null=True)
 
 
@@ -99,6 +111,7 @@ class NewsArticle(models.Model):
             models.Index(fields=['slug']),
             models.Index(fields=['status']),
             models.Index(fields=['published_at']),
+            models.Index(fields=['content_access']),
         ]
 
     def save(self, *args, **kwargs):

@@ -64,6 +64,16 @@ class AdminAssignAnalystPlanSubscriptionSerializer(serializers.Serializer):
     ensure_follow = serializers.BooleanField(required=False, default=True)
 
 
+class AdminRemoveAnalystPlanSubscriptionSerializer(serializers.Serializer):
+    """
+    Admin removes/cancels a trader subscription to an analyst plan.
+    Body: subscriber_id, plan_id
+    """
+
+    subscriber_id = serializers.UUIDField()
+    plan_id = serializers.UUIDField()
+
+
 class AdminUserProfileSerializer(serializers.ModelSerializer):
     """Read-only user profile for admin view. Includes is_active, is_staff."""
 
@@ -496,6 +506,7 @@ if NewsArticle is not None:
                 "category",
                 "category_name",
                 "status",
+                "content_access",
                 "published_at",
                 "created_at",
                 "updated_at",
