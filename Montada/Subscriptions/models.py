@@ -7,6 +7,37 @@ import uuid
 User = get_user_model()
 
 
+class InAppSubscriptionSettings(models.Model):
+    """
+    Singleton row (pk=1): admin-configured defaults for app-wide in-app subscriptions
+    (market news & live market data trials).
+    """
+
+    id = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
+    trial_period_days = models.PositiveSmallIntegerField(
+        default=7,
+        help_text="Number of days for new-user free trials.",
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "In-app subscription settings"
+        verbose_name_plural = "In-app subscription settings"
+        db_table = "subscriptions_in_app_settings"
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"In-app settings (trial {self.trial_period_days} days)"
+
+    @classmethod
+    def load(cls):
+        obj, _ = cls.objects.get_or_create(pk=1, defaults={"trial_period_days": 7})
+        return obj
+
+
 class Subscription(models.Model):
     """
     Paid (or trial) access to **market news** (third-party feeds) and **live market data**
@@ -101,8 +132,9 @@ class Subscription(models.Model):
     
     @staticmethod
     def create_free_trial(user):
-        """Create a 7-day free trial subscription for a new user"""
-        end_date = timezone.now() + timedelta(days=7)
+        """Create a free trial subscription for a new user (length from InAppSubscriptionSettings)."""
+        days = int(InAppSubscriptionSettings.load().trial_period_days)
+        end_date = timezone.now() + timedelta(days=days)
         subscription = Subscription.objects.create(
             user=user,
             plan_type='free_trial',

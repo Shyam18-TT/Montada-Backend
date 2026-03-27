@@ -48,6 +48,8 @@ from .views import (
     AdminSubscriptionGrowthGraphView,
     AdminMRRView,
     AdminPaymentHistoryView,
+    AdminInAppSubscriptionSettingsView,
+    AdminUserInAppFullAccessView,
     AdminFCMBroadcastView,
     AdminUserPickerView,
     AdminEconomicCalendarView,
@@ -146,6 +148,16 @@ urlpatterns = [
     ),
     path("subscriptions/mrr/", AdminMRRView.as_view(), name="admin_subscription_mrr"),
     path("subscriptions/payments/", AdminPaymentHistoryView.as_view(), name="admin_payment_history"),
+    path(
+        "subscriptions/in-app/settings/",
+        AdminInAppSubscriptionSettingsView.as_view(),
+        name="admin_in_app_subscription_settings",
+    ),
+    path(
+        "subscriptions/in-app/full-access/",
+        AdminUserInAppFullAccessView.as_view(),
+        name="admin_user_in_app_full_access",
+    ),
 
     path("notifications/broadcast/", AdminFCMBroadcastView.as_view(), name="admin_fcm_broadcast"),
     path("notifications/user-picker/", AdminUserPickerView.as_view(), name="admin_user_picker"),

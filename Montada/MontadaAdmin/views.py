@@ -52,9 +52,10 @@ except ImportError:
     TradingSignal = None
 
 try:
-    from Subscriptions.models import Subscription
+    from Subscriptions.models import Subscription, InAppSubscriptionSettings
 except ImportError:
     Subscription = None
+    InAppSubscriptionSettings = None
 
 try:
     from Subscriptions.models import (
@@ -125,6 +126,8 @@ from .serializers import (
     AdminAssignAnalystPlanSubscriptionSerializer,
     AdminRemoveAnalystPlanSubscriptionSerializer,
     AdminUserProfileSerializer,
+    AdminInAppSubscriptionSettingsSerializer,
+    AdminInAppFullAccessSerializer,
 )
 
 
@@ -3539,6 +3542,109 @@ class AdminPerformanceGraphsView(APIView):
                 "signals_by_timeframe": signals_by_timeframe,
                 "asset_class_distribution": asset_class_distribution,
                 "rr_ratio_distribution": rr_ratio_distribution,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class AdminInAppSubscriptionSettingsView(APIView):
+    """
+    GET: Current in-app subscription defaults (singleton): trial_period_days for new users.
+    PATCH: Update trial_period_days (1–365). Affects new trials created after save
+    (e.g. after email verification); existing Subscription rows are unchanged.
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request):
+        if InAppSubscriptionSettings is None or AdminInAppSubscriptionSettingsSerializer is None:
+            return Response(
+                {"error": "In-app subscription settings are not available."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        obj = InAppSubscriptionSettings.load()
+        return Response(AdminInAppSubscriptionSettingsSerializer(obj).data)
+
+    def patch(self, request):
+        if InAppSubscriptionSettings is None or AdminInAppSubscriptionSettingsSerializer is None:
+            return Response(
+                {"error": "In-app subscription settings are not available."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        obj = InAppSubscriptionSettings.load()
+        ser = AdminInAppSubscriptionSettingsSerializer(obj, data=request.data, partial=True)
+        ser.is_valid(raise_exception=True)
+        ser.save()
+        return Response(
+            {
+                "message": "In-app subscription settings updated.",
+                "settings": AdminInAppSubscriptionSettingsSerializer(obj).data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class AdminUserInAppFullAccessView(APIView):
+    """
+    POST: Grant or revoke full access to in-app market news and live market data
+    without requiring an active Subscription (optional expiry datetime).
+    Body (one user): { "user_id": "<uuid>", "grant": true|false, "expires_at": null | ISO-8601 }
+    Body (all users): { "all_users": true, "grant": true|false, "expires_at": optional }
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def post(self, request):
+        ser = AdminInAppFullAccessSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        grant = ser.validated_data["grant"]
+        expires_at = ser.validated_data.get("expires_at")
+        all_users = ser.validated_data.get("all_users") is True
+
+        if all_users:
+            now = timezone.now()
+            n = User.objects.update(
+                admin_granted_in_app_access=grant,
+                admin_in_app_access_expires_at=(expires_at if grant else None),
+                updated_at=now,
+            )
+            return Response(
+                {
+                    "message": (
+                        "In-app full access granted for all users."
+                        if grant
+                        else "In-app full access revoked for all users."
+                    ),
+                    "all_users": True,
+                    "updated_count": n,
+                    "expires_at": expires_at if grant else None,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        uid = ser.validated_data["user_id"]
+        user = get_object_or_404(User, pk=uid)
+        if grant:
+            user.admin_granted_in_app_access = True
+            user.admin_in_app_access_expires_at = expires_at
+        else:
+            user.admin_granted_in_app_access = False
+            user.admin_in_app_access_expires_at = None
+        user.save(
+            update_fields=[
+                "admin_granted_in_app_access",
+                "admin_in_app_access_expires_at",
+                "updated_at",
+            ]
+        )
+        return Response(
+            {
+                "message": "In-app full access granted." if grant else "In-app full access revoked.",
+                "all_users": False,
+                "user": {
+                    "id": str(user.id),
+                    "email": user.email,
+                    "admin_granted_in_app_access": user.admin_granted_in_app_access,
+                    "admin_in_app_access_expires_at": user.admin_in_app_access_expires_at,
+                },
             },
             status=status.HTTP_200_OK,
         )

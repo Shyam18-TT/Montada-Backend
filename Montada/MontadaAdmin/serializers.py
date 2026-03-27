@@ -9,10 +9,11 @@ from django.contrib.auth.password_validation import validate_password
 User = get_user_model()
 
 try:
-    from Subscriptions.models import AnalystContentPlan, UserAnalystPlanSubscription
+    from Subscriptions.models import AnalystContentPlan, UserAnalystPlanSubscription, InAppSubscriptionSettings
 except ImportError:
     AnalystContentPlan = None
     UserAnalystPlanSubscription = None
+    InAppSubscriptionSettings = None
 
 
 class AdminLoginSerializer(serializers.Serializer):
@@ -74,6 +75,48 @@ class AdminRemoveAnalystPlanSubscriptionSerializer(serializers.Serializer):
     plan_id = serializers.UUIDField()
 
 
+if InAppSubscriptionSettings is not None:
+    class AdminInAppSubscriptionSettingsSerializer(serializers.ModelSerializer):
+        """Singleton settings: trial_period_days for new in-app (market data) trials."""
+
+        class Meta:
+            model = InAppSubscriptionSettings
+            fields = ("id", "trial_period_days", "updated_at")
+            read_only_fields = ("id", "updated_at")
+
+        def validate_trial_period_days(self, value):
+            if value < 1 or value > 365:
+                raise serializers.ValidationError("trial_period_days must be between 1 and 365.")
+            return value
+else:
+    AdminInAppSubscriptionSettingsSerializer = None
+
+
+class AdminInAppFullAccessSerializer(serializers.Serializer):
+    """
+    Grant or revoke full in-app access (market news & live data) without a Subscription row.
+    Body: user_id (single user), or all_users=true (every row in User); grant; optional expires_at.
+    """
+
+    user_id = serializers.UUIDField(required=False, allow_null=True)
+    all_users = serializers.BooleanField(required=False, default=False)
+    grant = serializers.BooleanField(default=True)
+    expires_at = serializers.DateTimeField(required=False, allow_null=True)
+
+    def validate(self, attrs):
+        all_users = attrs.get("all_users") is True
+        uid = attrs.get("user_id")
+        if all_users and uid is not None:
+            raise serializers.ValidationError(
+                {"user_id": "Omit user_id when all_users is true."}
+            )
+        if not all_users and uid is None:
+            raise serializers.ValidationError(
+                "Provide user_id for one user, or set all_users to true for every user."
+            )
+        return attrs
+
+
 class AdminUserProfileSerializer(serializers.ModelSerializer):
     """Read-only user profile for admin view. Includes is_active, is_staff."""
 
@@ -89,6 +132,8 @@ class AdminUserProfileSerializer(serializers.ModelSerializer):
             "date_of_birth",
             "user_type",
             "is_subscribed",
+            "admin_granted_in_app_access",
+            "admin_in_app_access_expires_at",
             "is_verified",
             "is_active",
             "is_staff",

@@ -1,10 +1,23 @@
 from django.contrib import admin
 from .models import (
     Subscription,
+    InAppSubscriptionSettings,
     AnalystContentPlan,
     UserAnalystPlanSubscription,
     AnalystPlanPurchase,
 )
+
+
+@admin.register(InAppSubscriptionSettings)
+class InAppSubscriptionSettingsAdmin(admin.ModelAdmin):
+    list_display = ("id", "trial_period_days", "updated_at")
+    readonly_fields = ("id", "updated_at")
+
+    def has_add_permission(self, request):
+        return not InAppSubscriptionSettings.objects.exists()
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(Subscription)

@@ -33,6 +33,15 @@ class User(AbstractUser):
         default=False,
         help_text='True when the user has an active subscription for market news and live market data (includes in-date free trial).',
     )
+    admin_granted_in_app_access = models.BooleanField(
+        default=False,
+        help_text='When True, user receives full in-app access (market news & live data) without a paid/trial Subscription row.',
+    )
+    admin_in_app_access_expires_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text='If set, admin-granted in-app access ends at this time (null = no expiry until revoked).',
+    )
     is_verified = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

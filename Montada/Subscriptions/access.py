@@ -4,6 +4,7 @@ Shared helpers for gating premium content.
 Subscriptions unlock **market news** (third-party feeds) and **live market data** (e.g. MT5 quotes).
 Analyst trading signals and social follow features do not require a subscription.
 """
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.response import Response
 
@@ -11,6 +12,18 @@ SUBSCRIPTION_REQUIRED_MESSAGE = (
     "An active subscription is required to access market news and live market data."
 )
 SUBSCRIPTION_REQUIRED_CODE = "subscription_required"
+
+
+def user_has_active_admin_in_app_grant(user) -> bool:
+    """
+    True if staff granted full in-app access and optional expiry has not passed.
+    """
+    if not getattr(user, "admin_granted_in_app_access", False):
+        return False
+    exp = getattr(user, "admin_in_app_access_expires_at", None)
+    if exp is not None and timezone.now() >= exp:
+        return False
+    return True
 
 
 def check_active_subscription(user):
@@ -25,6 +38,9 @@ def check_active_subscription(user):
             {"error": "Subscription service is not available."},
             status=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
+
+    if user_has_active_admin_in_app_grant(user):
+        return None
 
     try:
         subscription = Subscription.objects.get(user=user)
