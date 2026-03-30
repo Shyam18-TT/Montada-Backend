@@ -1326,11 +1326,17 @@ class AdminTradersForSubscriptionPickerView(generics.ListAPIView):
         search: filter by name or email (icontains)
         page, page_size
 
-    Each item includes ``is_subscribed`` (bool) for active analyst-plan access as above.
+    Each item includes ``is_subscribed`` (bool). When true, also ``subscription_id`` and
+    ``subscription_plan`` (plan details for the active row; scoped by analyst_id when set).
     """
     permission_classes = [IsAuthenticated, IsAdminUser]
     pagination_class = AdminPageNumberPagination
     serializer_class = AdminTraderForAnalystSubscriptionSerializer
+
+    def get_serializer_context(self):
+        ctx = super().get_serializer_context()
+        ctx["analyst_id"] = (self.request.query_params.get("analyst_id") or "").strip() or None
+        return ctx
 
     def get_queryset(self):
         qs = User.objects.filter(user_type="trader").order_by("-created_at")
@@ -1362,6 +1368,19 @@ class AdminTradersForSubscriptionPickerView(generics.ListAPIView):
                 subs_qs = subs_qs.filter(plan__analyst_id=analyst_id)
             qs = qs.annotate(
                 has_active_analyst_plan_subscription=Exists(subs_qs)
+            )
+            prefetch_qs = (
+                UserAnalystPlanSubscription.objects.filter(
+                    status=St.ACTIVE,
+                    end_date__gte=now,
+                )
+                .select_related("plan", "plan__analyst")
+                .order_by("-created_at")
+            )
+            if analyst_id:
+                prefetch_qs = prefetch_qs.filter(plan__analyst_id=analyst_id)
+            qs = qs.prefetch_related(
+                Prefetch("analyst_content_subscriptions", queryset=prefetch_qs)
             )
 
         return qs

@@ -481,6 +481,7 @@ class AdminTraderForAnalystSubscriptionSerializer(serializers.ModelSerializer):
     """
     Trader row for admin subscription assignment UI.
     ``is_subscribed`` reflects ``has_active_analyst_plan_subscription`` (annotated; active analyst-plan row).
+    When subscribed, ``subscription_id`` and ``subscription_plan`` describe the active row (newest first).
     """
 
     id = serializers.SerializerMethodField()
@@ -489,6 +490,8 @@ class AdminTraderForAnalystSubscriptionSerializer(serializers.ModelSerializer):
         read_only=True,
         source="has_active_analyst_plan_subscription",
     )
+    subscription_id = serializers.SerializerMethodField()
+    subscription_plan = serializers.SerializerMethodField()
     registered_at = serializers.SerializerMethodField()
 
     class Meta:
@@ -501,8 +504,59 @@ class AdminTraderForAnalystSubscriptionSerializer(serializers.ModelSerializer):
             "is_active",
             "is_verified",
             "is_subscribed",
+            "subscription_id",
+            "subscription_plan",
             "registered_at",
         )
+
+    def _active_analyst_plan_subscription(self, obj):
+        if UserAnalystPlanSubscription is None:
+            return None
+        if not getattr(obj, "has_active_analyst_plan_subscription", False):
+            return None
+        oid = id(obj)
+        cache = getattr(self, "_picker_active_sub_cache", None)
+        if cache is None:
+            cache = {}
+            self._picker_active_sub_cache = cache
+        if oid in cache:
+            return cache[oid]
+
+        from django.utils import timezone
+
+        now = timezone.now()
+        St = UserAnalystPlanSubscription.Status.ACTIVE
+        qs = obj.analyst_content_subscriptions.filter(
+            status=St.ACTIVE,
+            end_date__gte=now,
+        ).order_by("-created_at")
+        analyst_id = self.context.get("analyst_id")
+        if analyst_id:
+            qs = qs.filter(plan__analyst_id=analyst_id)
+        sub = qs.first()
+        cache[oid] = sub
+        return sub
+
+    def get_subscription_id(self, obj):
+        sub = self._active_analyst_plan_subscription(obj)
+        return str(sub.id) if sub else None
+
+    def get_subscription_plan(self, obj):
+        sub = self._active_analyst_plan_subscription(obj)
+        if sub is None or sub.plan_id is None:
+            return None
+        p = sub.plan
+        return {
+            "id": str(p.id),
+            "analyst_id": str(p.analyst_id),
+            "title": p.title,
+            "description": p.description or "",
+            "scope": p.scope,
+            "price": str(p.price),
+            "currency": p.currency or "",
+            "billing_period": p.billing_period,
+            "is_active": p.is_active,
+        }
 
     def get_id(self, obj):
         return str(obj.id)
