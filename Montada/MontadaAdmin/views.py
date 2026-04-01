@@ -1258,7 +1258,8 @@ class AdminRemoveAnalystPlanSubscriptionView(APIView):
 class AdminTraderListView(generics.ListAPIView):
     """
     GET: Paginated list of traders for admin dashboard.
-    Query params: page, page_size (optional), search (name or email), plan (basic|trial|subscribed).
+    Query params: page, page_size (optional), search (name or email),
+    status (active|suspended|pending), plan (basic|trial|subscribed).
     Each item: id, name, email, status (active/inactive), subscription (trial|subscribed|basic), signals_applied, registered_at, is_verified.
     """
     permission_classes = [IsAuthenticated, IsAdminUser]
@@ -1273,6 +1274,14 @@ class AdminTraderListView(generics.ListAPIView):
             qs = qs.filter(
                 Q(name__icontains=search) | Q(email__icontains=search)
             )
+
+        status_param = (self.request.query_params.get("status") or "").strip().lower()
+        if status_param == "active":
+            qs = qs.filter(is_active=True)
+        elif status_param == "suspended":
+            qs = qs.filter(is_active=False)
+        elif status_param == "pending":
+            qs = qs.filter(is_verified=False)
 
         plan_param = (self.request.query_params.get("plan") or "").strip().lower()
         if plan_param and Subscription is not None:
@@ -1779,15 +1788,10 @@ class AdminPollCreateView(APIView):
         if isinstance(is_active, str):
             is_active = is_active.lower() in ("true", "1", "yes")
 
-        question = PollQuestion.objects.create(
-            question_text=question_text,
-            question_type=question_type,
-            order=order,
-            is_active=is_active,
-        )
-        options_payload = data.get("options") or []
-        if isinstance(options_payload, list):
-            for item in options_payload:
+        options_payload_raw = data.get("options")
+        options_texts = []
+        if isinstance(options_payload_raw, list):
+            for item in options_payload_raw:
                 if isinstance(item, dict):
                     opt_text = (item.get("option_text") or "").strip()
                 elif isinstance(item, str):
@@ -1795,7 +1799,28 @@ class AdminPollCreateView(APIView):
                 else:
                     continue
                 if opt_text:
-                    PollOption.objects.create(question=question, option_text=opt_text)
+                    options_texts.append(opt_text)
+        elif options_payload_raw is not None:
+            # Provided but not a list
+            return Response(
+                {"error": "options must be a list of option objects or strings."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if len(options_texts) < 2 or len(options_texts) > 4:
+            return Response(
+                {"error": "Poll must have between 2 and 4 options (non-empty)."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        question = PollQuestion.objects.create(
+            question_text=question_text,
+            question_type=question_type,
+            order=order,
+            is_active=is_active,
+        )
+        for opt_text in options_texts:
+            PollOption.objects.create(question=question, option_text=opt_text)
 
         qs = PollQuestion.objects.prefetch_related(
             Prefetch("options", queryset=PollOption.objects.annotate(vote_count=Count("responses")))
