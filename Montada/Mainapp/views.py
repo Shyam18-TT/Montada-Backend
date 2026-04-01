@@ -390,6 +390,12 @@ def verify_email_view(request):
         user = serializer.validated_data['user']
         otp_obj = serializer.validated_data['otp_obj']
         
+        if user.is_verified:
+            return Response(
+                {'error': 'Email is already verified.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        
         # Mark email as verified
         user.is_verified = True
         user.save()
