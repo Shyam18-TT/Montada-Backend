@@ -33,6 +33,10 @@ class User(AbstractUser):
         default=False,
         help_text='True when the user has an active subscription for market news and live market data (includes in-date free trial).',
     )
+    free_trial_eligible = models.BooleanField(
+        default=True,
+        help_text='Whether this user may still receive their first in-app free trial automatically.',
+    )
     admin_granted_in_app_access = models.BooleanField(
         default=False,
         help_text='When True, user receives full in-app access (market news & live data) without a paid/trial Subscription row.',

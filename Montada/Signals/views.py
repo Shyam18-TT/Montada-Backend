@@ -373,14 +373,17 @@ class TraderSignalListView(generics.ListAPIView):
             user, following_analyst_ids
         )
 
+        # Traders must never see DRAFT signals; only the creating analyst sees drafts
         queryset = TradingSignal.active.filter(
             analyst_id__in=visible_analyst_ids
+        ).exclude(
+            status=TradingSignal.Status.DRAFT
         ).select_related(
             'analyst', 'asset_class', 'instrument', 'timeframe',
         )
 
-        status_param = self.request.query_params.get('status')
-        if status_param:
+        status_param = (self.request.query_params.get('status') or "").strip().upper()
+        if status_param in (TradingSignal.Status.OPEN, TradingSignal.Status.CLOSED):
             queryset = queryset.filter(status=status_param)
 
         search = (

@@ -133,6 +133,11 @@ class Subscription(models.Model):
     @staticmethod
     def create_free_trial(user):
         """Create a free trial subscription for a new user (length from InAppSubscriptionSettings)."""
+        if not getattr(user, "free_trial_eligible", True):
+            raise ValueError("User is not eligible for a free trial.")
+        existing = Subscription.objects.filter(user=user).first()
+        if existing is not None:
+            return existing
         days = int(InAppSubscriptionSettings.load().trial_period_days)
         end_date = timezone.now() + timedelta(days=days)
         subscription = Subscription.objects.create(
@@ -144,7 +149,8 @@ class Subscription(models.Model):
         )
         # Update user's subscription status
         user.is_subscribed = True
-        user.save()
+        user.free_trial_eligible = False
+        user.save(update_fields=['is_subscribed', 'free_trial_eligible'])
         return subscription
     
     def upgrade_to_paid(self, plan_type='monthly', months=1):
@@ -167,7 +173,11 @@ class Subscription(models.Model):
         
         # Update user's subscription status
         self.user.is_subscribed = True
-        self.user.save()
+        if getattr(self.user, "free_trial_eligible", True):
+            self.user.free_trial_eligible = False
+            self.user.save(update_fields=['is_subscribed', 'free_trial_eligible'])
+        else:
+            self.user.save(update_fields=['is_subscribed'])
         
         return self
     

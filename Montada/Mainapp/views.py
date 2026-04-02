@@ -407,8 +407,8 @@ def verify_email_view(request):
         # Invalidate all other OTPs for this email
         EmailVerificationOTP.objects.filter(email=user.email, is_used=False).update(is_used=True)
 
-         # Create 7-day free trial subscription for new user
-        if Subscription:
+        # Create a free trial only for users who are still eligible
+        if Subscription and getattr(user, "free_trial_eligible", True):
             try:
                 Subscription.create_free_trial(user)
             except Exception as e:

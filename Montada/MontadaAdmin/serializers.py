@@ -198,10 +198,11 @@ class AdminCreateTraderSerializer(serializers.Serializer):
         validated_data.setdefault("username", validated_data["email"])
         validated_data["user_type"] = "trader"
         validated_data["is_subscribed"] = subscription_plan != "basic"
+        validated_data["free_trial_eligible"] = False
         user = User.objects.create_user(**validated_data)
 
         if subscription_plan == "basic":
-            pass  # no Subscription record; is_subscribed already False
+            pass
         elif subscription_plan == "free_trial":
             try:
                 from Subscriptions.models import Subscription

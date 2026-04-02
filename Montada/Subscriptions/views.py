@@ -21,33 +21,51 @@ User = get_user_model()
 logger = logging.getLogger(__name__)
 
 
-class SubscriptionStatusView(generics.RetrieveAPIView):
+def _basic_subscription_payload(user):
+    """Serializer-like payload for users with basic access and no subscription row."""
+    return {
+        "id": None,
+        "user": str(user.id),
+        "user_email": user.email,
+        "plan_type": "basic",
+        "status": "inactive",
+        "start_date": None,
+        "end_date": None,
+        "is_trial": False,
+        "is_active": False,
+        "days_remaining": 0,
+        "payment_intent_id": None,
+        "amount": None,
+        "currency": "usd",
+        "created_at": None,
+        "updated_at": None,
+    }
+
+
+class SubscriptionStatusView(APIView):
     """
     API endpoint to get current subscription status
     """
-    serializer_class = SubscriptionSerializer
     permission_classes = [permissions.IsAuthenticated]
-    
-    def get_object(self):
+
+    def get(self, request):
         user = self.request.user
-        subscription, created = Subscription.objects.get_or_create(
-            user=user,
-            defaults={
-                'plan_type': 'free_trial',
-                'status': 'active',
-                'end_date': timezone.now() + timedelta(days=7),
-                'is_trial': True
-            }
-        )
-        
+        try:
+            subscription = Subscription.objects.get(user=user)
+        except Subscription.DoesNotExist:
+            if getattr(user, "free_trial_eligible", True):
+                subscription = Subscription.create_free_trial(user)
+                return Response(SubscriptionSerializer(subscription).data, status=status.HTTP_200_OK)
+            return Response(_basic_subscription_payload(user), status=status.HTTP_200_OK)
+
         # Check if subscription has expired and update status
         if subscription.is_active() == False and subscription.status == 'active':
             subscription.status = 'expired'
             subscription.save()
             user.is_subscribed = False
-            user.save()
-        
-        return subscription
+            user.save(update_fields=['is_subscribed'])
+
+        return Response(SubscriptionSerializer(subscription).data, status=status.HTTP_200_OK)
 
 
 @api_view(['POST'])
@@ -57,23 +75,31 @@ def subscribe_view(request):
     API endpoint to subscribe to a paid plan
     """
     user = request.user
-    
-    # Get or create subscription
-    try:
-        subscription = Subscription.objects.get(user=user)
-    except Subscription.DoesNotExist:
-        # Create a new subscription if it doesn't exist
-        subscription = Subscription.create_free_trial(user)
-    
     serializer = SubscribeSerializer(data=request.data)
-    
+
     if serializer.is_valid():
         plan_type = serializer.validated_data['plan_type']
         months = serializer.validated_data.get('months', 1)
-        
-        # Upgrade to paid plan
-        subscription.upgrade_to_paid(plan_type=plan_type, months=months)
-        
+        try:
+            subscription = Subscription.objects.get(user=user)
+            # Upgrade existing subscription row
+            subscription.upgrade_to_paid(plan_type=plan_type, months=months)
+        except Subscription.DoesNotExist:
+            duration = timedelta(days=365) if plan_type == 'yearly' else timedelta(days=30 * months)
+            subscription = Subscription.objects.create(
+                user=user,
+                plan_type=plan_type,
+                status='active',
+                end_date=timezone.now() + duration,
+                is_trial=False,
+            )
+            user.is_subscribed = True
+            if getattr(user, "free_trial_eligible", True):
+                user.free_trial_eligible = False
+                user.save(update_fields=['is_subscribed', 'free_trial_eligible'])
+            else:
+                user.save(update_fields=['is_subscribed'])
+
         return Response({
             'message': f'Successfully subscribed to {plan_type} plan.',
             'subscription': SubscriptionSerializer(subscription).data
@@ -147,9 +173,14 @@ def check_subscription_status_view(request):
         }, status=status.HTTP_200_OK)
     
     except Subscription.DoesNotExist:
+        if getattr(user, "free_trial_eligible", True):
+            message = 'No subscription found. Free trial is available on first eligible access.'
+        else:
+            message = 'No active subscription found. User is on basic access.'
         return Response({
             'has_active_subscription': False,
-            'message': 'No subscription found. Free trial will be created on first access.'
+            'message': message,
+            'subscription': _basic_subscription_payload(user),
         }, status=status.HTTP_200_OK)
 
 
@@ -206,7 +237,11 @@ def confirm_subscription_view(request):
         )
 
     user.is_subscribed = True
-    user.save(update_fields=['is_subscribed'])
+    if getattr(user, "free_trial_eligible", True):
+        user.free_trial_eligible = False
+        user.save(update_fields=['is_subscribed', 'free_trial_eligible'])
+    else:
+        user.save(update_fields=['is_subscribed'])
 
     return Response(
         {

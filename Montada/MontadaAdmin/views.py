@@ -295,9 +295,10 @@ class AdminCreateTraderView(APIView):
         except Exception:
             sub = None
         if sub:
-            if sub.plan_type == "free_trial" or sub.is_trial:
+            is_active_sub = getattr(sub, "status", "") == "active" and getattr(sub, "end_date", None) and sub.end_date >= timezone.now()
+            if is_active_sub and (sub.plan_type == "free_trial" or sub.is_trial):
                 subscription_label = "free_trial"
-            else:
+            elif is_active_sub:
                 subscription_label = "premium"
         return Response(
             {
