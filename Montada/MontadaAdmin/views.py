@@ -3265,14 +3265,15 @@ class AdminEconomicCalendarView(APIView):
     """
     GET  /api/admin/marketdata/economic-calendar/
 
-    Fetches the economic calendar from ForexNewsAPI (admin-only).
+    Fetches the economic calendar from the public Fair Economy weekly feed
+    and preserves the existing response shape.
 
     Available filters (query params):
     ┌─────────────┬──────────────────────────────────────────────────────────┐
     │ Param       │ Description                                              │
     ├─────────────┼──────────────────────────────────────────────────────────┤
-    │ date        │ Shorthand range: today | yesterday | last7days |         │
-    │             │ last30days  — OR a specific date YYYY-MM-DD              │
+    │ date        │ Shorthand range: today | tomorrow | thisweek |           │
+    │             │ yesterday | last7days | last30days — OR YYYY-MM-DD       │
     │ from_date   │ Start of custom date range  YYYY-MM-DD                   │
     │ to_date     │ End of custom date range    YYYY-MM-DD                   │
     │ country     │ Comma-separated ISO country codes  e.g. US,GB,EU         │
@@ -3287,12 +3288,12 @@ class AdminEconomicCalendarView(APIView):
         "total_pages" : 5,
         "page"        : 1,
         "items"       : 10,
-        "events"      : [ { ...ForexNewsAPI event object... }, ... ]
+        "events"      : [ { ...event object... }, ... ]
     }
     """
     permission_classes = [IsAuthenticated, IsAdminUser]
 
-    _BASE_URL = "https://forexnewsapi.com/api/v1/economic-calendar"
+    _BASE_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 
     _ALLOWED_PARAMS = {
         "date", "from_date", "to_date",
@@ -3300,30 +3301,113 @@ class AdminEconomicCalendarView(APIView):
         "items", "page",
     }
 
+    def _parse_event_datetime(self, value):
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(value)
+        except Exception:
+            return None
+
+    def _impact_rank(self, impact):
+        mapping = {
+            "low": 1,
+            "medium": 2,
+            "high": 3,
+            "holiday": 0,
+        }
+        return mapping.get((impact or "").strip().lower(), 0)
+
+    def _normalize_event(self, event):
+        event_dt = self._parse_event_datetime(event.get("date"))
+        iso_value = event_dt.isoformat() if event_dt else (event.get("date") or "")
+        return {
+            "title": (event.get("title") or "").strip(),
+            "event": (event.get("title") or "").strip(),
+            "country": (event.get("country") or "").strip().upper(),
+            "currency": (event.get("country") or "").strip().upper(),
+            "date": event_dt.date().isoformat() if event_dt else "",
+            "time": event_dt.strftime("%H:%M") if event_dt else "",
+            "datetime": iso_value,
+            "impact": (event.get("impact") or "").strip(),
+            "importance": self._impact_rank(event.get("impact")),
+            "forecast": event.get("forecast") or "",
+            "previous": event.get("previous") or "",
+            "actual": event.get("actual") or "",
+            "source": "FairEconomy",
+        }
+
+    def _date_window(self, params):
+        now = timezone.now()
+        today = now.date()
+        date_param = (params.get("date") or "").strip().lower()
+        from_param = (params.get("from_date") or "").strip()
+        to_param = (params.get("to_date") or "").strip()
+
+        if from_param or to_param:
+            start = None
+            end = None
+            try:
+                if from_param:
+                    start = datetime.strptime(from_param, "%Y-%m-%d").date()
+                if to_param:
+                    end = datetime.strptime(to_param, "%Y-%m-%d").date()
+            except ValueError:
+                return None, None
+            return start, end
+
+        if not date_param:
+            return None, None
+        if date_param == "thisweek":
+            return today, today + timedelta(days=7)
+        if date_param == "last7days":
+            return today - timedelta(days=6), today
+        if date_param == "today":
+            return today, today
+        if date_param == "tomorrow":
+            t = today + timedelta(days=1)
+            return t, t
+        if date_param == "yesterday":
+            y = today - timedelta(days=1)
+            return y, y
+        if date_param == "last30days":
+            return today - timedelta(days=29), today
+        try:
+            exact = datetime.strptime(date_param, "%Y-%m-%d").date()
+            return exact, exact
+        except ValueError:
+            return None, None
+
+    def _importance_matches(self, event_impact, requested_importance):
+        if not requested_importance:
+            return True
+        impact = (event_impact or "").strip().lower()
+        requested = {x.strip().lower() for x in requested_importance.split(",") if x.strip()}
+        mapping = {
+            "1": "low",
+            "2": "medium",
+            "3": "high",
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "holiday": "holiday",
+        }
+        normalized_requested = {mapping.get(x, x) for x in requested}
+        return impact in normalized_requested
+
     def get(self, request):
-        token = getattr(django_settings, "FOREXNEWS_API_TOKEN", "")
-        if not token:
-            return Response(
-                {"error": "ForexNewsAPI token is not configured."},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
-
-        params = {"token": token}
-
+        params = {}
         for key in self._ALLOWED_PARAMS:
             val = (request.query_params.get(key) or "").strip()
             if val:
                 params[key] = val
 
-        # Sensible defaults
-        params.setdefault("date",  "last7days")
+        # Default: return the weekly feed as-is unless the client explicitly filters dates
         params.setdefault("items", "10")
-        params.setdefault("page",  "1")
-
-        url = self._BASE_URL + "?" + urllib.parse.urlencode(params)
+        params.setdefault("page", "1")
 
         try:
-            req = urllib.request.Request(url, method="GET")
+            req = urllib.request.Request(self._BASE_URL, method="GET")
             req.add_header(
                 "User-Agent",
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -3340,7 +3424,7 @@ class AdminEconomicCalendarView(APIView):
             return Response(err_data, status=exc.code)
         except urllib.error.URLError as exc:
             return Response(
-                {"error": "Could not reach ForexNewsAPI.", "detail": str(exc.reason)},
+                {"error": "Could not reach economic calendar feed.", "detail": str(exc.reason)},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
         except Exception as exc:
@@ -3349,12 +3433,62 @@ class AdminEconomicCalendarView(APIView):
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
 
+        events = raw if isinstance(raw, list) else []
+        start_date, end_date = self._date_window(params)
+        countries = {
+            x.strip().upper()
+            for x in (params.get("country") or "").split(",")
+            if x.strip()
+        }
+        currencies = {
+            x.strip().upper()
+            for x in (params.get("currency") or "").split(",")
+            if x.strip()
+        }
+
+        normalized = []
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            event_dt = self._parse_event_datetime(event.get("date"))
+            event_date = event_dt.date() if event_dt else None
+            event_country = (event.get("country") or "").strip().upper()
+
+            if start_date and event_date and event_date < start_date:
+                continue
+            if end_date and event_date and event_date > end_date:
+                continue
+            if countries and event_country not in countries:
+                continue
+            if currencies and event_country not in currencies:
+                continue
+            if not self._importance_matches(event.get("impact"), params.get("importance")):
+                continue
+            normalized.append(self._normalize_event(event))
+
+        normalized.sort(key=lambda item: (item.get("date") or "", item.get("time") or "", item.get("title") or ""))
+
+        try:
+            items = max(1, int(params.get("items", 10)))
+        except (TypeError, ValueError):
+            items = 10
+        try:
+            page = max(1, int(params.get("page", 1)))
+        except (TypeError, ValueError):
+            page = 1
+
+        total = len(normalized)
+        total_pages = max(1, (total + items - 1) // items) if items else 1
+        start_idx = (page - 1) * items
+        end_idx = start_idx + items
+        paged_events = normalized[start_idx:end_idx]
+
         return Response(
             {
-                "total_pages": raw.get("total_pages", 1),
-                "page":        int(params.get("page", 1)),
-                "items":       int(params.get("items", 10)),
-                "events":      raw.get("data", []),
+                "total_pages": total_pages,
+                "page":        page,
+                "items":       items,
+                "events":      paged_events,
             },
             status=status.HTTP_200_OK,
         )
