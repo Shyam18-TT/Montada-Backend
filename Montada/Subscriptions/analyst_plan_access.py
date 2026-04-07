@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from typing import Iterable, List
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 
@@ -22,6 +23,15 @@ from .models import AnalystContentPlan, UserAnalystPlanSubscription
 
 def _now():
     return timezone.now()
+
+
+def analyst_subscription_free_access_enabled() -> bool:
+    """
+    Global override for analyst-content paywall.
+    When enabled, analyst signals and analyst articles can be viewed without
+    an active UserAnalystPlanSubscription.
+    """
+    return bool(getattr(settings, "ANALYST_SUBSCRIPTION_FREE_ACCESS", False))
 
 
 def _subscribed_analyst_ids_for_signals(subscriber) -> set:
@@ -52,12 +62,16 @@ def filter_visible_analyst_ids_for_signals(
     following = set(following_analyst_ids)
     if not following:
         return []
+    if analyst_subscription_free_access_enabled():
+        return list(following)
     subscribed = _subscribed_analyst_ids_for_signals(subscriber)
     return list(following & subscribed)
 
 
 def user_has_analyst_signal_access(subscriber, analyst_id) -> bool:
     """True if *subscriber* has an active analyst plan covering signals for *analyst_id*."""
+    if analyst_subscription_free_access_enabled():
+        return True
     now = _now()
     return UserAnalystPlanSubscription.objects.filter(
         subscriber=subscriber,
@@ -81,6 +95,8 @@ def user_has_analyst_article_access(
     subscription (articles or all) to that analyst.
     """
     if article_is_free:
+        return True
+    if analyst_subscription_free_access_enabled():
         return True
     User = get_user_model()
     try:

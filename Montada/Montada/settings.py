@@ -290,6 +290,11 @@ FOREXNEWS_CATEGORY_URL = "https://forexnewsapi.com/api/v1/category"
 EODHD_API_TOKEN = os.environ.get("EODHD_API_TOKEN", "69ba6abb136cc3.30994192") or FOREXNEWS_API_TOKEN
 EODHD_NEWS_URL = os.environ.get("EODHD_NEWS_URL", "https://eodhd.com/api/news")
 
+# Analyst content-plan paywall:
+# When True, traders can view analyst signals and analyst articles without holding
+# an active UserAnalystPlanSubscription. Signal follow rules still apply separately.
+ANALYST_SUBSCRIPTION_FREE_ACCESS = True
+
 # MT5 Manager API (for run_price_alerts --use-mt5-manager). Optional; can use env vars instead.
 MT5_MANAGER_SERVER   = os.environ.get("MT5_MANAGER_SERVER", "207.97.203.117:443")   # e.g. "192.168.1.100:443"
 MT5_MANAGER_LOGIN    = os.environ.get("MT5_MANAGER_LOGIN", "5022")    # e.g. 1002

@@ -20,6 +20,7 @@ from .serializers import (
     NewsArticleCommentSerializer,
 )
 from Subscriptions.access import check_active_subscription
+from Subscriptions.analyst_plan_access import analyst_subscription_free_access_enabled
 
 try:
     from Signals.views import IsAnalystPermission
@@ -85,6 +86,27 @@ class NewsArticleListView(generics.ListAPIView):
             qs = qs.filter(status="published")
             # Analyst-authored articles: only if trader has an active per-analyst subscription
             # (articles or all). Non-analyst authors remain visible without a plan.
+            if analyst_subscription_free_access_enabled():
+                search = (self.request.query_params.get("search") or "").strip()
+                if search:
+                    qs = qs.filter(
+                        Q(title__icontains=search)
+                        | Q(summary__icontains=search)
+                        | Q(content__icontains=search)
+                    )
+                category_id = self.request.query_params.get("category")
+                if category_id:
+                    qs = qs.filter(category_id=category_id)
+
+                qs = qs.annotate(
+                    like_count=Count("likes", distinct=True),
+                    comment_count=Count("comments", filter=Q(comments__is_deleted=False), distinct=True),
+                )
+                if self.request.user and self.request.user.is_authenticated:
+                    qs = qs.annotate(
+                        current_user_liked=Exists(NewsArticleLike.objects.filter(article=OuterRef("pk"), user=self.request.user)),
+                    )
+                return qs
             User = get_user_model()
             now = django_timezone.now()
             is_analyst_author = Exists(
