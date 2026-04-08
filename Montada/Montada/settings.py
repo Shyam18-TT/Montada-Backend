@@ -175,6 +175,8 @@ DATABASES = {
     },
 }
 
+DATABASES['default']['CONN_MAX_AGE'] = 60
+
 CSRF_TRUSTED_ORIGINS = [
     "https://api.themontada.com",
     "https://uat.themontada.com",
