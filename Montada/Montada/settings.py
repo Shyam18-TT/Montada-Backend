@@ -305,3 +305,21 @@ ANALYST_SUBSCRIPTION_FREE_ACCESS = True
 MT5_MANAGER_SERVER   = os.environ.get("MT5_MANAGER_SERVER", "207.97.203.117:443")   # e.g. "192.168.1.100:443"
 MT5_MANAGER_LOGIN    = os.environ.get("MT5_MANAGER_LOGIN", "5022")    # e.g. 1002
 MT5_MANAGER_PASSWORD = os.environ.get("MT5_MANAGER_PASSWORD", "YlCcG-3u") # manager password
+
+
+
+LOGGING = {
+    'version': 1,
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+        },
+    },
+    'loggers': {
+        'django.request': {
+            'handlers': ['console'],
+            'level': 'DEBUG',
+            'propagate': True,
+        },
+    },
+}
