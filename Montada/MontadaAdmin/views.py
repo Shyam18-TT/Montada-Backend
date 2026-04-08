@@ -9,6 +9,7 @@ import uuid
 from calendar import monthrange
 from datetime import timedelta, datetime
 from django.conf import settings as django_settings
+from django.core.cache import cache
 from django.utils import timezone
 from django.db import connections
 from django.db.models import (
@@ -3294,6 +3295,10 @@ class AdminEconomicCalendarView(APIView):
     permission_classes = [IsAuthenticated, IsAdminUser]
 
     _BASE_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+    _FALLBACK_URL = "https://forexnewsapi.com/api/v1/economic-calendar"
+    _CACHE_KEY = "admin_economic_calendar_feed_v1"
+    _CACHE_TIMEOUT_SECONDS = 300
+    _STALE_CACHE_TIMEOUT_SECONDS = 3600
 
     _ALLOWED_PARAMS = {
         "date", "from_date", "to_date",
@@ -3395,6 +3400,47 @@ class AdminEconomicCalendarView(APIView):
         normalized_requested = {mapping.get(x, x) for x in requested}
         return impact in normalized_requested
 
+    def _fetch_fallback_feed(self, params):
+        token = getattr(django_settings, "FOREXNEWS_API_TOKEN", "")
+        if not token:
+            return []
+        fallback_params = {"token": token}
+        for key in self._ALLOWED_PARAMS:
+            val = (params.get(key) or "").strip()
+            if val:
+                fallback_params[key] = val
+        url = self._FALLBACK_URL + "?" + urllib.parse.urlencode(fallback_params)
+        req = urllib.request.Request(url, method="GET")
+        req.add_header(
+            "User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw = json.loads(resp.read().decode())
+        return raw.get("data", []) if isinstance(raw, dict) else []
+
+    def _get_cached_feed(self, *, allow_stale=False):
+        payload = cache.get(self._CACHE_KEY)
+        if not payload:
+            return None
+        if allow_stale:
+            return payload.get("events")
+        fetched_at = payload.get("fetched_at")
+        if not fetched_at:
+            return payload.get("events")
+        age = (timezone.now() - fetched_at).total_seconds()
+        if age <= self._CACHE_TIMEOUT_SECONDS:
+            return payload.get("events")
+        return None
+
+    def _set_cached_feed(self, events):
+        cache.set(
+            self._CACHE_KEY,
+            {"events": events, "fetched_at": timezone.now()},
+            timeout=self._STALE_CACHE_TIMEOUT_SECONDS,
+        )
+
     def get(self, request):
         params = {}
         for key in self._ALLOWED_PARAMS:
@@ -3406,32 +3452,64 @@ class AdminEconomicCalendarView(APIView):
         params.setdefault("items", "10")
         params.setdefault("page", "1")
 
+        raw = self._get_cached_feed()
         try:
-            req = urllib.request.Request(self._BASE_URL, method="GET")
-            req.add_header(
-                "User-Agent",
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            )
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                raw = json.loads(resp.read().decode())
+            if raw is None:
+                req = urllib.request.Request(self._BASE_URL, method="GET")
+                req.add_header(
+                    "User-Agent",
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                )
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    raw = json.loads(resp.read().decode())
+                if isinstance(raw, list):
+                    self._set_cached_feed(raw)
         except urllib.error.HTTPError as exc:
-            body = exc.read().decode() if exc.fp else "{}"
-            try:
-                err_data = json.loads(body)
-            except Exception:
-                err_data = {"error": body or str(exc)}
-            return Response(err_data, status=exc.code)
+            stale = self._get_cached_feed(allow_stale=True)
+            if exc.code == 429 and stale is not None:
+                raw = stale
+            elif exc.code == 429:
+                try:
+                    raw = self._fetch_fallback_feed(params)
+                except Exception:
+                    body = exc.read().decode() if exc.fp else "{}"
+                    try:
+                        err_data = json.loads(body)
+                    except Exception:
+                        err_data = {"error": body or str(exc)}
+                    return Response(err_data, status=exc.code)
+            else:
+                body = exc.read().decode() if exc.fp else "{}"
+                try:
+                    err_data = json.loads(body)
+                except Exception:
+                    err_data = {"error": body or str(exc)}
+                return Response(err_data, status=exc.code)
         except urllib.error.URLError as exc:
-            return Response(
-                {"error": "Could not reach economic calendar feed.", "detail": str(exc.reason)},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
+            stale = self._get_cached_feed(allow_stale=True)
+            if stale is not None:
+                raw = stale
+            else:
+                try:
+                    raw = self._fetch_fallback_feed(params)
+                except Exception:
+                    return Response(
+                        {"error": "Could not reach economic calendar feed.", "detail": str(exc.reason)},
+                        status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    )
         except Exception as exc:
-            return Response(
-                {"error": "Failed to fetch economic calendar.", "detail": str(exc)},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
+            stale = self._get_cached_feed(allow_stale=True)
+            if stale is not None:
+                raw = stale
+            else:
+                try:
+                    raw = self._fetch_fallback_feed(params)
+                except Exception:
+                    return Response(
+                        {"error": "Failed to fetch economic calendar.", "detail": str(exc)},
+                        status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    )
 
         events = raw if isinstance(raw, list) else []
         start_date, end_date = self._date_window(params)
