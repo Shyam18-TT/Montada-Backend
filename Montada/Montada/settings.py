@@ -24,7 +24,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = 'django-insecure-q$zsfembchk%)jfss=7a)e%_)yfv377x_=2%3wg3!a=&s2%gn6'
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = False
 
 # Hostnames only (no https:// or trailing slash). '*' allows all.
 ALLOWED_HOSTS = [
@@ -35,7 +35,11 @@ ALLOWED_HOSTS = [
     "uat.themontada.com",
     "www.uat.themontada.com",
     "adminuat.themontada.com",
+    "api.themontada.com",
 ]
+
+USE_X_FORWARDED_HOST = True
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 
 
 # Application definition
