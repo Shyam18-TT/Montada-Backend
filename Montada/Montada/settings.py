@@ -35,6 +35,7 @@ ALLOWED_HOSTS = [
     "uat.themontada.com",
     "www.uat.themontada.com",
     "adminuat.themontada.com",
+    "admin.themontada.com",
     "api.themontada.com",
 ]
 
@@ -92,6 +93,7 @@ CORS_ALLOWED_ORIGINS = [
     "https://app.themontada.com",
     "https://uat.themontada.com",
     "https://adminuat.themontada.com",
+    "https://admin.themontada.com",
 ]
 # Allow any localhost / 127.0.0.1 port (e.g. 5173, 4200, 3001)
 CORS_ALLOWED_ORIGINS_REGEX = r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
@@ -191,7 +193,8 @@ CSRF_TRUSTED_ORIGINS = [
     "https://uat.themontada.com",
     "https://www.uat.themontada.com",
     "http://localhost:8080",
-    "https://adminuat.themontada.com"
+    "https://adminuat.themontada.com",
+    "https://admin.themontada.com",
 ]
 
 CSRF_COOKIE_SECURE = True
