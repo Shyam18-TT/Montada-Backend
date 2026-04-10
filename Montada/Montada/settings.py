@@ -24,7 +24,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = 'django-insecure-q$zsfembchk%)jfss=7a)e%_)yfv377x_=2%3wg3!a=&s2%gn6'
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = False
+DEBUG = True
 
 # Hostnames only (no https:// or trailing slash). '*' allows all.
 ALLOWED_HOSTS = [
@@ -145,11 +145,20 @@ CHANNEL_LAYERS = {
 DATABASES = {
         'default': {
         'ENGINE': 'mssql',
-        'NAME': 'MontadaApp',
+        'NAME': 'MotadaApp',
         'USER': 'MontadaUser',
         'PASSWORD': 'A7f#Q9mL@2xR!K8Z',
-        'HOST': '3.76.105.23',
+        'HOST' : '185.4.178.134',
         'PORT': '1433',
+
+        # 'ENGINE': 'mssql',
+        # 'NAME': 'MotadaApp',
+        # # 'NAME': 'MontadaApp',
+        # 'USER': 'MontadaUser',
+        # 'PASSWORD': 'A7f#Q9mL@2xR!K8Z',
+        # # 'HOST': '3.76.105.23',
+        # 'HOST' : '185.4.178.134',
+        # 'PORT': '1433',
 
         'OPTIONS': {
             'driver': 'ODBC Driver 18 for SQL Server',
@@ -225,6 +234,7 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
 STATIC_URL = 'static/'
+
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
