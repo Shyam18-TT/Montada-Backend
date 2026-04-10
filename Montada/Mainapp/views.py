@@ -6,6 +6,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth import get_user_model
 from django.core.mail import send_mail
 from django.conf import settings
+from django.db import transaction
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from .serializers import (
@@ -584,11 +585,29 @@ class SaveFCMToken(APIView):
             )
 
         user = request.user
-        DeviceToken.objects.update_or_create(
-            user=user,
-            defaults={"fcm_token": token},
-        )
+        with transaction.atomic():
+            token_rows = list(
+                DeviceToken.objects.select_for_update()
+                .filter(fcm_token=token)
+                .order_by("created_at", "id")
+            )
+
+            if token_rows:
+                device_token = token_rows[0]
+                if device_token.user_id != user.id:
+                    device_token.user = user
+                    device_token.save(update_fields=["user"])
+                if len(token_rows) > 1:
+                    DeviceToken.objects.filter(
+                        id__in=[row.id for row in token_rows[1:]]
+                    ).delete()
+            else:
+                device_token = DeviceToken.objects.create(
+                    user=user,
+                    fcm_token=token,
+                )
+
         return Response(
-            {"message": "Token saved"},
+            {"message": "Token saved", "token_id": str(device_token.id)},
             status=status.HTTP_200_OK,
         )
