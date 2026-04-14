@@ -2,6 +2,7 @@
 Admin dashboard views: stats cards with date range and percentage change.
 """
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -39,6 +40,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 
 from News.views import eodhd_category_news_response_for_request
+from Mainapp.db_timing import log_manual_exception, log_manual_timing
 
 User = get_user_model()
 
@@ -143,41 +145,62 @@ class AdminLoginView(APIView):
     authentication_classes = []
 
     def post(self, request):
-        serializer = AdminLoginSerializer(data=request.data, context={"request": request})
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        start = time.time()
+        email = request.data.get("email")
 
-        user = serializer.validated_data["user"]
-        if not (user.is_staff or user.is_superuser):
-            return Response(
-                {"error": "Admin access only. Your account does not have staff privileges."},
-                status=status.HTTP_403_FORBIDDEN,
+        try:
+            serializer = AdminLoginSerializer(data=request.data, context={"request": request})
+            if not serializer.is_valid():
+                log_manual_timing("admin_login_invalid", start, email=email)
+                return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+            user = serializer.validated_data["user"]
+            if not (user.is_staff or user.is_superuser):
+                log_manual_timing(
+                    "admin_login_forbidden",
+                    start,
+                    email=email,
+                    user_id=user.id,
+                )
+                return Response(
+                    {"error": "Admin access only. Your account does not have staff privileges."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            if RefreshToken is None:
+                log_manual_timing("admin_login_jwt_unavailable", start, email=email)
+                return Response(
+                    {"error": "JWT is not configured."},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
+
+            refresh = RefreshToken.for_user(user)
+            log_manual_timing(
+                "admin_login_success",
+                start,
+                email=email,
+                user_id=user.id,
             )
-
-        if RefreshToken is None:
             return Response(
-                {"error": "JWT is not configured."},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                {
+                    "message": "Admin login successful.",
+                    "user": {
+                        "id": str(user.id),
+                        "email": user.email,
+                        "name": user.name or "",
+                        "is_staff": user.is_staff,
+                        "is_superuser": user.is_superuser,
+                    },
+                    "tokens": {
+                        "refresh": str(refresh),
+                        "access": str(refresh.access_token),
+                    },
+                },
+                status=status.HTTP_200_OK,
             )
-
-        refresh = RefreshToken.for_user(user)
-        return Response(
-            {
-                "message": "Admin login successful.",
-                "user": {
-                    "id": str(user.id),
-                    "email": user.email,
-                    "name": user.name or "",
-                    "is_staff": user.is_staff,
-                    "is_superuser": user.is_superuser,
-                },
-                "tokens": {
-                    "refresh": str(refresh),
-                    "access": str(refresh.access_token),
-                },
-            },
-            status=status.HTTP_200_OK,
-        )
+        except Exception:
+            log_manual_exception("admin_login_exception", email=email)
+            raise
 
 
 class AdminChangeUserPasswordView(APIView):
