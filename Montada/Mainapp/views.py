@@ -233,25 +233,41 @@ Montada Team
 @api_view(['POST'])
 @permission_classes([permissions.AllowAny])
 def login_view(request):
+    import time
+    from Mainapp.db_timing import log_manual_exception, log_manual_timing
 
-    serializer = UserLoginSerializer(data=request.data, context={'request': request})
-    
-    if serializer.is_valid():
-        user = serializer.validated_data['user']
+    start = time.time()
+    email = request.data.get('email')
+
+    try:
+        serializer = UserLoginSerializer(data=request.data, context={'request': request})
         
-        # Generate JWT tokens
-        refresh = RefreshToken.for_user(user)
-        
-        return Response({
-            'user': UserProfileSerializer(user).data,
-            'tokens': {
-                'refresh': str(refresh),
-                'access': str(refresh.access_token),
-            },
-            'message': 'Login successful'
-        }, status=status.HTTP_200_OK)
-    
-    return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        if serializer.is_valid():
+            user = serializer.validated_data['user']
+            
+            # Generate JWT tokens
+            refresh = RefreshToken.for_user(user)
+            log_manual_timing(
+                "login_view_success",
+                start,
+                email=email,
+                user_id=user.id,
+            )
+            
+            return Response({
+                'user': UserProfileSerializer(user).data,
+                'tokens': {
+                    'refresh': str(refresh),
+                    'access': str(refresh.access_token),
+                },
+                'message': 'Login successful'
+            }, status=status.HTTP_200_OK)
+
+        log_manual_timing("login_view_invalid", start, email=email)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    except Exception:
+        log_manual_exception("login_view_exception", email=email)
+        raise
 
 
 class UserProfileView(generics.RetrieveUpdateAPIView):

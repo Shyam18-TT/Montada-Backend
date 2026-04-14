@@ -330,12 +330,20 @@ LOGGING = {
         'db_timing': {
             'format': '%(message)s',
         },
+        'exception': {
+            'format': '%(asctime)s %(levelname)s %(message)s',
+        },
     },
     'handlers': {
         'file': {
             'class': 'logging.FileHandler',
             'filename': str(LOG_DIR / 'django_db.log'),
             'formatter': 'db_timing',
+        },
+        'exception_file': {
+            'class': 'logging.FileHandler',
+            'filename': str(LOG_DIR / 'exception.log'),
+            'formatter': 'exception',
         },
     },
     'loggers': {
@@ -344,9 +352,24 @@ LOGGING = {
             'level': 'WARNING',
             'propagate': False,
         },
+        'django.request': {
+            'handlers': ['exception_file'],
+            'level': 'ERROR',
+            'propagate': False,
+        },
+        'django.server': {
+            'handlers': ['exception_file'],
+            'level': 'ERROR',
+            'propagate': False,
+        },
         'db.timing': {
             'handlers': ['file'],
             'level': 'INFO',
+            'propagate': False,
+        },
+        'app.exceptions': {
+            'handlers': ['exception_file'],
+            'level': 'ERROR',
             'propagate': False,
         },
     },
