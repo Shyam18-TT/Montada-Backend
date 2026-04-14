@@ -152,6 +152,7 @@ DATABASES = {
         'PASSWORD': 'A7f#Q9mL@2xR!K8Z',
         'HOST' : '185.4.178.134',
         'PORT': '1433',
+        'CONN_MAX_AGE':120,
 
         # 'ENGINE': 'mssql',
         # 'NAME': 'MontadaApp',
@@ -184,7 +185,6 @@ DATABASES = {
     },
 }
 
-DATABASES['default']['CONN_MAX_AGE'] = 60
 
 CSRF_TRUSTED_ORIGINS = [
     "https://api.themontada.com",
