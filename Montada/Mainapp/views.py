@@ -765,5 +765,6 @@ class ConfirmAccountDeletionView(APIView):
 
 
 class TestJson(APIView):
+    permission_classes = [permissions.AllowAny]
     def get(self, request):
         return Response({'message':"Response from the server"})
