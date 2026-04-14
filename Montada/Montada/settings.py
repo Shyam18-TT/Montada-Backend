@@ -62,7 +62,7 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt',
     'rest_framework_simplejwt.token_blacklist',
     # custom apps
-    'Mainapp.apps.MainappConfig',
+    'Mainapp',
     'Subscriptions',
     'Signals',
     'Followers',
@@ -163,10 +163,10 @@ DATABASES = {
         # 'HOST': '3.76.105.23',
         # 'PORT': '1433',
 
-        'OPTIONS': {
-            'driver': 'ODBC Driver 18 for SQL Server',
-            'extra_params': 'Encrypt=no;TrustServerCertificate=yes;',
-        },
+        # 'OPTIONS': {
+        #     'driver': 'ODBC Driver 18 for SQL Server',
+        #     'extra_params': 'Encrypt=no;TrustServerCertificate=yes;',
+        # },
        
     },
 
