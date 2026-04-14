@@ -7,6 +7,7 @@ from django.contrib.auth import get_user_model
 from django.core.mail import send_mail
 from django.conf import settings
 from django.db import transaction
+from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from .serializers import (
@@ -17,9 +18,10 @@ from .serializers import (
     ForgotPasswordSerializer,
     VerifyOTPSerializer,
     ResetPasswordSerializer,
-    EmailVerificationSerializer
+    EmailVerificationSerializer,
+    DeleteAccountConfirmSerializer,
 )
-from .models import PasswordResetOTP, EmailVerificationOTP, DeviceToken
+from .models import PasswordResetOTP, EmailVerificationOTP, AccountDeletionOTP, DeviceToken
 
 User = get_user_model()
 
@@ -52,6 +54,63 @@ class RegisterView(generics.CreateAPIView):
         # Check if user with this email already exists
         try:
             existing_user = User.objects.get(email=email)
+
+            if getattr(existing_user, 'is_soft_deleted', False):
+                serializer = self.get_serializer(existing_user, data=data, partial=True)
+                serializer.is_valid(raise_exception=True)
+                user = serializer.save()
+                user.username = user.username or user.email
+                user.is_active = True
+                user.is_soft_deleted = False
+                user.soft_deleted_at = None
+                user.is_verified = False
+                user.save(
+                    update_fields=[
+                        'username',
+                        'is_active',
+                        'is_soft_deleted',
+                        'soft_deleted_at',
+                        'is_verified',
+                        'updated_at',
+                    ]
+                )
+
+                otp = EmailVerificationOTP.generate_otp()
+                EmailVerificationOTP.objects.filter(email=user.email, is_used=False).update(is_used=True)
+                AccountDeletionOTP.objects.filter(email=user.email, is_used=False).update(is_used=True)
+                EmailVerificationOTP.objects.create(email=user.email, otp=otp)
+
+                subject = 'Email Verification OTP - Montada'
+                message = f'''
+Hello {user.name or user.username},
+
+Your Montada account has been restored. Please verify your email address to activate the account again.
+
+Your verification OTP code is: {otp}
+
+This OTP will expire in 10 minutes.
+
+If you did not request this, please ignore this email.
+
+Best regards,
+Montada Team
+                '''
+
+                try:
+                    send_mail(
+                        subject,
+                        message,
+                        settings.EMAIL_HOST_USER if hasattr(settings, 'EMAIL_HOST_USER') else 'noreply@montada.com',
+                        [user.email],
+                        fail_silently=False,
+                    )
+                except Exception:
+                    pass
+
+                return Response({
+                    'message': 'Soft-deleted account restored. Please check your email for verification OTP to complete registration.',
+                    'email': user.email
+                }, status=status.HTTP_200_OK)
             
             # If user is already verified, return error
             if existing_user.is_verified:
@@ -611,3 +670,100 @@ class SaveFCMToken(APIView):
             {"message": "Token saved", "token_id": str(device_token.id)},
             status=status.HTTP_200_OK,
         )
+
+
+class RequestAccountDeletionOTPView(APIView):
+    """
+    POST: Send an OTP to the authenticated user's email for soft-delete confirmation.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        user = request.user
+        if getattr(user, "is_soft_deleted", False):
+            return Response(
+                {"error": "Account is already deleted."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        otp = AccountDeletionOTP.generate_otp()
+        AccountDeletionOTP.objects.filter(email=user.email, is_used=False).update(is_used=True)
+        AccountDeletionOTP.objects.create(email=user.email, otp=otp)
+
+        subject = 'Delete Account OTP - Montada'
+        message = f'''
+Hello {user.name or user.username},
+
+You requested to delete your Montada account.
+
+Your OTP code is: {otp}
+
+This OTP will expire in 10 minutes.
+
+If you did not request this, please ignore this email.
+
+Best regards,
+Montada Team
+        '''
+
+        try:
+            send_mail(
+                subject,
+                message,
+                settings.EMAIL_HOST_USER if hasattr(settings, 'EMAIL_HOST_USER') else 'noreply@montada.com',
+                [user.email],
+                fail_silently=False,
+            )
+        except Exception:
+            return Response(
+                {"error": "Failed to send email. Please try again later."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        return Response(
+            {"message": "Account deletion OTP has been sent to your email address."},
+            status=status.HTTP_200_OK,
+        )
+
+
+class ConfirmAccountDeletionView(APIView):
+    """
+    POST: Validate OTP and soft-delete the authenticated user's account.
+    Body: { "otp": "123456" }
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        serializer = DeleteAccountConfirmSerializer(
+            data=request.data,
+            context={'request': request},
+        )
+        serializer.is_valid(raise_exception=True)
+
+        user = request.user
+        otp_obj = serializer.validated_data['otp_obj']
+
+        with transaction.atomic():
+            user.is_soft_deleted = True
+            user.soft_deleted_at = timezone.now()
+            user.is_active = False
+            user.is_verified = False
+            user.save(update_fields=['is_soft_deleted', 'soft_deleted_at', 'is_active', 'is_verified', 'updated_at'])
+
+            otp_obj.is_used = True
+            otp_obj.save(update_fields=['is_used'])
+
+            AccountDeletionOTP.objects.filter(email=user.email, is_used=False).update(is_used=True)
+            DeviceToken.objects.filter(user=user).delete()
+
+        return Response(
+            {"message": "Account deleted successfully."},
+            status=status.HTTP_200_OK,
+        )
+
+
+
+
+class TestJson(APIView):
+    def get(self, request):
+        return Response({'message':"Response from the server"})

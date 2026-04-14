@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from django.contrib.auth import authenticate
 from django.contrib.auth.password_validation import validate_password
-from .models import User
+from .models import User, AccountDeletionOTP
 
 
 class UserRegistrationSerializer(serializers.ModelSerializer):
@@ -80,6 +80,11 @@ class UserLoginSerializer(serializers.Serializer):
         password = attrs.get('password')
 
         if email and password:
+            existing_user = User.objects.filter(email=email).first()
+            if existing_user and getattr(existing_user, 'is_soft_deleted', False):
+                raise serializers.ValidationError(
+                    'This account has been deleted. Please register again to restore it.'
+                )
             user = authenticate(request=self.context.get('request'),
                               username=email, password=password)
             if not user:
@@ -306,3 +311,33 @@ class EmailVerificationSerializer(serializers.Serializer):
             raise serializers.ValidationError(
                 {"otp": "Invalid OTP or email."}
             )
+
+
+class DeleteAccountConfirmSerializer(serializers.Serializer):
+    """
+    Serializer for confirming account deletion with OTP.
+    """
+    otp = serializers.CharField(required=True, max_length=6, min_length=6)
+
+    def validate(self, attrs):
+        user = self.context['request'].user
+        otp = attrs.get('otp')
+
+        otp_obj = AccountDeletionOTP.objects.filter(
+            email=user.email,
+            otp=otp,
+            is_used=False,
+        ).order_by('-created_at').first()
+
+        if not otp_obj:
+            raise serializers.ValidationError(
+                {"otp": "Invalid OTP."}
+            )
+
+        if not otp_obj.is_valid():
+            raise serializers.ValidationError(
+                {"otp": "OTP has expired. Please request a new one."}
+            )
+
+        attrs['otp_obj'] = otp_obj
+        return attrs

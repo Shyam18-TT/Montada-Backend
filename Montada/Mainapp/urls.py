@@ -13,6 +13,9 @@ from .views import (
     resend_verification_otp_view,
     resend_password_reset_otp_view,
     SaveFCMToken,
+    RequestAccountDeletionOTPView,
+    ConfirmAccountDeletionView,
+    TestJson
 )
 
 app_name = 'Mainapp'
@@ -33,6 +36,11 @@ urlpatterns = [
     path('reset-password/', reset_password_view, name='reset_password'),
     path('resend-password-reset-otp/', resend_password_reset_otp_view, name='resend_password_reset_otp'),
 
-    path('save-fcm-token/', SaveFCMToken.as_view(), name='save_fcm_token')
+    path('save-fcm-token/', SaveFCMToken.as_view(), name='save_fcm_token'),
+    path('delete-account/request-otp/', RequestAccountDeletionOTPView.as_view(), name='request_account_deletion_otp'),
+    path('delete-account/confirm/', ConfirmAccountDeletionView.as_view(), name='confirm_account_deletion'),
+
+    path('test-json', TestJson.as_view(), name='test-json'),
+
 ]
 

@@ -46,6 +46,15 @@ class User(AbstractUser):
         blank=True,
         help_text='If set, admin-granted in-app access ends at this time (null = no expiry until revoked).',
     )
+    is_soft_deleted = models.BooleanField(
+        default=False,
+        help_text='Marks the account as soft deleted without removing database history.',
+    )
+    soft_deleted_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text='When the account was soft deleted.',
+    )
     is_verified = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -146,6 +155,39 @@ class EmailVerificationOTP(models.Model):
         expiry_time = self.created_at + timedelta(minutes=expiry_minutes)
         return timezone.now() > expiry_time
     
+    def is_valid(self):
+        """Check if OTP is valid (not used and not expired)"""
+        return not self.is_used and not self.is_expired()
+
+
+class AccountDeletionOTP(models.Model):
+    """
+    Model to store OTP codes for account deletion confirmation.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    email = models.EmailField()
+    otp = models.CharField(max_length=6)
+    created_at = models.DateTimeField(auto_now_add=True)
+    is_used = models.BooleanField(default=False)
+
+    class Meta:
+        verbose_name = 'Account Deletion OTP'
+        verbose_name_plural = 'Account Deletion OTPs'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Deletion OTP for {self.email}"
+
+    @staticmethod
+    def generate_otp():
+        """Generate a 6-digit OTP"""
+        return str(random.randint(100000, 999999))
+
+    def is_expired(self, expiry_minutes=10):
+        """Check if OTP has expired (default 10 minutes)"""
+        expiry_time = self.created_at + timedelta(minutes=expiry_minutes)
+        return timezone.now() > expiry_time
+
     def is_valid(self):
         """Check if OTP is valid (not used and not expired)"""
         return not self.is_used and not self.is_expired()
