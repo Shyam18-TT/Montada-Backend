@@ -163,10 +163,10 @@ DATABASES = {
         # 'HOST': '3.76.105.23',
         # 'PORT': '1433',
 
-        # 'OPTIONS': {
-        #     'driver': 'ODBC Driver 18 for SQL Server',
-        #     'extra_params': 'Encrypt=no;TrustServerCertificate=yes;',
-        # },
+        'OPTIONS': {
+            'driver': 'ODBC Driver 18 for SQL Server',
+            'extra_params': 'Encrypt=no;TrustServerCertificate=yes;',
+        },
        
     },
 
@@ -178,10 +178,10 @@ DATABASES = {
         'HOST': '213.175.205.19',
         'PORT': '1433',
 
-        #  'OPTIONS': {
-        #     'driver': 'ODBC Driver 18 for SQL Server',
-        #     'extra_params': 'Encrypt=no;TrustServerCertificate=yes;',
-        # },
+         'OPTIONS': {
+            'driver': 'ODBC Driver 18 for SQL Server',
+            'extra_params': 'Encrypt=no;TrustServerCertificate=yes;',
+        },
        
         
     },
