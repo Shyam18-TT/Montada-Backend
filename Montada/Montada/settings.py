@@ -148,25 +148,25 @@ CHANNEL_LAYERS = {
 
 DATABASES = {
         'default': {
-        # 'ENGINE': 'mssql',
-        # 'NAME': 'MotadaApp',
-        # 'USER': 'MontadaUser',
-        # 'PASSWORD': 'A7f#Q9mL@2xR!K8Z',
-        # 'HOST' : '185.4.178.134',
-        # 'PORT': '1433',
-        # 'CONN_MAX_AGE':120,
-
         'ENGINE': 'mssql',
-        'NAME': 'MontadaApp',
+        'NAME': 'MotadaApp',
         'USER': 'MontadaUser',
         'PASSWORD': 'A7f#Q9mL@2xR!K8Z',
-        'HOST': '3.76.105.23',
+        'HOST' : '185.4.178.134',
         'PORT': '1433',
+        'CONN_MAX_AGE':120,
 
-        'OPTIONS': {
-            'driver': 'ODBC Driver 18 for SQL Server',
-            'extra_params': 'Encrypt=no;TrustServerCertificate=yes;',
-        },
+        # 'ENGINE': 'mssql',
+        # 'NAME': 'MontadaApp',
+        # 'USER': 'MontadaUser',
+        # 'PASSWORD': 'A7f#Q9mL@2xR!K8Z',
+        # 'HOST': '3.76.105.23',
+        # 'PORT': '1433',
+
+        # 'OPTIONS': {
+        #     'driver': 'ODBC Driver 18 for SQL Server',
+        #     'extra_params': 'Encrypt=no;TrustServerCertificate=yes;',
+        # },
        
     },
 
@@ -178,10 +178,10 @@ DATABASES = {
         'HOST': '213.175.205.19',
         'PORT': '1433',
 
-         'OPTIONS': {
-            'driver': 'ODBC Driver 18 for SQL Server',
-            'extra_params': 'Encrypt=no;TrustServerCertificate=yes;',
-        },
+        #  'OPTIONS': {
+        #     'driver': 'ODBC Driver 18 for SQL Server',
+        #     'extra_params': 'Encrypt=no;TrustServerCertificate=yes;',
+        # },
        
         
     },
