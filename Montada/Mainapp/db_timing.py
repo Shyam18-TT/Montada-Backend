@@ -14,7 +14,9 @@ def _timestamp():
 
 
 def _query_wrapper(execute, sql, params, many, context):
-    alias = getattr(context.get("connection"), "alias", "default")
+    context = context or {}
+    connection = context.get("connection") if isinstance(context, dict) else None
+    alias = getattr(connection, "alias", "default")
     logger.info("QUERY_START alias=%s time=%s", alias, _timestamp())
     try:
         return execute(sql, params, many, context)
@@ -24,6 +26,12 @@ def _query_wrapper(execute, sql, params, many, context):
 
 def _install_wrapper(connection):
     if getattr(connection, "_montada_db_timing_installed", False):
+        return
+    if not hasattr(connection, "execute_wrappers"):
+        logger.warning(
+            "DB timing logging skipped for alias=%s because execute_wrappers is unavailable.",
+            getattr(connection, "alias", "default"),
+        )
         return
     connection.execute_wrappers.append(_query_wrapper)
     connection._montada_db_timing_installed = True
@@ -35,7 +43,10 @@ def _on_connection_created(sender, connection, **kwargs):
 
 
 def setup_db_timing_logging():
-    connection_created.connect(_on_connection_created, dispatch_uid=_SIGNAL_UID)
-    for connection in connections.all():
-        if connection.connection is not None:
-            _install_wrapper(connection)
+    try:
+        connection_created.connect(_on_connection_created, dispatch_uid=_SIGNAL_UID)
+        for connection in connections.all():
+            if connection.connection is not None:
+                _install_wrapper(connection)
+    except Exception:
+        logger.exception("Failed to initialize DB timing logging.")
