@@ -11,13 +11,14 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import NewsArticle, NewsCategory, NewsArticleLike, NewsArticleComment
+from .models import NewsArticle, NewsCategory, NewsArticleLike, NewsArticleComment, LiveNews
 from Subscriptions.models import AnalystContentPlan, UserAnalystPlanSubscription
 from .serializers import (
     NewsArticleCreateSerializer,
     NewsArticleListSerializer,
     NewsCategorySerializer,
     NewsArticleCommentSerializer,
+    LiveNewsSerializer,
 )
 from Subscriptions.access import check_active_subscription
 from Subscriptions.analyst_plan_access import analyst_subscription_free_access_enabled
@@ -61,6 +62,12 @@ class AnalystNewsArticleCreateView(generics.CreateAPIView):
 
 class NewsArticleListPagination(PageNumberPagination):
     page_size = 10
+    page_size_query_param = "page_size"
+    max_page_size = 100
+
+
+class LiveNewsPagination(PageNumberPagination):
+    page_size = 20
     page_size_query_param = "page_size"
     max_page_size = 100
 
@@ -948,4 +955,45 @@ class ForexCategoryNewsView(APIView):
         if denied is not None:
             return denied
         return eodhd_category_news_response_for_request(request)
+
+
+class LiveNewsListView(generics.ListAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = LiveNewsSerializer
+    pagination_class = LiveNewsPagination
+
+    def get_queryset(self):
+        qs = LiveNews.objects.filter(is_active=True).order_by(
+            "-source_updated_at",
+            "-source_created_at",
+            "-created_at",
+        )
+
+        search = (self.request.query_params.get("search") or "").strip()
+        if search:
+            qs = qs.filter(
+                Q(title__icontains=search)
+                | Q(teaser__icontains=search)
+                | Q(body__icontains=search)
+            )
+
+        news_type = (self.request.query_params.get("news_type") or "").strip()
+        if news_type:
+            qs = qs.filter(news_type__iexact=news_type)
+
+        channel = (self.request.query_params.get("channel") or "").strip()
+        if channel:
+            qs = qs.filter(channels__icontains=channel)
+
+        symbol = (self.request.query_params.get("symbol") or "").strip()
+        if symbol:
+            qs = qs.filter(securities__icontains=symbol)
+
+        return qs
+
+    def list(self, request, *args, **kwargs):
+        denied = check_active_subscription(request.user)
+        if denied is not None:
+            return denied
+        return super().list(request, *args, **kwargs)
 

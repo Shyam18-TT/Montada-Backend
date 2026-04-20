@@ -7,6 +7,7 @@ django-cors-headers==3.14.0
 djangorestframework==3.15.2
 djangorestframework-simplejwt==5.5.0
 firebase-admin==6.8.0
+langid==1.1.6
 MetaTrader5>=5.0.45
 MT5Manager>=5.0.45  # optional: for run_price_alerts --use-mt5-manager
 mssql-django==1.5
@@ -16,3 +17,4 @@ pyodbc==5.1.0
 pytz==2022.7.1
 sqlparse==0.5.0
 stripe==14.4.1
+websocket-client==1.8.0

@@ -4,6 +4,7 @@ from . import views
 app_name = "News"
 
 urlpatterns = [
+    path("live-news/", views.LiveNewsListView.as_view(), name="live_news_list"),
     path("articles/", views.NewsArticleListView.as_view(), name="article_list"),
     path("articles/create/", views.AnalystNewsArticleCreateView.as_view(), name="article_create"),
     path("articles/<uuid:pk>/", views.AnalystNewsArticleDetailView.as_view(), name="article_detail"),

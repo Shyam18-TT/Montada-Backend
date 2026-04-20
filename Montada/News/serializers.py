@@ -1,6 +1,6 @@
 from django.conf import settings
 from rest_framework import serializers
-from .models import NewsArticle, NewsCategory, Tag, NewsArticleLike, NewsArticleComment
+from .models import NewsArticle, NewsCategory, Tag, NewsArticleLike, NewsArticleComment, LiveNews
 
 
 def _build_media_url(value):
@@ -145,3 +145,35 @@ class NewsArticleCreateSerializer(serializers.ModelSerializer):
         if data.get("featured_image"):
             data["featured_image"] = _build_media_url(instance.featured_image)
         return data
+
+
+class LiveNewsSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = LiveNews
+        fields = (
+            "id",
+            "provider_event_id",
+            "provider_content_id",
+            "provider_revision_id",
+            "original_id",
+            "action",
+            "news_type",
+            "language",
+            "title",
+            "teaser",
+            "body",
+            "source_url",
+            "authors",
+            "tags",
+            "securities",
+            "channels",
+            "images",
+            "primary_image_url",
+            "source_created_at",
+            "source_updated_at",
+            "source_timestamp",
+            "is_active",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = fields

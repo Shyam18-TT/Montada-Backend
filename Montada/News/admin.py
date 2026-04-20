@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import NewsCategory, Tag, NewsArticle, NewsArticleLike, NewsArticleComment
+from .models import NewsCategory, Tag, NewsArticle, NewsArticleLike, NewsArticleComment, LiveNews
 
 
 @admin.register(NewsCategory)
@@ -45,3 +45,19 @@ class NewsArticleCommentAdmin(admin.ModelAdmin):
     def content_preview(self, obj):
         return (obj.content or "")[:60] + ("..." if len(obj.content or "") > 60 else "")
     content_preview.short_description = "Content"
+
+
+@admin.register(LiveNews)
+class LiveNewsAdmin(admin.ModelAdmin):
+    list_display = (
+        "title",
+        "news_type",
+        "language",
+        "action",
+        "provider_content_id",
+        "source_updated_at",
+        "is_active",
+    )
+    list_filter = ("news_type", "language", "action", "is_active", "source_updated_at")
+    search_fields = ("title", "teaser", "body", "source_url")
+    readonly_fields = ("created_at", "updated_at")
