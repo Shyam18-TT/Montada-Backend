@@ -16,7 +16,6 @@ venv/
 .env/
 env/
 
-Montada/Montada/settings.py
 Montada/media/*
 
 Montada/credentials/*
