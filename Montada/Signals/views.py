@@ -1,3 +1,5 @@
+import logging
+
 from django.utils import timezone
 from django.db.models import Count, Q
 from django.contrib.auth import get_user_model
@@ -8,6 +10,7 @@ from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
 
 from Followers.models import Follow
+from Dashboard.realtime import broadcast_notifications
 from Subscriptions.analyst_plan_access import (
     filter_visible_analyst_ids_for_signals,
     user_has_analyst_signal_access,
@@ -30,6 +33,10 @@ from .serializers import (
     PriceAlertCreateSerializer,
     PriceAlertSerializer,
 )
+
+
+logger = logging.getLogger(__name__)
+User = get_user_model()
 
 
 def _log_signal_closed(user, signal):
@@ -59,6 +66,136 @@ def _log_signal_closed(user, signal):
         entity_type=ActivityLog.EntityType.SIGNAL,
         metadata={"signal_id": str(signal.id), "instrument": instrument_symbol, "direction": signal.direction},
     )
+
+
+def _create_and_broadcast_notifications(users, *, title, body, notification_type="INFO", redirect_url=None):
+    if not users:
+        return
+    try:
+        from Mainapp.models import UserNotification
+
+        created_notifications = [
+            UserNotification(
+                user=user,
+                title=title,
+                message=body,
+                notification_type=notification_type,
+                redirect_url=redirect_url,
+            )
+            for user in users
+        ]
+        UserNotification.objects.bulk_create(created_notifications)
+        broadcast_notifications(
+            UserNotification.objects.filter(
+                id__in=[notification.id for notification in created_notifications]
+            ),
+            event_name="created",
+        )
+    except Exception:
+        logger.exception("Failed to create/broadcast in-app notifications.")
+
+
+def _send_push_notifications(users, *, title, body, data):
+    if not users:
+        return
+    try:
+        from firebase import send_push_to_users
+
+        send_push_to_users(
+            users=users,
+            title=title,
+            body=body,
+            data=data,
+        )
+    except Exception:
+        logger.exception("Failed to send push notifications.")
+
+
+def _get_signal_notification_recipients(analyst):
+    from Subscriptions.models import AnalystContentPlan, UserAnalystPlanSubscription
+
+    now = timezone.now()
+    recipient_ids = (
+        UserAnalystPlanSubscription.objects.filter(
+            status=UserAnalystPlanSubscription.Status.ACTIVE,
+            end_date__gte=now,
+            plan__is_active=True,
+            plan__analyst=analyst,
+            plan__scope__in=[
+                AnalystContentPlan.Scope.SIGNALS,
+                AnalystContentPlan.Scope.ALL,
+            ],
+            subscriber__sent_follow_requests__followed=analyst,
+            subscriber__sent_follow_requests__status=Follow.Status.ACCEPTED,
+            subscriber__sent_follow_requests__is_active=True,
+        )
+        .values_list("subscriber_id", flat=True)
+        .distinct()
+    )
+    return list(User.objects.filter(id__in=recipient_ids).distinct())
+
+
+def _notify_analyst_signal_applied(applied):
+    signal = applied.signal
+    analyst = signal.analyst if signal else None
+    trader = applied.trader
+    if not analyst or not trader:
+        return
+
+    trader_name = getattr(trader, "name", None) or getattr(trader, "username", None) or getattr(trader, "email", "A trader")
+    symbol = signal.instrument.symbol if signal.instrument else "signal"
+    timeframe = signal.timeframe.code if signal.timeframe else ""
+    title = "Signal applied by trader"
+    body = (
+        f"{trader_name} applied your {signal.direction} signal for {symbol}"
+        + (f" ({timeframe})." if timeframe else ".")
+    )
+    data_payload = {
+        "type": "signal_applied",
+        "signal_id": str(signal.id),
+        "applied_signal_id": str(applied.id),
+        "trader_id": str(trader.id),
+        "symbol": symbol,
+        "direction": signal.direction or "",
+        "timeframe": timeframe,
+    }
+
+    _create_and_broadcast_notifications([analyst], title=title, body=body, notification_type="INFO")
+    _send_push_notifications([analyst], title=title, body=body, data=data_payload)
+
+
+def _notify_signal_published(signal, *, old_status=None):
+    if not signal or signal.status != TradingSignal.Status.OPEN or old_status == TradingSignal.Status.OPEN:
+        return
+
+    recipients = _get_signal_notification_recipients(signal.analyst)
+    if not recipients:
+        return
+
+    analyst_name = (
+        getattr(signal.analyst, "name", None)
+        or getattr(signal.analyst, "username", None)
+        or getattr(signal.analyst, "email", "Analyst")
+    )
+    symbol = signal.instrument.symbol if signal.instrument else "signal"
+    timeframe = signal.timeframe.code if signal.timeframe else ""
+    title = f"{analyst_name} published a new signal"
+    body = (
+        f"{analyst_name} published a {signal.direction} signal for {symbol}"
+        + (f" ({timeframe})." if timeframe else ".")
+    )
+    data_payload = {
+        "type": "signal_published",
+        "signal_id": str(signal.id),
+        "analyst_id": str(signal.analyst_id),
+        "symbol": symbol,
+        "direction": signal.direction or "",
+        "status": signal.status or "",
+        "timeframe": timeframe,
+    }
+
+    _create_and_broadcast_notifications(recipients, title=title, body=body, notification_type="INFO")
+    _send_push_notifications(recipients, title=title, body=body, data=data_payload)
 
 
 class IsAnalystPermission(permissions.BasePermission):
@@ -120,6 +257,7 @@ class CreateTradingSignalView(generics.CreateAPIView):
                 entity_type=ActivityLog.EntityType.SIGNAL,
                 metadata={"signal_id": str(signal.id), "instrument": instrument_symbol, "direction": signal.direction},
             )
+        _notify_signal_published(signal)
         return Response({
             'message': 'Trading signal created successfully.',
             'signal': serializer.data
@@ -264,6 +402,7 @@ class AnalystSignalUpdateView(generics.RetrieveUpdateAPIView):
         serializer = self.get_serializer(instance, data=request.data, partial=partial)
         serializer.is_valid(raise_exception=True)
         self.perform_update(serializer)
+        _notify_signal_published(instance, old_status=old_status)
         if ActivityLog and old_status != TradingSignal.Status.CLOSED and instance.status == TradingSignal.Status.CLOSED:
             _log_signal_closed(request.user, instance)
         return Response({
@@ -288,6 +427,7 @@ class AnalystSignalUpdateView(generics.RetrieveUpdateAPIView):
         serializer = self.get_serializer(instance, data=data, partial=True)
         serializer.is_valid(raise_exception=True)
         self.perform_update(serializer)
+        _notify_signal_published(instance, old_status=old_status)
         if ActivityLog and old_status != TradingSignal.Status.CLOSED and instance.status == TradingSignal.Status.CLOSED:
             _log_signal_closed(request.user, instance)
         return Response({
@@ -588,6 +728,7 @@ class TraderApplySignalView(generics.GenericAPIView):
             signal=signal,
             note=note or None
         )
+        _notify_analyst_signal_applied(applied)
         out_serializer = AppliedSignalSerializer(applied)
         return Response(
             {
@@ -813,7 +954,7 @@ class SignalPushNotificationView(generics.GenericAPIView):
         db_error = None
         try:
             from Mainapp.models import UserNotification
-            UserNotification.objects.bulk_create([
+            created_notifications = [
                 UserNotification(
                     user=recipient,
                     title=title,
@@ -821,7 +962,14 @@ class SignalPushNotificationView(generics.GenericAPIView):
                     notification_type="INFO",
                 )
                 for recipient in recipient_list
-            ])
+            ]
+            UserNotification.objects.bulk_create(created_notifications)
+            broadcast_notifications(
+                UserNotification.objects.filter(
+                    id__in=[notification.id for notification in created_notifications]
+                ),
+                event_name="created",
+            )
         except Exception as exc:
             db_error = str(exc)
 

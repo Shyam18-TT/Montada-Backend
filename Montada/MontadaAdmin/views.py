@@ -40,6 +40,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 
 from News.views import eodhd_category_news_response_for_request
+from Dashboard.realtime import broadcast_notifications
 from Mainapp.db_timing import log_manual_exception, log_manual_timing
 
 User = get_user_model()
@@ -3167,7 +3168,7 @@ class AdminFCMBroadcastView(APIView):
         notification_type = _PUSH_CATEGORY_MAP.get(category, "INFO")
         try:
             from Mainapp.models import UserNotification
-            UserNotification.objects.bulk_create([
+            created_notifications = [
                 UserNotification(
                     user=user,
                     title=title,
@@ -3176,7 +3177,14 @@ class AdminFCMBroadcastView(APIView):
                     redirect_url=redirect_url,
                 )
                 for user in recipient_list
-            ])
+            ]
+            UserNotification.objects.bulk_create(created_notifications)
+            broadcast_notifications(
+                UserNotification.objects.filter(
+                    id__in=[notification.id for notification in created_notifications]
+                ),
+                event_name="created",
+            )
         except Exception as db_exc:
             return Response(
                 {"error": f"Failed to save notifications to DB: {db_exc}"},

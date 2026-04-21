@@ -13,13 +13,18 @@ os.environ.setdefault("DJANGO_SETTINGS_MODULE", "Montada.settings")
 django_asgi_app = get_asgi_application()
 
 from chat.routing import websocket_urlpatterns as chat_websocket_urlpatterns
+from Dashboard.routing import websocket_urlpatterns as dashboard_websocket_urlpatterns
 from News.routing import websocket_urlpatterns as news_websocket_urlpatterns
 
 application = ProtocolTypeRouter(
     {
         "http": django_asgi_app,
         "websocket": AllowedHostsOriginValidator(
-            URLRouter(chat_websocket_urlpatterns + news_websocket_urlpatterns),
+            URLRouter(
+                chat_websocket_urlpatterns
+                + dashboard_websocket_urlpatterns
+                + news_websocket_urlpatterns
+            ),
         ),
     }
 )
