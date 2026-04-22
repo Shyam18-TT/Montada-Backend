@@ -24,7 +24,7 @@ except ImportError:  # pragma: no cover - fallback for environments missing the 
 logger = logging.getLogger(__name__)
 
 LIVE_NEWS_GROUP_NAME = "live_news_stream"
-ALLOWED_LIVE_NEWS_LANGUAGES = {"ar", "en", "zh"}
+FRONTEND_LIVE_NEWS_LANGUAGES = {"ar", "en", "zh"}
 
 
 def _parse_dt(value):
@@ -53,6 +53,12 @@ def _strip_markup(value):
     text = re.sub(r"https?://\S+", " ", text)
     text = re.sub(r"\s+", " ", text)
     return text.strip()
+
+
+def _word_count(text):
+    if not text:
+        return 0
+    return len(re.findall(r"[A-Za-z\u00C0-\u024F]+", text))
 
 
 def _count_language_markers(text):
@@ -96,8 +102,28 @@ def _heuristic_language_code(text):
         return "ja"
     if cjk_count >= 2:
         return "zh"
-    if latin_count >= 3 and arabic_count == 0 and korean_count == 0 and cjk_count == 0 and japanese_kana_count == 0:
-        return "en"
+    return "unknown"
+
+
+def _normalize_language_code(language):
+    normalized = (language or "").strip().lower().replace("_", "-")
+    if not normalized:
+        return ""
+
+    primary = normalized.split("-", 1)[0]
+    alias_map = {
+        "zh-cn": "zh",
+        "zh-tw": "zh",
+        "zh-hans": "zh",
+        "zh-hant": "zh",
+        "iw": "he",
+    }
+    if normalized in alias_map:
+        return alias_map[normalized]
+    if primary in alias_map:
+        return alias_map[primary]
+    if re.fullmatch(r"[a-z]{2,3}", primary):
+        return primary
     return "unknown"
 
 
@@ -115,7 +141,8 @@ def _library_detect_language(text):
         logger.exception("Language detection failed for live news content")
         return None
 
-    return (language or "").lower() or None
+    normalized_language = _normalize_language_code(language)
+    return normalized_language or None
 
 
 def _detect_text_language(text):
@@ -127,11 +154,38 @@ def _detect_text_language(text):
     if heuristic_language in {"ar", "ko", "ja", "zh"}:
         return heuristic_language
 
+    if _word_count(cleaned_text) < 2 and len(cleaned_text) < 12:
+        return heuristic_language
+
     language = _library_detect_language(cleaned_text)
-    if language:
+    if language and language != "unknown":
         return language
 
     return heuristic_language
+
+
+def _pick_weighted_language(*entries):
+    scores = {}
+    for language, text, base_weight in entries:
+        if language == "unknown":
+            continue
+
+        word_count = _word_count(text)
+        if word_count < 3:
+            continue
+
+        score = min(word_count, 40) * base_weight
+        scores[language] = scores.get(language, 0) + score
+
+    if not scores:
+        return None
+
+    ranked_scores = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    best_language, best_score = ranked_scores[0]
+    second_score = ranked_scores[1][1] if len(ranked_scores) > 1 else 0
+    if best_score > second_score:
+        return best_language
+    return None
 
 
 def detect_news_language(title=None, teaser=None, body=None):
@@ -147,27 +201,35 @@ def detect_news_language(title=None, teaser=None, body=None):
     teaser_language = _detect_text_language(teaser_text)
     body_language = _detect_text_language(body_text)
     content_language = _detect_text_language(content_text)
+    title_words = _word_count(title_text)
+    teaser_words = _word_count(teaser_text)
+    body_words = _word_count(body_text)
+    content_words = _word_count(content_text)
 
-    if (
-        content_language not in {"unknown", "en"}
-        and len(content_text) >= 120
-        and title_language in {"unknown", "en"}
-    ):
+    if content_language != "unknown" and content_words >= 6:
         return content_language
 
+    if body_language != "unknown" and body_words >= 5:
+        return body_language
+
+    if teaser_language != "unknown" and teaser_words >= 5:
+        return teaser_language
+
     if (
-        body_language not in {"unknown", "en"}
-        and len(body_text) >= 80
-        and title_language in {"unknown", "en"}
+        body_language != "unknown"
+        and body_words >= 5
+        and teaser_language == body_language
     ):
         return body_language
 
-    if (
-        teaser_language not in {"unknown", "en"}
-        and len(teaser_text) >= 40
-        and title_language in {"unknown", "en"}
-    ):
-        return teaser_language
+    weighted_language = _pick_weighted_language(
+        (title_language, title_text, 1),
+        (teaser_language, teaser_text, 2),
+        (body_language, body_text, 3),
+        (content_language, content_text, 2),
+    )
+    if weighted_language:
+        return weighted_language
 
     if title_language != "unknown":
         return title_language
@@ -182,7 +244,11 @@ def detect_news_language(title=None, teaser=None, body=None):
 
 
 def is_supported_live_news_language(language):
-    return (language or "").strip().lower() in ALLOWED_LIVE_NEWS_LANGUAGES
+    return bool(_normalize_language_code(language))
+
+
+def is_frontend_live_news_language(language):
+    return _normalize_language_code(language) in FRONTEND_LIVE_NEWS_LANGUAGES
 
 
 def _primary_image_url(images):
@@ -356,8 +422,6 @@ def save_live_news_payload(payload, *, broadcast=False):
     normalized = normalize_benzinga_payload(payload)
     if not normalized:
         return None, False, False
-    if not is_supported_live_news_language(normalized.get("language")):
-        return None, False, False
 
     existing = LiveNews.objects.filter(
         provider_content_id=normalized["provider_content_id"]
@@ -365,13 +429,36 @@ def save_live_news_payload(payload, *, broadcast=False):
     if existing and _is_stale_or_unchanged(existing, normalized):
         return existing, False, False
 
+    if not is_frontend_live_news_language(normalized.get("language")):
+        if not existing:
+            return None, False, False
+
+        previously_visible = (
+            existing.is_active and is_frontend_live_news_language(existing.language)
+        )
+        existing.delete()
+        if broadcast and previously_visible:
+            broadcast_live_news(existing, event_name="deleted")
+        return None, False, True
+
     instance, created = LiveNews.objects.update_or_create(
         provider_content_id=normalized["provider_content_id"],
         defaults=normalized,
     )
     if broadcast:
-        event_name = "created" if created else str(normalized.get("action") or "updated").lower()
-        broadcast_live_news(instance, event_name=event_name)
+        current_is_frontend_visible = (
+            instance.is_active and is_frontend_live_news_language(instance.language)
+        )
+        previous_is_frontend_visible = (
+            bool(existing)
+            and existing.is_active
+            and is_frontend_live_news_language(existing.language)
+        )
+        if current_is_frontend_visible:
+            event_name = "created" if created else str(normalized.get("action") or "updated").lower()
+            broadcast_live_news(instance, event_name=event_name)
+        elif previous_is_frontend_visible:
+            broadcast_live_news(instance, event_name="deleted")
     return instance, created, True
 
 

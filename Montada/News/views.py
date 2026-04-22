@@ -11,6 +11,7 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from .live_news_service import FRONTEND_LIVE_NEWS_LANGUAGES
 from .models import NewsArticle, NewsCategory, NewsArticleLike, NewsArticleComment, LiveNews
 from Subscriptions.models import AnalystContentPlan, UserAnalystPlanSubscription
 from .serializers import (
@@ -963,7 +964,10 @@ class LiveNewsListView(generics.ListAPIView):
     pagination_class = LiveNewsPagination
 
     def get_queryset(self):
-        qs = LiveNews.objects.filter(is_active=True).order_by(
+        qs = LiveNews.objects.filter(
+            is_active=True,
+            language__in=FRONTEND_LIVE_NEWS_LANGUAGES,
+        ).order_by(
             "-source_updated_at",
             "-source_created_at",
             "-created_at",
