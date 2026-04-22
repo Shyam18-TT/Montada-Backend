@@ -973,6 +973,10 @@ class LiveNewsListView(generics.ListAPIView):
             "-created_at",
         )
 
+        language = (self.request.query_params.get("language") or "").strip().lower()
+        if language in FRONTEND_LIVE_NEWS_LANGUAGES:
+            qs = qs.filter(language=language)
+
         search = (self.request.query_params.get("search") or "").strip()
         if search:
             qs = qs.filter(
