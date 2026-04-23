@@ -1,6 +1,7 @@
 """
 Admin dashboard views: stats cards with date range and percentage change.
 """
+import logging
 import json
 import time
 import urllib.error
@@ -44,6 +45,7 @@ from Dashboard.realtime import broadcast_notifications
 from Mainapp.db_timing import log_manual_exception, log_manual_timing
 
 User = get_user_model()
+logger = logging.getLogger(__name__)
 
 try:
     from rest_framework_simplejwt.tokens import RefreshToken
@@ -3186,6 +3188,13 @@ class AdminFCMBroadcastView(APIView):
                 event_name="created",
             )
         except Exception as db_exc:
+            logger.exception(
+                "Admin broadcast failed while saving notifications. "
+                "segment=%s category=%s recipients=%s",
+                segment,
+                category,
+                recipient_count,
+            )
             return Response(
                 {"error": f"Failed to save notifications to DB: {db_exc}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -3218,8 +3227,27 @@ class AdminFCMBroadcastView(APIView):
                 )
                 fcm_success = fcm_result.get("success_count", 0)
                 fcm_failure = fcm_result.get("failure_count", 0)
+                if fcm_failure:
+                    logger.warning(
+                        "Admin broadcast FCM partial failure. segment=%s category=%s "
+                        "recipients=%s tokens=%s success=%s failure=%s",
+                        segment,
+                        category,
+                        recipient_count,
+                        device_tokens_found,
+                        fcm_success,
+                        fcm_failure,
+                    )
             except Exception:
                 # FCM failure is non-fatal — DB notifications already saved
+                logger.exception(
+                    "Admin broadcast FCM send failed. segment=%s category=%s "
+                    "recipients=%s tokens=%s",
+                    segment,
+                    category,
+                    recipient_count,
+                    device_tokens_found,
+                )
                 fcm_failure = device_tokens_found
 
         return Response(
