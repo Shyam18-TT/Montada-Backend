@@ -47,6 +47,7 @@ except ImportError:
 _manager_tick_cache = {}
 _manager_cache_lock = threading.Lock()
 _manager_required_symbols = set()
+_manager_pending_symbols = set()
 _manager_shutdown = threading.Event()
 _manager_thread = None
 _manager_connected = False
@@ -86,6 +87,7 @@ def _manager_tick_sink_class():
                 if symbol and (bid is not None or ask is not None):
                     with _manager_cache_lock:
                         _manager_tick_cache[symbol] = {"bid": float(bid) if bid is not None else None, "ask": float(ask) if ask is not None else None}
+                        _manager_pending_symbols.add(symbol)
                         if symbol not in _manager_first_tick_logged:
                             _manager_first_tick_logged.add(symbol)
                             print("[CHECK] MT5 Manager: first tick received for %s (bid=%s)" % (symbol, bid))
@@ -467,7 +469,7 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
-        global _manager_thread, _manager_shutdown, _manager_required_symbols
+        global _manager_thread, _manager_shutdown, _manager_required_symbols, _manager_pending_symbols
 
         interval = max(1, options["interval"])
         run_once = options["once"]
@@ -500,6 +502,7 @@ class Command(BaseCommand):
                     _manager_required_symbols.clear()
                     with _manager_cache_lock:
                         _manager_tick_cache.clear()
+                        _manager_pending_symbols.clear()
                     _manager_thread = threading.Thread(
                         target=_manager_thread_func,
                         args=(server.strip(), login, password, self.stdout, self.style.SUCCESS, self.style.WARNING),
@@ -559,15 +562,18 @@ class Command(BaseCommand):
             self.stdout.write("[CHECK] Connection: mt5clients DB (mt5_prices table).")
 
         try:
-            while True:
-                try:
-                    self._run_check()
-                except Exception as e:
-                    logger.exception("Price alert check failed: %s", e)
+            if self._use_mt5_manager:
+                self._run_realtime_manager_loop(interval=interval, run_once=run_once)
+            else:
+                while True:
+                    try:
+                        self._run_check()
+                    except Exception as e:
+                        logger.exception("Price alert check failed: %s", e)
 
-                if run_once:
-                    break
-                time.sleep(interval)
+                    if run_once:
+                        break
+                    time.sleep(interval)
         finally:
             if self._use_mt5_manager and _MT5_MANAGER_AVAILABLE:
                 _manager_shutdown.set()
@@ -579,6 +585,146 @@ class Command(BaseCommand):
                 mt5.shutdown()
             except Exception:
                 pass
+
+    def _run_realtime_manager_loop(self, *, interval, run_once):
+        self.stdout.write(
+            self.style.SUCCESS(
+                "Using MT5 Manager real-time tick processing for signals and price alerts."
+            )
+        )
+        self._signals_by_symbol = {}
+        self._alerts_by_symbol = {}
+        self._watch_variants_to_symbols = {}
+        self._last_watch_refresh = 0.0
+
+        while True:
+            try:
+                now_monotonic = time.monotonic()
+                if now_monotonic - self._last_watch_refresh >= interval:
+                    self._refresh_realtime_watchlists()
+                    self._last_watch_refresh = now_monotonic
+
+                processed_count = self._process_pending_manager_ticks()
+                if run_once and (processed_count or self._last_watch_refresh):
+                    break
+
+                time.sleep(0.2)
+            except Exception as exc:
+                logger.exception("Real-time MT5 Manager alert processing failed: %s", exc)
+                if run_once:
+                    break
+
+    def _refresh_realtime_watchlists(self):
+        from Signals.models import PriceAlert, TradingSignal
+
+        signals = list(
+            TradingSignal.active.filter(status=TradingSignal.Status.OPEN)
+            .select_related("analyst", "instrument")
+            .only(
+                "id", "analyst_id", "direction", "entry_price", "take_profit", "stop_loss",
+                "instrument_id", "status", "is_win", "is_loss",
+            )
+        )
+        alerts = list(
+            PriceAlert.objects.filter(is_triggered=False)
+            .select_related("instrument", "user")
+        )
+
+        signals_by_symbol = {}
+        alerts_by_symbol = {}
+        watch_variants_to_symbols = {}
+        required_symbols = set()
+
+        for signal in signals:
+            inst = signal.instrument
+            if not inst or not inst.symbol:
+                continue
+            mt5_sym = _normalize_mt5_symbol(inst.symbol)
+            if not mt5_sym:
+                continue
+            signals_by_symbol.setdefault(mt5_sym, []).append(signal)
+            variants = {mt5_sym, *SYMBOL_ALIASES_DB.get(mt5_sym, [])}
+            required_symbols.update(variants)
+            for variant in variants:
+                watch_variants_to_symbols.setdefault(variant, set()).add(mt5_sym)
+
+        for alert in alerts:
+            inst = alert.instrument
+            if not inst or not inst.symbol:
+                continue
+            mt5_sym = _normalize_mt5_symbol(inst.symbol)
+            if not mt5_sym:
+                continue
+            alerts_by_symbol.setdefault(mt5_sym, []).append(alert)
+            variants = {mt5_sym, *SYMBOL_ALIASES_DB.get(mt5_sym, [])}
+            required_symbols.update(variants)
+            for variant in variants:
+                watch_variants_to_symbols.setdefault(variant, set()).add(mt5_sym)
+
+        self._signals_by_symbol = signals_by_symbol
+        self._alerts_by_symbol = alerts_by_symbol
+        self._watch_variants_to_symbols = watch_variants_to_symbols
+
+        with _manager_cache_lock:
+            _manager_required_symbols.clear()
+            _manager_required_symbols.update(required_symbols)
+
+        self.stdout.write(
+            "[CHECK] Realtime watchlist refreshed: %d signal symbol(s), %d alert symbol(s), %d subscribed variant(s)."
+            % (
+                len(signals_by_symbol),
+                len(alerts_by_symbol),
+                len(required_symbols),
+            )
+        )
+
+    def _process_pending_manager_ticks(self):
+        with _manager_cache_lock:
+            pending_symbols = set(_manager_pending_symbols)
+            _manager_pending_symbols.clear()
+
+        if not pending_symbols:
+            return 0
+
+        affected_symbols = set()
+        for pending_symbol in pending_symbols:
+            affected_symbols.update(self._watch_variants_to_symbols.get(pending_symbol, set()))
+
+        processed_count = 0
+        for mt5_sym in affected_symbols:
+            quote = _get_prices_from_mt5_manager([mt5_sym]).get(mt5_sym)
+            if not quote:
+                continue
+            bid = quote.get("bid")
+            ask = quote.get("ask")
+
+            for signal in self._signals_by_symbol.get(mt5_sym, []):
+                hit = _check_signal_hit(signal, bid, ask)
+                if not hit:
+                    continue
+                used_price = ask if (signal.direction or "").upper() == "SELL" and ask is not None else bid
+                _close_signal_and_notify(signal, hit, used_price)
+                processed_count += 1
+                self.stdout.write(
+                    self.style.SUCCESS(
+                        "  >>> Closed signal %s (%s) at %s from realtime tick %s"
+                        % (signal.id, hit, used_price, mt5_sym)
+                    )
+                )
+
+            for alert in self._alerts_by_symbol.get(mt5_sym, []):
+                if not _check_user_alert_hit(alert, bid):
+                    continue
+                _trigger_user_price_alert(alert, bid)
+                processed_count += 1
+                self.stdout.write(
+                    self.style.SUCCESS(
+                        "  >>> Price alert %s triggered for %s at %s (user %s)"
+                        % (alert.id, mt5_sym, bid, alert.user_id)
+                    )
+                )
+
+        return processed_count
 
     def _run_check(self):
         from django.utils import timezone as tz

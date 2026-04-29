@@ -20,6 +20,7 @@ from .serializers import (
     ConversationListSerializer,
     ConversationDetailSerializer,
     ChatMessageSerializer,
+    UserChatSerializer,
     ChatMessageCreateSerializer,
     AnalystBroadcastSerializer,
 )
@@ -60,6 +61,54 @@ def _broadcast_new_message(conversation_id, message_payload):
         logger.debug("Chat broadcast sent to group %s", group_name)
     except Exception as e:
         logger.exception("Chat broadcast failed for conversation %s: %s", conversation_id, e)
+
+
+def _build_chat_notification_payload(conversation, message, recipient):
+    unread_count = conversation.messages.filter(
+        is_deleted=False,
+        read_at__isnull=True,
+    ).exclude(sender=recipient).count()
+    return {
+        "conversation_id": str(conversation.id),
+        "message": json.loads(json.dumps(ChatMessageSerializer(message).data, default=str)),
+        "sender": json.loads(json.dumps(UserChatSerializer(message.sender).data, default=str)),
+        "recipient_id": str(recipient.id),
+        "unread_count": unread_count,
+    }
+
+
+def _broadcast_chat_notification(conversation, message, recipients):
+    try:
+        from asgiref.sync import async_to_sync
+        from channels.layers import get_channel_layer
+
+        from .consumers import get_chat_notification_group_name
+
+        channel_layer = get_channel_layer()
+        if not channel_layer:
+            logger.warning("Chat notification broadcast: no channel layer configured.")
+            return
+
+        for recipient in recipients:
+            notification_payload = _build_chat_notification_payload(
+                conversation,
+                message,
+                recipient,
+            )
+            async_to_sync(channel_layer.group_send)(
+                get_chat_notification_group_name(recipient.id),
+                {
+                    "type": "chat.notification",
+                    "event": "message.created",
+                    "notification": notification_payload,
+                },
+            )
+    except Exception as e:
+        logger.exception(
+            "Chat notification broadcast failed for conversation %s: %s",
+            conversation.id,
+            e,
+        )
 
 
 class ConversationPagination(PageNumberPagination):
@@ -200,6 +249,7 @@ class MessageListCreateView(APIView):
         conv.save(update_fields=["updated_at"])
         payload = ChatMessageSerializer(msg).data
         _broadcast_new_message(str(conv.id), payload)
+        _broadcast_chat_notification(conv, msg, list(conv.participants.exclude(pk=request.user.pk)))
         return Response(payload, status=status.HTTP_201_CREATED)
 
 
@@ -307,6 +357,7 @@ class AnalystBroadcastMessageView(APIView):
             conv.save(update_fields=["updated_at"])
             payload = ChatMessageSerializer(msg, context={"request": request}).data
             _broadcast_new_message(str(conv.id), payload)
+            _broadcast_chat_notification(conv, msg, [recipient])
             sent += 1
 
         return Response(

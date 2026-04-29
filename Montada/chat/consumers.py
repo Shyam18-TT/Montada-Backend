@@ -41,6 +41,10 @@ def _check_participant(conversation_id, user):
     ).exists()
 
 
+def get_chat_notification_group_name(user_id):
+    return f"chat_notifications_{user_id}"
+
+
 class ChatConsumer(AsyncWebsocketConsumer):
     """
     WebSocket connection to a conversation room.
@@ -92,3 +96,57 @@ class ChatConsumer(AsyncWebsocketConsumer):
         message = event.get("message")
         if message is not None:
             await self.send(text_data=json.dumps({"type": "chat.message", "message": message}))
+
+
+class ChatNotificationConsumer(AsyncWebsocketConsumer):
+    async def connect(self):
+        self._joined_group = False
+
+        query = parse_qs(self.scope.get("query_string", b"").decode())
+        tokens = query.get("token", [])
+        token = tokens[0] if tokens else None
+        user = await database_sync_to_async(_get_user_from_token)(token)
+        if not user:
+            await self.close(code=4401)
+            return
+
+        self.scope["user"] = user
+        self.room_group_name = get_chat_notification_group_name(user.id)
+        await self.channel_layer.group_add(self.room_group_name, self.channel_name)
+        self._joined_group = True
+        await self.accept()
+        await self.send(
+            text_data=json.dumps(
+                {
+                    "type": "chat.notifications.connected",
+                    "message": "Chat notification stream connected.",
+                }
+            )
+        )
+
+    async def disconnect(self, close_code):
+        if getattr(self, "_joined_group", False):
+            await self.channel_layer.group_discard(self.room_group_name, self.channel_name)
+
+    async def receive(self, text_data=None, bytes_data=None):
+        if not text_data:
+            return
+        try:
+            data = json.loads(text_data)
+            if data.get("type") == "ping":
+                await self.send(text_data=json.dumps({"type": "pong"}))
+        except (json.JSONDecodeError, Exception):
+            logger.debug("Ignoring invalid chat notification websocket payload.")
+
+    async def chat_notification(self, event):
+        notification = event.get("notification")
+        if notification is not None:
+            await self.send(
+                text_data=json.dumps(
+                    {
+                        "type": "chat.notification",
+                        "event": event.get("event", "message.created"),
+                        "notification": notification,
+                    }
+                )
+            )
