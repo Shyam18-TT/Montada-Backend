@@ -1,4 +1,5 @@
 import importlib
+import hashlib
 import json
 import logging
 import re
@@ -7,6 +8,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
 from html import unescape
+from html.parser import HTMLParser
 
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
@@ -276,6 +278,271 @@ def _content_from_payload(payload):
     return None, payload, payload.get("action"), payload.get("timestamp")
 
 
+def _stable_bigint(value):
+    cleaned = str(value or "").strip()
+    if not cleaned:
+        return None
+    if cleaned.isdigit():
+        return int(cleaned)
+    digest = hashlib.blake2b(cleaned.encode("utf-8"), digest_size=8).digest()
+    return int.from_bytes(digest, "big") & ((1 << 63) - 1)
+
+
+def _with_rss_defaults(payload, *, provider_slug, news_type=None, channel=None):
+    if not isinstance(payload, dict):
+        return payload
+    normalized_provider = str(provider_slug or "rss").strip().lower().replace(" ", "_")
+    merged = dict(payload)
+    merged.setdefault("_provider_slug", normalized_provider)
+    merged.setdefault("_news_type", news_type or f"{normalized_provider}_rss")
+    merged.setdefault("_channel", channel or normalized_provider)
+    return merged
+
+
+class _OpenGraphImageParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.image_url = None
+
+    def handle_starttag(self, tag, attrs):
+        if self.image_url or str(tag).lower() != "meta":
+            return
+
+        attr_map = {str(key).lower(): str(value or "") for key, value in attrs}
+        prop = attr_map.get("property", "").strip().lower()
+        name = attr_map.get("name", "").strip().lower()
+        if prop != "og:image" and name != "og:image":
+            return
+
+        content = attr_map.get("content", "").strip()
+        if content:
+            self.image_url = content
+
+
+class _ArticleMetadataParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.image_url = None
+        self.tags = []
+        self.json_ld_blocks = []
+        self._inside_json_ld = False
+        self._json_ld_buffer = []
+
+    def handle_starttag(self, tag, attrs):
+        lower_tag = str(tag).lower()
+        if lower_tag == "meta":
+            attr_map = {str(key).lower(): str(value or "") for key, value in attrs}
+            prop = attr_map.get("property", "").strip().lower()
+            name = attr_map.get("name", "").strip().lower()
+            content = attr_map.get("content", "").strip()
+
+            if content and not self.image_url and (prop == "og:image" or name == "og:image"):
+                self.image_url = content
+
+            if not content:
+                return
+
+            if name in {"keywords", "news_keywords"}:
+                self.tags.extend(
+                    [item.strip() for item in content.split(",") if item.strip()]
+                )
+            elif prop == "article:tag":
+                self.tags.append(content)
+            return
+
+        if lower_tag == "script":
+            attr_map = {str(key).lower(): str(value or "") for key, value in attrs}
+            if attr_map.get("type", "").strip().lower() == "application/ld+json":
+                self._inside_json_ld = True
+                self._json_ld_buffer = []
+
+    def handle_endtag(self, tag):
+        if self._inside_json_ld and str(tag).lower() == "script":
+            payload = "".join(self._json_ld_buffer).strip()
+            if payload:
+                self.json_ld_blocks.append(payload)
+            self._inside_json_ld = False
+            self._json_ld_buffer = []
+
+    def handle_data(self, data):
+        if self._inside_json_ld:
+            self._json_ld_buffer.append(data)
+
+
+def fetch_open_graph_image_url(url, *, timeout=15):
+    cleaned_url = str(url or "").strip()
+    if not cleaned_url:
+        return None
+
+    req = urllib.request.Request(cleaned_url, method="GET")
+    req.add_header(
+        "User-Agent",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    )
+    req.add_header("Accept", "text/html,application/xhtml+xml")
+
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", errors="ignore")
+    except Exception:
+        logger.exception("Failed to fetch OG image from article url=%s", cleaned_url)
+        return None
+
+    parser = _OpenGraphImageParser()
+    try:
+        parser.feed(body)
+    except Exception:
+        logger.exception("Failed to parse OG image from article url=%s", cleaned_url)
+        return None
+    return parser.image_url
+
+
+def _dedupe_preserve_order(values):
+    seen = set()
+    result = []
+    for value in values or []:
+        cleaned = str(value or "").strip()
+        lowered = cleaned.lower()
+        if cleaned and lowered not in seen:
+            seen.add(lowered)
+            result.append(cleaned)
+    return result
+
+
+def _extract_newsarticle_from_json_ld(payload):
+    if isinstance(payload, dict):
+        type_value = payload.get("@type")
+        types = type_value if isinstance(type_value, list) else [type_value]
+        normalized_types = {str(item).lower() for item in types if item}
+        if "newsarticle" in normalized_types or "article" in normalized_types:
+            return payload
+        for value in payload.values():
+            match = _extract_newsarticle_from_json_ld(value)
+            if match:
+                return match
+    elif isinstance(payload, list):
+        for item in payload:
+            match = _extract_newsarticle_from_json_ld(item)
+            if match:
+                return match
+    return None
+
+
+def _extract_json_ld_article_details(json_ld_blocks):
+    details = {
+        "body": None,
+        "image_url": None,
+        "tags": [],
+    }
+    for block in json_ld_blocks or []:
+        try:
+            payload = json.loads(block)
+        except json.JSONDecodeError:
+            continue
+
+        article = _extract_newsarticle_from_json_ld(payload)
+        if not article:
+            continue
+
+        image = article.get("image")
+        if isinstance(image, list) and image:
+            details["image_url"] = details["image_url"] or str(image[0] or "").strip()
+        elif isinstance(image, dict):
+            details["image_url"] = details["image_url"] or str(image.get("url") or "").strip()
+        elif image:
+            details["image_url"] = details["image_url"] or str(image).strip()
+
+        keywords = article.get("keywords")
+        if isinstance(keywords, str):
+            details["tags"].extend([item.strip() for item in keywords.split(",") if item.strip()])
+        elif isinstance(keywords, list):
+            details["tags"].extend([str(item or "").strip() for item in keywords if str(item or "").strip()])
+
+        article_section = article.get("articleSection")
+        if isinstance(article_section, str) and article_section.strip():
+            details["tags"].append(article_section.strip())
+
+        article_body = article.get("articleBody")
+        if article_body and not details["body"]:
+            body_text = str(article_body).strip()
+            if body_text:
+                details["body"] = "<p>%s</p>" % body_text.replace("\n", "</p><p>")
+    details["tags"] = _dedupe_preserve_order(details["tags"])
+    return details
+
+
+def _extract_article_body_html(page_html):
+    if not page_html:
+        return None
+
+    article_match = re.search(r"(<article\b[^>]*>.*?</article>)", page_html, re.S | re.I)
+    article_html = article_match.group(1) if article_match else page_html
+    block_pattern = re.compile(
+        r"(<(?:p|h2|h3|figure|blockquote|ul|ol)\b[^>]*>.*?</(?:p|h2|h3|figure|blockquote|ul|ol)>)",
+        re.S | re.I,
+    )
+    blocks = []
+    for block in block_pattern.findall(article_html):
+        text = _strip_markup(block).strip().lower()
+        if not text:
+            continue
+        if text in {"author", "related news", "read also", "read next"}:
+            continue
+        if "add fxstreet as preferred source on google" in text:
+            continue
+        blocks.append(block.strip())
+
+    if not blocks:
+        return None
+    return "\n\n".join(blocks)
+
+
+def fetch_rss_article_details(url, *, timeout=15):
+    cleaned_url = str(url or "").strip()
+    if not cleaned_url:
+        return {
+            "body": None,
+            "image_url": None,
+            "tags": [],
+        }
+
+    req = urllib.request.Request(cleaned_url, method="GET")
+    req.add_header(
+        "User-Agent",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    )
+    req.add_header("Accept", "text/html,application/xhtml+xml")
+
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            page_html = resp.read().decode("utf-8", errors="ignore")
+    except Exception:
+        logger.exception("Failed to fetch RSS article details from url=%s", cleaned_url)
+        return {
+            "body": None,
+            "image_url": None,
+            "tags": [],
+        }
+
+    parser = _ArticleMetadataParser()
+    try:
+        parser.feed(page_html)
+    except Exception:
+        logger.exception("Failed to parse RSS article details from url=%s", cleaned_url)
+
+    json_ld_details = _extract_json_ld_article_details(parser.json_ld_blocks)
+    body_html = _extract_article_body_html(page_html) or json_ld_details.get("body")
+    image_url = parser.image_url or json_ld_details.get("image_url")
+    tags = _dedupe_preserve_order(list(parser.tags) + list(json_ld_details.get("tags") or []))
+    return {
+        "body": body_html,
+        "image_url": image_url,
+        "tags": tags,
+    }
+
+
 def normalize_benzinga_payload(payload):
     outer_data, content, action, source_timestamp = _content_from_payload(payload)
     if not isinstance(content, dict):
@@ -319,6 +586,98 @@ def normalize_benzinga_payload(payload):
     }
     if not normalized["title"] and not normalized["teaser"]:
         return None
+    return normalized
+
+
+def normalize_rss_payload(payload):
+    if not isinstance(payload, dict):
+        return None
+
+    provider_slug = str(payload.get("_provider_slug") or payload.get("provider") or "rss").strip().lower().replace(" ", "_")
+    news_type = str(payload.get("_news_type") or f"{provider_slug}_rss").strip() or f"{provider_slug}_rss"
+    channel_name = str(payload.get("_channel") or provider_slug).strip() or provider_slug
+    guid = payload.get("guid") or payload.get("id")
+    source_url = payload.get("link") or payload.get("url")
+    title = (payload.get("title") or "").strip()
+    teaser = payload.get("description") or payload.get("summary") or payload.get("encoded") or ""
+    published_at = _parse_dt(payload.get("pubDate") or payload.get("published"))
+
+    fallback_key = f"{title}|{payload.get('pubDate') or ''}"
+    provider_key = f"{provider_slug}|{guid or source_url or fallback_key}"
+    provider_content_id = _stable_bigint(provider_key)
+    if provider_content_id is None:
+        return None
+
+    categories = payload.get("categories") or payload.get("category") or []
+    if not isinstance(categories, list):
+        categories = [categories] if categories else []
+
+    author = payload.get("author") or payload.get("creator")
+    authors = [author] if author else []
+
+    normalized = {
+        "provider_event_id": None,
+        "provider_content_id": provider_content_id,
+        "provider_revision_id": None,
+        "original_id": None,
+        "action": "Created",
+        "news_type": news_type,
+        "language": detect_news_language(title, teaser, None),
+        "title": title,
+        "teaser": teaser,
+        "body": None,
+        "source_url": source_url,
+        "authors": authors,
+        "tags": categories,
+        "securities": [],
+        "channels": [channel_name],
+        "images": [],
+        "primary_image_url": None,
+        "source_created_at": published_at,
+        "source_updated_at": published_at,
+        "source_timestamp": published_at,
+        "is_active": True,
+    }
+    if not normalized["title"] and not normalized["teaser"]:
+        return None
+    return normalized
+
+
+def normalize_fxstreet_payload(payload):
+    return normalize_rss_payload(_with_rss_defaults(payload, provider_slug="fxstreet"))
+
+
+def _enrich_rss_details(normalized, existing=None):
+    if not isinstance(normalized, dict):
+        return normalized
+    if not str(normalized.get("news_type") or "").endswith("_rss"):
+        return normalized
+    details = fetch_rss_article_details(normalized.get("source_url"))
+
+    image_url = details.get("image_url")
+    if image_url:
+        normalized["primary_image_url"] = image_url
+        normalized["images"] = [{"size": "og", "url": image_url}]
+    elif existing and existing.primary_image_url:
+        normalized["primary_image_url"] = existing.primary_image_url
+        normalized["images"] = existing.images or []
+
+    body = details.get("body")
+    if body:
+        normalized["body"] = body
+    elif existing and existing.body:
+        normalized["body"] = existing.body
+
+    merged_tags = list(normalized.get("tags") or [])
+    if existing:
+        merged_tags.extend(existing.tags or [])
+    merged_tags.extend(details.get("tags") or [])
+    normalized["tags"] = _dedupe_preserve_order(merged_tags)
+    normalized["language"] = detect_news_language(
+        normalized.get("title"),
+        normalized.get("teaser"),
+        normalized.get("body"),
+    )
     return normalized
 
 
@@ -376,6 +735,43 @@ def _significant_live_news_fields():
     )
 
 
+def _rss_feed_identity_fields():
+    return (
+        "action",
+        "news_type",
+        "language",
+        "title",
+        "teaser",
+        "source_url",
+        "authors",
+        "tags",
+        "channels",
+        "source_created_at",
+        "source_updated_at",
+        "source_timestamp",
+        "is_active",
+    )
+
+
+def _rss_requires_detail_refresh(existing, normalized):
+    if not existing or not isinstance(normalized, dict):
+        return True
+    if not str(normalized.get("news_type") or "").endswith("_rss"):
+        return False
+    if not existing.body or not existing.primary_image_url:
+        return True
+
+    new_updated = normalized.get("source_updated_at") or normalized.get("source_timestamp")
+    old_updated = existing.source_updated_at or existing.source_timestamp
+    if new_updated and old_updated and new_updated > old_updated:
+        return True
+
+    for field in _rss_feed_identity_fields():
+        if getattr(existing, field) != normalized.get(field):
+            return True
+    return False
+
+
 def _is_stale_or_unchanged(existing, normalized):
     new_revision = normalized.get("provider_revision_id")
     old_revision = existing.provider_revision_id
@@ -419,13 +815,22 @@ def broadcast_live_news(instance, *, event_name="upsert"):
 
 
 def save_live_news_payload(payload, *, broadcast=False):
-    normalized = normalize_benzinga_payload(payload)
+    normalized = normalize_benzinga_payload(payload) or normalize_rss_payload(payload)
     if not normalized:
         return None, False, False
 
     existing = LiveNews.objects.filter(
         provider_content_id=normalized["provider_content_id"]
     ).first()
+    if not existing and normalized.get("source_url"):
+        existing = LiveNews.objects.filter(source_url=normalized["source_url"]).first()
+        if existing:
+            normalized["provider_content_id"] = existing.provider_content_id
+    should_refresh_rss_details = _rss_requires_detail_refresh(existing, normalized)
+    if should_refresh_rss_details:
+        normalized = _enrich_rss_details(normalized, existing=existing)
+    elif existing:
+        return existing, False, False
     if existing and _is_stale_or_unchanged(existing, normalized):
         return existing, False, False
 
@@ -504,6 +909,47 @@ def _extract_benzinga_xml_items(raw_text):
     return [_xml_item_to_dict(item) for item in root.findall("item")]
 
 
+def _xml_local_name(tag):
+    return str(tag or "").split("}", 1)[-1]
+
+
+def _extract_rss_items(raw_text):
+    try:
+        root = ET.fromstring(raw_text)
+    except ET.ParseError:
+        return []
+
+    channel = None
+    for child in list(root):
+        if _xml_local_name(child.tag) == "channel":
+            channel = child
+            break
+    if channel is None:
+        return []
+
+    items = []
+    for item in list(channel):
+        if _xml_local_name(item.tag) != "item":
+            continue
+
+        data = {"categories": []}
+        for child in list(item):
+            tag = _xml_local_name(child.tag)
+            text = (child.text or "").strip()
+            if tag == "category":
+                if text:
+                    data["categories"].append(text)
+                continue
+            if tag == "creator" and text and not data.get("author"):
+                data["author"] = text
+                continue
+            data[tag] = text
+
+        if data.get("title") or data.get("description"):
+            items.append(data)
+    return items
+
+
 def fetch_benzinga_news_page(*, page=0, page_size=50, tickers=None, channels=None):
     token = getattr(settings, "BENZINGA_API_TOKEN", "")
     if not token:
@@ -545,6 +991,68 @@ def fetch_benzinga_news_page(*, page=0, page_size=50, tickers=None, channels=Non
         return extract_benzinga_rest_items(raw)
     except json.JSONDecodeError:
         return _extract_benzinga_xml_items(body)
+
+
+def fetch_fxstreet_rss_items(*, feed_url=None, timeout=20):
+    url = feed_url or getattr(settings, "FXSTREET_RSS_NEWS_URL", "https://www.fxstreet.com/rss/news")
+    return fetch_rss_items(
+        feed_url=url,
+        provider_slug="fxstreet",
+        news_type="fxstreet_rss",
+        channel="fxstreet",
+        timeout=timeout,
+    )
+
+
+def fetch_dailyforex_rss_items(*, feed_url=None, timeout=20):
+    url = feed_url or getattr(
+        settings,
+        "DAILYFOREX_RSS_NEWS_URL",
+        "https://www.dailyforex.com/rss/forexnews.xml",
+    )
+    return fetch_rss_items(
+        feed_url=url,
+        provider_slug="dailyforex",
+        news_type="dailyforex_rss",
+        channel="dailyforex",
+        timeout=timeout,
+    )
+
+
+def fetch_forexlive_rss_items(*, feed_url=None, timeout=20):
+    url = feed_url or getattr(
+        settings,
+        "FOREXLIVE_RSS_NEWS_URL",
+        "https://www.forexlive.com/feed/",
+    )
+    return fetch_rss_items(
+        feed_url=url,
+        provider_slug="forexlive",
+        news_type="forexlive_rss",
+        channel="forexlive",
+        timeout=timeout,
+    )
+
+
+def fetch_rss_items(*, feed_url, provider_slug, news_type=None, channel=None, timeout=20):
+    req = urllib.request.Request(feed_url, method="GET")
+    req.add_header(
+        "User-Agent",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    )
+    req.add_header("Accept", "application/rss+xml, application/xml, text/xml")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        body = resp.read().decode("utf-8", errors="ignore")
+    return [
+        _with_rss_defaults(
+            item,
+            provider_slug=provider_slug,
+            news_type=news_type,
+            channel=channel,
+        )
+        for item in _extract_rss_items(body)
+    ]
 
 
 def build_benzinga_stream_url(*, tickers=None, channels=None):

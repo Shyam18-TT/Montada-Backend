@@ -2,9 +2,7 @@ import json
 import logging
 from urllib.parse import parse_qs
 
-from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncWebsocketConsumer
-from django.contrib.auth import get_user_model
 
 from .market_stream import (
     MARKET_DATA_GROUP_NAME,
@@ -14,28 +12,6 @@ from .market_stream import (
 
 
 logger = logging.getLogger(__name__)
-User = get_user_model()
-
-
-def _get_user_from_token(token):
-    if not token:
-        return None
-    try:
-        from rest_framework_simplejwt.exceptions import InvalidToken
-        from rest_framework_simplejwt.tokens import AccessToken
-
-        access = AccessToken(token)
-        user_id = access.get("user_id")
-        if not user_id:
-            return None
-        return User.objects.get(pk=user_id)
-    except (InvalidToken, User.DoesNotExist, Exception):
-        return None
-
-
-@database_sync_to_async
-def _resolve_market_data_user(token):
-    return _get_user_from_token(token)
 
 
 class MarketDataConsumer(AsyncWebsocketConsumer):
@@ -43,19 +19,11 @@ class MarketDataConsumer(AsyncWebsocketConsumer):
         self._joined_group = False
 
         query = parse_qs(self.scope.get("query_string", b"").decode())
-        tokens = query.get("token", [])
-        token = tokens[0] if tokens else None
         symbols = []
         for raw_value in query.get("symbols", []):
             symbols.extend(raw_value.split(","))
         self.selected_symbols = normalize_market_symbols(symbols)
 
-        user = await _resolve_market_data_user(token)
-        if not user:
-            await self.close(code=4401)
-            return
-
-        self.scope["user"] = user
         await self.channel_layer.group_add(MARKET_DATA_GROUP_NAME, self.channel_name)
         self._joined_group = True
         await self.accept()

@@ -18,7 +18,6 @@ def should_deliver_market_tick(selected_symbols, symbol):
         return True
     return str(symbol or "").strip().lower() in selected_symbols
 
-
 def build_market_tick_payload(symbol, bid=None, ask=None):
     return {
         "symbol": str(symbol or "").strip(),

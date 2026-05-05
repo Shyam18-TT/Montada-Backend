@@ -4,9 +4,13 @@ from django.test import SimpleTestCase, TestCase
 
 from News.live_news_service import (
     detect_news_language,
+    fetch_rss_article_details,
+    fetch_open_graph_image_url,
     is_frontend_live_news_language,
-    save_live_news_payload,
     is_supported_live_news_language,
+    normalize_fxstreet_payload,
+    normalize_rss_payload,
+    save_live_news_payload,
 )
 from News.models import LiveNews
 
@@ -63,6 +67,235 @@ class LiveNewsLanguageDetectionTests(SimpleTestCase):
 
 
 class LiveNewsPersistenceTests(TestCase):
+    def test_fetch_open_graph_image_url_reads_meta_tag(self):
+        html = b"""
+        <html>
+          <head>
+            <meta property="og:image" content="https://cdn.fxstreet.com/image.jpg" />
+          </head>
+          <body></body>
+        </html>
+        """
+
+        class DummyResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return html
+
+        with patch("urllib.request.urlopen", return_value=DummyResponse()):
+            image_url = fetch_open_graph_image_url("https://www.fxstreet.com/news/example")
+
+        self.assertEqual(image_url, "https://cdn.fxstreet.com/image.jpg")
+
+    def test_fetch_rss_article_details_reads_article_body_and_tags(self):
+        html = b"""
+        <html>
+          <head>
+            <meta property="og:image" content="https://cdn.fxstreet.com/image.jpg" />
+            <meta name="keywords" content="EUR/USD, Euro, Rabobank" />
+            <script type="application/ld+json">
+              {"@context":"https://schema.org","@type":"NewsArticle","articleBody":"Fallback body"}
+            </script>
+          </head>
+          <body>
+            <article>
+              <h2 class="fxs_headline_from_medium_to_large">Euro gains capped by growth risks</h2>
+              <p>While we do expect interest rate differentials to allow an upward bias in EUR/USD.</p>
+              <p>Our central view remains that EUR/USD 1.20 will be beyond reach this year.</p>
+            </article>
+          </body>
+        </html>
+        """
+
+        class DummyResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return html
+
+        with patch("urllib.request.urlopen", return_value=DummyResponse()):
+            details = fetch_rss_article_details("https://www.fxstreet.com/news/example")
+
+        self.assertEqual(details["image_url"], "https://cdn.fxstreet.com/image.jpg")
+        self.assertIn("<h2", details["body"])
+        self.assertIn("<p>While we do expect", details["body"])
+        self.assertEqual(details["tags"], ["EUR/USD", "Euro", "Rabobank"])
+
+    def test_fxstreet_payload_normalizes_into_live_news_shape(self):
+        payload = {
+            "guid": "cbbf7314-53f4-4806-bfcc-2f62a3a40783",
+            "link": "https://www.fxstreet.com/news/silver-price-today-silver-rises-according-to-fxstreet-data-202605050936",
+            "title": "Silver price today: Silver rises, according to FXStreet data",
+            "description": (
+                "Silver prices (XAG/USD) rose on Tuesday, according to FXStreet data. "
+                "Silver trades at $73.70 per troy ounce."
+            ),
+            "pubDate": "Tue, 05 May 2026 09:36:27 Z",
+        }
+
+        normalized = normalize_fxstreet_payload(payload)
+
+        self.assertIsNotNone(normalized)
+        self.assertEqual(normalized["news_type"], "fxstreet_rss")
+        self.assertEqual(normalized["channels"], ["fxstreet"])
+        self.assertEqual(normalized["language"], "en")
+        self.assertEqual(
+            normalized["source_url"],
+            "https://www.fxstreet.com/news/silver-price-today-silver-rises-according-to-fxstreet-data-202605050936",
+        )
+        self.assertIsNotNone(normalized["provider_content_id"])
+        self.assertIsNotNone(normalized["source_created_at"])
+
+    def test_dailyforex_payload_normalizes_into_provider_specific_shape(self):
+        payload = {
+            "_provider_slug": "dailyforex",
+            "_news_type": "dailyforex_rss",
+            "_channel": "dailyforex",
+            "guid": "dailyforex-1",
+            "link": "https://www.dailyforex.com/forex-news/example",
+            "title": "Forex Today: RBA Hikes Rates to 4.35%",
+            "description": "The Australian dollar advanced after the RBA surprised markets.",
+            "pubDate": "Tue, 05 May 2026 09:36:27 Z",
+            "author": "DailyForex",
+        }
+
+        normalized = normalize_rss_payload(payload)
+
+        self.assertIsNotNone(normalized)
+        self.assertEqual(normalized["news_type"], "dailyforex_rss")
+        self.assertEqual(normalized["channels"], ["dailyforex"])
+        self.assertEqual(normalized["authors"], ["DailyForex"])
+        self.assertEqual(normalized["language"], "en")
+
+    @patch(
+        "News.live_news_service.fetch_rss_article_details",
+        return_value={
+            "body": "<p>DBS Group Research notes that Japan has stepped up intervention.</p>",
+            "image_url": "https://cdn.fxstreet.com/news/usd-jpy.jpg",
+            "tags": ["USD/JPY", "Japan"],
+        },
+    )
+    def test_fxstreet_english_item_is_saved_with_article_details(self, mock_fetch_rss_article_details):
+        payload = {
+            "guid": "192aa1b9-b7f5-4c9d-b84b-56da9aa21362",
+            "link": "https://www.fxstreet.com/news/usd-jpy-intervention-battles-rising-oil-dbs-202605050932",
+            "title": "USD/JPY: Intervention battles rising Oil - DBS",
+            "description": (
+                "DBS Group Research notes that Japan has stepped up intervention "
+                "to support the Japanese Yen after the latest oil move."
+            ),
+            "pubDate": "Tue, 05 May 2026 09:32:06 Z",
+        }
+
+        instance, created, changed = save_live_news_payload(payload, broadcast=False)
+
+        self.assertIsNotNone(instance)
+        self.assertTrue(created)
+        self.assertTrue(changed)
+        self.assertEqual(
+            instance.body,
+            "<p>DBS Group Research notes that Japan has stepped up intervention.</p>",
+        )
+        self.assertEqual(instance.primary_image_url, "https://cdn.fxstreet.com/news/usd-jpy.jpg")
+        self.assertEqual(instance.images, [{"size": "og", "url": "https://cdn.fxstreet.com/news/usd-jpy.jpg"}])
+        self.assertEqual(instance.tags, ["USD/JPY", "Japan"])
+        mock_fetch_rss_article_details.assert_called_once_with(
+            "https://www.fxstreet.com/news/usd-jpy-intervention-battles-rising-oil-dbs-202605050932"
+        )
+        self.assertTrue(
+            LiveNews.objects.filter(provider_content_id=instance.provider_content_id).exists()
+        )
+
+    @patch(
+        "News.live_news_service.fetch_rss_article_details",
+        return_value={
+            "body": "<p>Updated body from the article page.</p>",
+            "image_url": None,
+            "tags": ["RBA", "AUD/USD"],
+        },
+    )
+    def test_rss_payload_matches_existing_row_by_source_url(self, mock_fetch_rss_article_details):
+        existing = LiveNews.objects.create(
+            provider_content_id=123456789,
+            news_type="fxstreet_rss",
+            title="Old title",
+            teaser="Old teaser",
+            source_url="https://www.fxstreet.com/news/aud-usd-consolidation-risk-after-rba-pause-societe-generale-202605050906",
+            language="en",
+            is_active=True,
+        )
+        payload = {
+            "_provider_slug": "fxstreet",
+            "_news_type": "fxstreet_rss",
+            "_channel": "fxstreet",
+            "guid": "new-guid-that-hashes-differently",
+            "link": "https://www.fxstreet.com/news/aud-usd-consolidation-risk-after-rba-pause-societe-generale-202605050906",
+            "title": "AUD/USD: Consolidation risk after RBA pause - Societe Generale",
+            "description": "Updated teaser from the rss feed.",
+            "pubDate": "Tue, 05 May 2026 09:06:23 Z",
+        }
+
+        instance, created, changed = save_live_news_payload(payload, broadcast=False)
+
+        self.assertIsNotNone(instance)
+        self.assertFalse(created)
+        self.assertTrue(changed)
+        self.assertEqual(instance.id, existing.id)
+        self.assertEqual(instance.provider_content_id, existing.provider_content_id)
+        self.assertEqual(instance.title, "AUD/USD: Consolidation risk after RBA pause - Societe Generale")
+        self.assertEqual(instance.body, "<p>Updated body from the article page.</p>")
+        self.assertEqual(instance.tags, ["RBA", "AUD/USD"])
+        mock_fetch_rss_article_details.assert_called_once()
+
+    @patch("News.live_news_service.fetch_rss_article_details")
+    def test_unchanged_rss_item_skips_article_recrawl(self, mock_fetch_rss_article_details):
+        existing = LiveNews.objects.create(
+            provider_content_id=987654321,
+            news_type="fxstreet_rss",
+            title="EUR/USD: Upside seen limited in H2 - Rabobank",
+            teaser="Rabobank expects rate differentials to support an upward bias in EUR/USD.",
+            body="<p>Existing crawled article body.</p>",
+            source_url="https://www.fxstreet.com/news/eur-usd-upside-seen-limited-in-h2-rabobank-202605051226",
+            authors=["FXStreet Insights Team"],
+            tags=["EUR/USD", "Rabobank"],
+            channels=["fxstreet"],
+            images=[{"size": "og", "url": "https://editorial.fxsstatic.com/images/i/eur-usd-fix-01.jpg"}],
+            primary_image_url="https://editorial.fxsstatic.com/images/i/eur-usd-fix-01.jpg",
+            language="en",
+            is_active=True,
+            source_created_at="2026-05-05T12:26:16.923000+00:00",
+            source_updated_at="2026-05-05T12:26:16.923000+00:00",
+            source_timestamp="2026-05-05T12:26:16.923000+00:00",
+        )
+        payload = {
+            "_provider_slug": "fxstreet",
+            "_news_type": "fxstreet_rss",
+            "_channel": "fxstreet",
+            "guid": "https://www.fxstreet.com/news/eur-usd-upside-seen-limited-in-h2-rabobank-202605051226",
+            "link": "https://www.fxstreet.com/news/eur-usd-upside-seen-limited-in-h2-rabobank-202605051226",
+            "title": "EUR/USD: Upside seen limited in H2 - Rabobank",
+            "description": "Rabobank expects rate differentials to support an upward bias in EUR/USD.",
+            "pubDate": "Tue, 05 May 2026 12:26:16 Z",
+            "author": "FXStreet Insights Team",
+            "categories": ["EUR/USD", "Rabobank"],
+        }
+
+        instance, created, changed = save_live_news_payload(payload, broadcast=False)
+
+        self.assertEqual(instance.id, existing.id)
+        self.assertFalse(created)
+        self.assertFalse(changed)
+        mock_fetch_rss_article_details.assert_not_called()
+
     def test_non_frontend_language_is_not_saved(self):
         payload = {
             "id": 51925248,

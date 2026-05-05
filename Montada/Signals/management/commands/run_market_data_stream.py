@@ -120,7 +120,9 @@ class Command(BaseCommand):
         sink = self._build_tick_sink()
 
         self.stdout.write(
-            self.style.SUCCESS(f"Connecting to {server} (login={login}) for market data stream...")
+            self.style.SUCCESS(
+                f"Connecting to {server} (login={login}) for market data stream..."
+            )
         )
 
         pump_modes = getattr(MT5Manager.ManagerAPI, "EnPumpModes", None)
@@ -242,6 +244,9 @@ class Command(BaseCommand):
             ticks = list(self._pending_ticks.values())
             self._pending_ticks.clear()
 
+        self._broadcast_ticks(ticks)
+
+    def _broadcast_ticks(self, ticks):
         for chunk_start in range(0, len(ticks), 200):
             chunk = ticks[chunk_start:chunk_start + 200]
             try:

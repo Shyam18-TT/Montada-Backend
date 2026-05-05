@@ -156,12 +156,12 @@ DATABASES = {
         # 'PORT': '1433',
         # 'CONN_MAX_AGE':120,
 
-        # 'ENGINE': 'mssql',
-        # 'NAME': 'MontadaApp',
-        # 'USER': 'MontadaUser',
-        # 'PASSWORD': 'A7f#Q9mL@2xR!K8Z',
-        # 'HOST': '3.76.105.23',
-        # 'PORT': '1433',
+        'ENGINE': 'mssql',
+        'NAME': 'MontadaApp',
+        'USER': 'MontadaUser',
+        'PASSWORD': 'A7f#Q9mL@2xR!K8Z',
+        'HOST': '3.76.105.23',
+        'PORT': '1433',
 
         # 'ENGINE': 'mssql',
         # 'NAME': 'MontadaApp',
@@ -170,12 +170,12 @@ DATABASES = {
         # 'HOST': '13.236.73.211',
         # 'PORT': '1433',
 
-        'ENGINE': 'mssql',
-        'NAME': 'MontadaApp',
-        'USER': 'sa',
-        'PASSWORD': 'Montada@1234',
-        'HOST': '127.0.0.1',
-        'PORT': '1433',
+        # 'ENGINE': 'mssql',
+        # 'NAME': 'MontadaApp',
+        # 'USER': 'sa',
+        # 'PASSWORD': 'Montada@1234',
+        # 'HOST': '127.0.0.1',
+        # 'PORT': '1433',
 
         # 'OPTIONS': {
         #     'driver': 'ODBC Driver 18 for SQL Server',
