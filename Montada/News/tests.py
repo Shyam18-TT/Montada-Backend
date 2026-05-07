@@ -6,6 +6,7 @@ from News.live_news_service import (
     detect_news_language,
     fetch_rss_article_details,
     fetch_open_graph_image_url,
+    fetch_rss_items,
     is_frontend_live_news_language,
     is_supported_live_news_language,
     normalize_fxstreet_payload,
@@ -176,6 +177,83 @@ class LiveNewsPersistenceTests(TestCase):
         self.assertEqual(normalized["authors"], ["DailyForex"])
         self.assertEqual(normalized["language"], "en")
 
+    def test_arabic_rss_payload_normalizes_into_arabic_shape(self):
+        payload = {
+            "_provider_slug": "fxstreet_ar",
+            "_news_type": "fxstreet_ar_rss",
+            "_channel": "fxstreet_ar",
+            "guid": "ar-1",
+            "link": "https://ar.fxstreet.com/news/example-ar",
+            "title": "مؤشر الدولار الأمريكي DXY: نظرة مستقبلية محددة النطاق بعد ارتداد الحرب – BBH",
+            "description": "تحديثات مباشرة حول تحركات الدولار والأسواق العالمية.",
+            "pubDate": "Wed, 07 May 2026 11:29:00 Z",
+        }
+
+        normalized = normalize_rss_payload(payload)
+
+        self.assertIsNotNone(normalized)
+        self.assertEqual(normalized["news_type"], "fxstreet_ar_rss")
+        self.assertEqual(normalized["channels"], ["fxstreet_ar"])
+        self.assertEqual(normalized["language"], "ar")
+
+    def test_chinese_rss_payload_normalizes_into_chinese_shape(self):
+        payload = {
+            "_provider_slug": "fxstreet_zh",
+            "_news_type": "fxstreet_zh_rss",
+            "_channel": "fxstreet_zh",
+            "guid": "zh-1",
+            "link": "https://www.fxstreet.hk/news/example-zh",
+            "title": "美聯儲的柯林斯：預計利率將維持更長時間不變",
+            "description": "外匯市場最新消息與分析。",
+            "pubDate": "Wed, 07 May 2026 11:15:00 Z",
+        }
+
+        normalized = normalize_rss_payload(payload)
+
+        self.assertIsNotNone(normalized)
+        self.assertEqual(normalized["news_type"], "fxstreet_zh_rss")
+        self.assertEqual(normalized["channels"], ["fxstreet_zh"])
+        self.assertEqual(normalized["language"], "zh")
+
+    def test_fetch_rss_items_falls_back_to_regex_for_malformed_xml(self):
+        malformed_rss = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <rss version="2.0">
+          <channel>
+            <item>
+              <guid>ar-1</guid>
+              <link>https://ar.fxstreet.com/news/example-ar</link>
+              <title>مؤشر الدولار الأمريكي DXY</title>
+              <description>تحديث مباشر & غير صالح</description>
+              <pubDate>Wed, 07 May 2026 11:29:00 Z</pubDate>
+              <category>الدولار</category>
+            </item>
+          </channel>
+        </rss>
+        """
+
+        class DummyResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return malformed_rss.encode("utf-8")
+
+        with patch("urllib.request.urlopen", return_value=DummyResponse()):
+            items = fetch_rss_items(
+                feed_url="https://ar.fxstreet.com/rss/news",
+                provider_slug="fxstreet_ar",
+                news_type="fxstreet_ar_rss",
+                channel="fxstreet_ar",
+            )
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["_provider_slug"], "fxstreet_ar")
+        self.assertEqual(items[0]["link"], "https://ar.fxstreet.com/news/example-ar")
+
     @patch(
         "News.live_news_service.fetch_rss_article_details",
         return_value={
@@ -267,6 +345,49 @@ class LiveNewsPersistenceTests(TestCase):
             source_url="https://www.fxstreet.com/news/eur-usd-upside-seen-limited-in-h2-rabobank-202605051226",
             authors=["FXStreet Insights Team"],
             tags=["EUR/USD", "Rabobank"],
+            channels=["fxstreet"],
+            images=[{"size": "og", "url": "https://editorial.fxsstatic.com/images/i/eur-usd-fix-01.jpg"}],
+            primary_image_url="https://editorial.fxsstatic.com/images/i/eur-usd-fix-01.jpg",
+            language="en",
+            is_active=True,
+            source_created_at="2026-05-05T12:26:16.923000+00:00",
+            source_updated_at="2026-05-05T12:26:16.923000+00:00",
+            source_timestamp="2026-05-05T12:26:16.923000+00:00",
+        )
+        payload = {
+            "_provider_slug": "fxstreet",
+            "_news_type": "fxstreet_rss",
+            "_channel": "fxstreet",
+            "guid": "https://www.fxstreet.com/news/eur-usd-upside-seen-limited-in-h2-rabobank-202605051226",
+            "link": "https://www.fxstreet.com/news/eur-usd-upside-seen-limited-in-h2-rabobank-202605051226",
+            "title": "EUR/USD: Upside seen limited in H2 - Rabobank",
+            "description": "Rabobank expects rate differentials to support an upward bias in EUR/USD.",
+            "pubDate": "Tue, 05 May 2026 12:26:16 Z",
+            "author": "FXStreet Insights Team",
+            "categories": ["EUR/USD", "Rabobank"],
+        }
+
+        instance, created, changed = save_live_news_payload(payload, broadcast=False)
+
+        self.assertEqual(instance.id, existing.id)
+        self.assertFalse(created)
+        self.assertFalse(changed)
+        mock_fetch_rss_article_details.assert_not_called()
+
+    @patch("News.live_news_service.fetch_rss_article_details")
+    def test_unchanged_rss_item_with_extra_crawled_tags_still_skips_recrawl(
+        self,
+        mock_fetch_rss_article_details,
+    ):
+        existing = LiveNews.objects.create(
+            provider_content_id=777777777,
+            news_type="fxstreet_rss",
+            title="EUR/USD: Upside seen limited in H2 - Rabobank",
+            teaser="Rabobank expects rate differentials to support an upward bias in EUR/USD.",
+            body="<p>Existing crawled article body.</p>",
+            source_url="https://www.fxstreet.com/news/eur-usd-upside-seen-limited-in-h2-rabobank-202605051226",
+            authors=["FXStreet Insights Team"],
+            tags=["EUR/USD", "Rabobank", "Eurozone", "USD"],
             channels=["fxstreet"],
             images=[{"size": "og", "url": "https://editorial.fxsstatic.com/images/i/eur-usd-fix-01.jpg"}],
             primary_image_url="https://editorial.fxsstatic.com/images/i/eur-usd-fix-01.jpg",

@@ -3,6 +3,8 @@ import hashlib
 import json
 import logging
 import re
+import ssl
+import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -192,7 +194,7 @@ def _pick_weighted_language(*entries):
 
 def detect_news_language(title=None, teaser=None, body=None):
     # Detect the language of the actual article content first when enough teaser
-    # or body text is available, since Benzinga titles can remain in English
+    # or body text is available, since provider titles can remain in English
     # even when the article itself is translated.
     title_text = _strip_markup(title)
     teaser_text = _strip_markup(teaser)
@@ -383,7 +385,7 @@ def fetch_open_graph_image_url(url, *, timeout=15):
     req.add_header("Accept", "text/html,application/xhtml+xml")
 
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _open_url_with_ssl_fallback(req, timeout=timeout) as resp:
             body = resp.read().decode("utf-8", errors="ignore")
     except Exception:
         logger.exception("Failed to fetch OG image from article url=%s", cleaned_url)
@@ -516,7 +518,7 @@ def fetch_rss_article_details(url, *, timeout=15):
     req.add_header("Accept", "text/html,application/xhtml+xml")
 
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _open_url_with_ssl_fallback(req, timeout=timeout) as resp:
             page_html = resp.read().decode("utf-8", errors="ignore")
     except Exception:
         logger.exception("Failed to fetch RSS article details from url=%s", cleaned_url)
@@ -541,52 +543,6 @@ def fetch_rss_article_details(url, *, timeout=15):
         "image_url": image_url,
         "tags": tags,
     }
-
-
-def normalize_benzinga_payload(payload):
-    outer_data, content, action, source_timestamp = _content_from_payload(payload)
-    if not isinstance(content, dict):
-        return None
-
-    provider_content_id = content.get("id") or (outer_data or {}).get("content_id")
-    if provider_content_id is None:
-        return None
-
-    images = _normalize_list(content.get("image"))
-    authors = _normalize_list(content.get("authors"))
-    if not authors and content.get("author"):
-        authors = [content.get("author")]
-
-    normalized = {
-        "provider_event_id": (outer_data or {}).get("id"),
-        "provider_content_id": provider_content_id,
-        "provider_revision_id": content.get("revision_id"),
-        "original_id": content.get("original_id"),
-        "action": action or "Created",
-        "news_type": content.get("type"),
-        "language": detect_news_language(
-            content.get("title"),
-            content.get("teaser"),
-            content.get("body"),
-        ),
-        "title": content.get("title") or "",
-        "teaser": content.get("teaser"),
-        "body": content.get("body"),
-        "source_url": content.get("url"),
-        "authors": authors,
-        "tags": _normalize_list(content.get("tags")),
-        "securities": _normalize_list(content.get("securities")),
-        "channels": _normalize_list(content.get("channels")),
-        "images": images,
-        "primary_image_url": _primary_image_url(images),
-        "source_created_at": _parse_dt(content.get("created_at") or content.get("created")),
-        "source_updated_at": _parse_dt(content.get("updated_at") or content.get("updated")),
-        "source_timestamp": _parse_dt(source_timestamp),
-        "is_active": str(action or "").lower() != "deleted",
-    }
-    if not normalized["title"] and not normalized["teaser"]:
-        return None
-    return normalized
 
 
 def normalize_rss_payload(payload):
@@ -739,12 +695,10 @@ def _rss_feed_identity_fields():
     return (
         "action",
         "news_type",
-        "language",
         "title",
         "teaser",
         "source_url",
         "authors",
-        "tags",
         "channels",
         "source_created_at",
         "source_updated_at",
@@ -815,7 +769,7 @@ def broadcast_live_news(instance, *, event_name="upsert"):
 
 
 def save_live_news_payload(payload, *, broadcast=False):
-    normalized = normalize_benzinga_payload(payload) or normalize_rss_payload(payload)
+    normalized = normalize_rss_payload(payload)
     if not normalized:
         return None, False, False
 
@@ -867,57 +821,63 @@ def save_live_news_payload(payload, *, broadcast=False):
     return instance, created, True
 
 
-def extract_benzinga_rest_items(raw_payload):
-    if isinstance(raw_payload, list):
-        return raw_payload
-    if not isinstance(raw_payload, dict):
-        return []
-    for key in ("news", "data", "items", "results"):
-        value = raw_payload.get(key)
-        if isinstance(value, list):
-            return value
-    return []
-
-
-def _xml_item_to_dict(item):
-    data = {}
-    for child in list(item):
-        tag = child.tag
-        children = list(child)
-        if children:
-            if tag in {"stocks", "channels", "tags", "authors"}:
-                values = []
-                for sub in children:
-                    text = (sub.text or "").strip()
-                    if text:
-                        values.append(text)
-                data[tag] = values
-            else:
-                data[tag] = _xml_item_to_dict(child)
-        else:
-            data[tag] = (child.text or "").strip()
-    return data
-
-
-def _extract_benzinga_xml_items(raw_text):
-    try:
-        root = ET.fromstring(raw_text)
-    except ET.ParseError:
-        return []
-    if root.tag != "result":
-        return []
-    return [_xml_item_to_dict(item) for item in root.findall("item")]
-
-
 def _xml_local_name(tag):
     return str(tag or "").split("}", 1)[-1]
+
+
+def _open_url_with_ssl_fallback(request, *, timeout):
+    try:
+        return urllib.request.urlopen(request, timeout=timeout)
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, "reason", None)
+        if isinstance(reason, ssl.SSLCertVerificationError):
+            logger.warning(
+                "Retrying URL without SSL verification because certificate validation failed: %s",
+                getattr(request, "full_url", ""),
+            )
+            insecure_context = ssl._create_unverified_context()
+            return urllib.request.urlopen(request, timeout=timeout, context=insecure_context)
+        raise
+
+
+def _extract_rss_items_with_regex(raw_text):
+    items = []
+    item_blocks = re.findall(r"<item\b[^>]*>(.*?)</item>", raw_text or "", re.S | re.I)
+    field_patterns = {
+        "guid": r"<guid\b[^>]*>(.*?)</guid>",
+        "link": r"<link\b[^>]*>(.*?)</link>",
+        "title": r"<title\b[^>]*>(.*?)</title>",
+        "description": r"<description\b[^>]*>(.*?)</description>",
+        "pubDate": r"<pubDate\b[^>]*>(.*?)</pubDate>",
+        "author": r"<(?:dc:creator|author)\b[^>]*>(.*?)</(?:dc:creator|author)>",
+    }
+
+    def _clean_value(value):
+        cleaned = re.sub(r"<!\[CDATA\[(.*?)\]\]>", r"\1", value or "", flags=re.S)
+        return unescape(cleaned).strip()
+
+    for block in item_blocks:
+        data = {"categories": []}
+        for field_name, pattern in field_patterns.items():
+            match = re.search(pattern, block, re.S | re.I)
+            if match:
+                data[field_name] = _clean_value(match.group(1))
+
+        for category in re.findall(r"<category\b[^>]*>(.*?)</category>", block, re.S | re.I):
+            cleaned = _clean_value(category)
+            if cleaned:
+                data["categories"].append(cleaned)
+
+        if data.get("title") or data.get("description"):
+            items.append(data)
+    return items
 
 
 def _extract_rss_items(raw_text):
     try:
         root = ET.fromstring(raw_text)
     except ET.ParseError:
-        return []
+        return _extract_rss_items_with_regex(raw_text)
 
     channel = None
     for child in list(root):
@@ -950,49 +910,6 @@ def _extract_rss_items(raw_text):
     return items
 
 
-def fetch_benzinga_news_page(*, page=0, page_size=50, tickers=None, channels=None):
-    token = getattr(settings, "BENZINGA_API_TOKEN", "")
-    if not token:
-        raise RuntimeError("BENZINGA_API_TOKEN is not configured.")
-
-    base_url = getattr(settings, "BENZINGA_NEWS_URL", "https://api.benzinga.com/api/v2/news")
-    params = {
-        "token": token,
-        "page": str(page),
-        "pageSize": str(max(1, min(int(page_size), 100))),
-        "displayOutput": "full",
-        "sort": "updated:desc",
-    }
-    if tickers:
-        params["tickers"] = tickers
-    if channels:
-        params["channels"] = channels
-
-    url = base_url + "?" + urllib.parse.urlencode(params)
-    req = urllib.request.Request(url, method="GET")
-    req.add_header(
-        "User-Agent",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    )
-    req.add_header("Accept", "application/json")
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        body = resp.read().decode()
-        content_type = (resp.headers.get_content_type() or "").lower()
-    if "json" in content_type:
-        raw = json.loads(body) if body.strip() else []
-        return extract_benzinga_rest_items(raw)
-    if "xml" in content_type:
-        return _extract_benzinga_xml_items(body)
-    if not body.strip():
-        return []
-    try:
-        raw = json.loads(body)
-        return extract_benzinga_rest_items(raw)
-    except json.JSONDecodeError:
-        return _extract_benzinga_xml_items(body)
-
-
 def fetch_fxstreet_rss_items(*, feed_url=None, timeout=20):
     url = feed_url or getattr(settings, "FXSTREET_RSS_NEWS_URL", "https://www.fxstreet.com/rss/news")
     return fetch_rss_items(
@@ -1000,6 +917,36 @@ def fetch_fxstreet_rss_items(*, feed_url=None, timeout=20):
         provider_slug="fxstreet",
         news_type="fxstreet_rss",
         channel="fxstreet",
+        timeout=timeout,
+    )
+
+
+def fetch_fxstreet_arabic_rss_items(*, feed_url=None, timeout=20):
+    url = feed_url or getattr(
+        settings,
+        "FXSTREET_ARABIC_RSS_NEWS_URL",
+        "https://ar.fxstreet.com/rss/news",
+    )
+    return fetch_rss_items(
+        feed_url=url,
+        provider_slug="fxstreet_ar",
+        news_type="fxstreet_ar_rss",
+        channel="fxstreet_ar",
+        timeout=timeout,
+    )
+
+
+def fetch_fxstreet_chinese_rss_items(*, feed_url=None, timeout=20):
+    url = feed_url or getattr(
+        settings,
+        "FXSTREET_CHINESE_RSS_NEWS_URL",
+        "https://www.fxstreet.hk/rss/news",
+    )
+    return fetch_rss_items(
+        feed_url=url,
+        provider_slug="fxstreet_zh",
+        news_type="fxstreet_zh_rss",
+        channel="fxstreet_zh",
         timeout=timeout,
     )
 
@@ -1042,7 +989,7 @@ def fetch_rss_items(*, feed_url, provider_slug, news_type=None, channel=None, ti
         "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     )
     req.add_header("Accept", "application/rss+xml, application/xml, text/xml")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with _open_url_with_ssl_fallback(req, timeout=timeout) as resp:
         body = resp.read().decode("utf-8", errors="ignore")
     return [
         _with_rss_defaults(
@@ -1053,21 +1000,3 @@ def fetch_rss_items(*, feed_url, provider_slug, news_type=None, channel=None, ti
         )
         for item in _extract_rss_items(body)
     ]
-
-
-def build_benzinga_stream_url(*, tickers=None, channels=None):
-    token = getattr(settings, "BENZINGA_API_TOKEN", "")
-    if not token:
-        raise RuntimeError("BENZINGA_API_TOKEN is not configured.")
-
-    base_url = getattr(
-        settings,
-        "BENZINGA_NEWS_STREAM_URL",
-        "wss://api.benzinga.com/api/v1/news/stream",
-    )
-    params = {"token": token}
-    if tickers:
-        params["tickers"] = tickers
-    if channels:
-        params["channels"] = channels
-    return base_url + "?" + urllib.parse.urlencode(params)

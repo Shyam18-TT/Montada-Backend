@@ -7,6 +7,8 @@ from django.db import ProgrammingError
 from News.live_news_service import (
     fetch_dailyforex_rss_items,
     fetch_forexlive_rss_items,
+    fetch_fxstreet_arabic_rss_items,
+    fetch_fxstreet_chinese_rss_items,
     fetch_fxstreet_rss_items,
     save_live_news_payload,
 )
@@ -16,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 PROVIDER_FETCHERS = {
     "fxstreet": fetch_fxstreet_rss_items,
+    "fxstreet_ar": fetch_fxstreet_arabic_rss_items,
+    "fxstreet_zh": fetch_fxstreet_chinese_rss_items,
     "dailyforex": fetch_dailyforex_rss_items,
     "forexlive": fetch_forexlive_rss_items,
 }
@@ -28,14 +32,26 @@ class Command(BaseCommand):
         parser.add_argument(
             "--providers",
             type=str,
-            default="fxstreet,dailyforex,forexlive",
-            help="Comma-separated provider keys to poll: fxstreet,dailyforex,forexlive",
+            default="fxstreet,fxstreet_ar,fxstreet_zh,dailyforex,forexlive",
+            help="Comma-separated provider keys to poll: fxstreet,fxstreet_ar,fxstreet_zh,dailyforex,forexlive",
         )
         parser.add_argument(
             "--fxstreet-feed-url",
             type=str,
             default="https://www.fxstreet.com/rss/news",
             help="Override the FXStreet RSS feed URL.",
+        )
+        parser.add_argument(
+            "--fxstreet-arabic-feed-url",
+            type=str,
+            default="https://ar.fxstreet.com/rss/news",
+            help="Override the Arabic FXStreet RSS feed URL.",
+        )
+        parser.add_argument(
+            "--fxstreet-chinese-feed-url",
+            type=str,
+            default="https://www.fxstreet.hk/rss/news",
+            help="Override the Chinese FXStreet RSS feed URL.",
         )
         parser.add_argument(
             "--dailyforex-feed-url",
@@ -79,6 +95,8 @@ class Command(BaseCommand):
         provider_names = self._parse_provider_names(options.get("providers") or "")
         feed_urls = {
             "fxstreet": (options.get("fxstreet_feed_url") or "").strip() or "https://www.fxstreet.com/rss/news",
+            "fxstreet_ar": (options.get("fxstreet_arabic_feed_url") or "").strip() or "https://ar.fxstreet.com/rss/news",
+            "fxstreet_zh": (options.get("fxstreet_chinese_feed_url") or "").strip() or "https://www.fxstreet.hk/rss/news",
             "dailyforex": (options.get("dailyforex_feed_url") or "").strip() or "https://www.dailyforex.com/rss/forexnews.xml",
             "forexlive": (options.get("forexlive_feed_url") or "").strip() or "https://www.forexlive.com/feed/",
         }
@@ -126,7 +144,9 @@ class Command(BaseCommand):
             if cleaned and cleaned in PROVIDER_FETCHERS and cleaned not in names:
                 names.append(cleaned)
         if not names:
-            raise CommandError("No valid providers selected. Use: fxstreet,dailyforex,forexlive")
+            raise CommandError(
+                "No valid providers selected. Use: fxstreet,fxstreet_ar,fxstreet_zh,dailyforex,forexlive"
+            )
         return names
 
     def _run_poll_cycle(self, *, provider_names, feed_urls, limit, broadcast):
