@@ -911,9 +911,15 @@ def _extract_rss_items(raw_text):
 
 
 def fetch_fxstreet_rss_items(*, feed_url=None, timeout=20):
-    url = feed_url or getattr(settings, "FXSTREET_RSS_NEWS_URL", "https://www.fxstreet.com/rss/news")
+    configured = feed_url or getattr(
+        settings,
+        "FXSTREET_RSS_NEWS_URL",
+        "https://www.fxstreet.com/rss/news",
+    )
+    urls = [configured] if isinstance(configured, str) else list(configured or [])
+    urls.append("https://www.fxstreet.com/news/feed")
     return fetch_rss_items(
-        feed_url=url,
+        feed_url=urls,
         provider_slug="fxstreet",
         news_type="fxstreet_rss",
         channel="fxstreet",
@@ -922,13 +928,15 @@ def fetch_fxstreet_rss_items(*, feed_url=None, timeout=20):
 
 
 def fetch_fxstreet_arabic_rss_items(*, feed_url=None, timeout=20):
-    url = feed_url or getattr(
+    configured = feed_url or getattr(
         settings,
         "FXSTREET_ARABIC_RSS_NEWS_URL",
         "https://ar.fxstreet.com/rss/news",
     )
+    urls = [configured] if isinstance(configured, str) else list(configured or [])
+    urls.append("https://ar.fxstreet.com/news/feed")
     return fetch_rss_items(
-        feed_url=url,
+        feed_url=urls,
         provider_slug="fxstreet_ar",
         news_type="fxstreet_ar_rss",
         channel="fxstreet_ar",
@@ -937,13 +945,15 @@ def fetch_fxstreet_arabic_rss_items(*, feed_url=None, timeout=20):
 
 
 def fetch_fxstreet_chinese_rss_items(*, feed_url=None, timeout=20):
-    url = feed_url or getattr(
+    configured = feed_url or getattr(
         settings,
         "FXSTREET_CHINESE_RSS_NEWS_URL",
         "https://www.fxstreet.hk/rss/news",
     )
+    urls = [configured] if isinstance(configured, str) else list(configured or [])
+    urls.append("https://www.fxstreet.hk/news/feed")
     return fetch_rss_items(
-        feed_url=url,
+        feed_url=urls,
         provider_slug="fxstreet_zh",
         news_type="fxstreet_zh_rss",
         channel="fxstreet_zh",
@@ -958,7 +968,7 @@ def fetch_dailyforex_rss_items(*, feed_url=None, timeout=20):
         "https://www.dailyforex.com/rss/forexnews.xml",
     )
     return fetch_rss_items(
-        feed_url=url,
+        feed_url=[url],
         provider_slug="dailyforex",
         news_type="dailyforex_rss",
         channel="dailyforex",
@@ -973,7 +983,7 @@ def fetch_forexlive_rss_items(*, feed_url=None, timeout=20):
         "https://www.forexlive.com/feed/",
     )
     return fetch_rss_items(
-        feed_url=url,
+        feed_url=[url],
         provider_slug="forexlive",
         news_type="forexlive_rss",
         channel="forexlive",
@@ -982,15 +992,36 @@ def fetch_forexlive_rss_items(*, feed_url=None, timeout=20):
 
 
 def fetch_rss_items(*, feed_url, provider_slug, news_type=None, channel=None, timeout=20):
-    req = urllib.request.Request(feed_url, method="GET")
-    req.add_header(
-        "User-Agent",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    )
-    req.add_header("Accept", "application/rss+xml, application/xml, text/xml")
-    with _open_url_with_ssl_fallback(req, timeout=timeout) as resp:
-        body = resp.read().decode("utf-8", errors="ignore")
+    feed_urls = feed_url if isinstance(feed_url, (list, tuple)) else [feed_url]
+    errors = []
+    body = None
+    for candidate_url in [str(url or "").strip() for url in feed_urls if str(url or "").strip()]:
+        req = urllib.request.Request(candidate_url, method="GET")
+        req.add_header(
+            "User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        )
+        req.add_header("Accept", "application/rss+xml, application/xml, text/xml")
+        req.add_header("Referer", candidate_url)
+        req.add_header("Accept-Language", "en-US,en;q=0.9,ar;q=0.8,zh-CN;q=0.7")
+        try:
+            with _open_url_with_ssl_fallback(req, timeout=timeout) as resp:
+                body = resp.read().decode("utf-8", errors="ignore")
+                break
+        except Exception as exc:
+            errors.append(f"{candidate_url}: {exc}")
+            logger.warning(
+                "RSS fetch failed for provider=%s url=%s error=%s",
+                provider_slug,
+                candidate_url,
+                exc,
+            )
+    if body is None:
+        raise RuntimeError(
+            "All RSS feed URLs failed for provider=%s. %s"
+            % (provider_slug, " | ".join(errors))
+        )
     return [
         _with_rss_defaults(
             item,

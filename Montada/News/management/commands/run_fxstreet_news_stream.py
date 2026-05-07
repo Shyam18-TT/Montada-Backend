@@ -119,7 +119,8 @@ class Command(BaseCommand):
                     self.style.SUCCESS(
                         "RSS news poll complete. "
                         f"providers={','.join(provider_names)} "
-                        f"created={stats['created']} updated={stats['updated']} skipped={stats['skipped']}"
+                        f"created={stats['created']} updated={stats['updated']} "
+                        f"skipped={stats['skipped']} failed={stats['failed']}"
                     )
                 )
                 first_cycle = False
@@ -153,11 +154,22 @@ class Command(BaseCommand):
         created_count = 0
         updated_count = 0
         skipped_count = 0
+        failed_count = 0
 
         for provider_name in provider_names:
             self.stdout.write(f"Fetching {provider_name} feed...")
             fetcher = PROVIDER_FETCHERS[provider_name]
-            items = fetcher(feed_url=feed_urls[provider_name])
+            try:
+                items = fetcher(feed_url=feed_urls[provider_name])
+            except Exception as exc:
+                failed_count += 1
+                logger.exception("RSS provider fetch failed provider=%s: %s", provider_name, exc)
+                self.stderr.write(
+                    self.style.WARNING(
+                        f"Skipping {provider_name} for this cycle because feed fetch failed: {exc}"
+                    )
+                )
+                continue
             items = list(reversed((items or [])[:limit]))
             self.stdout.write(
                 f"Fetched {len(items)} item(s) from {provider_name}."
@@ -186,4 +198,5 @@ class Command(BaseCommand):
             "created": created_count,
             "updated": updated_count,
             "skipped": skipped_count,
+            "failed": failed_count,
         }
