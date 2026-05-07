@@ -404,12 +404,19 @@ def _dedupe_preserve_order(values):
     seen = set()
     result = []
     for value in values or []:
-        cleaned = str(value or "").strip()
+        cleaned = unescape(str(value or "")).replace("\xa0", " ").strip()
         lowered = cleaned.lower()
         if cleaned and lowered not in seen:
             seen.add(lowered)
             result.append(cleaned)
     return result
+
+
+def _normalize_html_fragment(value):
+    if not value:
+        return None
+    normalized = unescape(str(value)).replace("\xa0", " ").strip()
+    return normalized or None
 
 
 def _extract_newsarticle_from_json_ld(payload):
@@ -467,7 +474,7 @@ def _extract_json_ld_article_details(json_ld_blocks):
 
         article_body = article.get("articleBody")
         if article_body and not details["body"]:
-            body_text = str(article_body).strip()
+            body_text = _normalize_html_fragment(article_body)
             if body_text:
                 details["body"] = "<p>%s</p>" % body_text.replace("\n", "</p><p>")
     details["tags"] = _dedupe_preserve_order(details["tags"])
@@ -497,7 +504,7 @@ def _extract_article_body_html(page_html):
 
     if not blocks:
         return None
-    return "\n\n".join(blocks)
+    return _normalize_html_fragment("\n\n".join(blocks))
 
 
 def fetch_rss_article_details(url, *, timeout=15):
@@ -536,6 +543,7 @@ def fetch_rss_article_details(url, *, timeout=15):
 
     json_ld_details = _extract_json_ld_article_details(parser.json_ld_blocks)
     body_html = _extract_article_body_html(page_html) or json_ld_details.get("body")
+    body_html = _normalize_html_fragment(body_html)
     image_url = parser.image_url or json_ld_details.get("image_url")
     tags = _dedupe_preserve_order(list(parser.tags) + list(json_ld_details.get("tags") or []))
     return {

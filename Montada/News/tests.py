@@ -131,6 +131,35 @@ class LiveNewsPersistenceTests(TestCase):
         self.assertIn("<p>While we do expect", details["body"])
         self.assertEqual(details["tags"], ["EUR/USD", "Euro", "Rabobank"])
 
+    def test_fetch_rss_article_details_unescapes_body_and_tags(self):
+        html = b"""
+        <html>
+          <head>
+            <meta name="keywords" content="&#40643;&#37329;, &#32654;&#32879;&#20786;" />
+            <script type="application/ld+json">
+              {"@context":"https://schema.org","@type":"NewsArticle","articleBody":"&#40643;&#37329;&#32173;&#25345;&#22312;&#39640;&#40670;&#38468;&#36817;"}
+            </script>
+          </head>
+          <body></body>
+        </html>
+        """
+
+        class DummyResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return html
+
+        with patch("urllib.request.urlopen", return_value=DummyResponse()):
+            details = fetch_rss_article_details("https://www.fxstreet.hk/news/example")
+
+        self.assertEqual(details["body"], "<p>黃金維持在高點附近</p>")
+        self.assertEqual(details["tags"], ["黃金", "美聯儲"])
+
     def test_fxstreet_payload_normalizes_into_live_news_shape(self):
         payload = {
             "guid": "cbbf7314-53f4-4806-bfcc-2f62a3a40783",
