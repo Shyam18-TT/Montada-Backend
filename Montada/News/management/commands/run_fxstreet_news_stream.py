@@ -1,8 +1,11 @@
 import logging
 import time
 
+from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
 from django.db import ProgrammingError
+from django.utils.html import strip_tags
+from django.utils.text import Truncator
 
 from News.live_news_service import (
     fetch_dailyforex_rss_items,
@@ -15,6 +18,8 @@ from News.live_news_service import (
 
 
 logger = logging.getLogger(__name__)
+User = get_user_model()
+NOTIFICATION_BATCH_SIZE = 500
 
 PROVIDER_FETCHERS = {
     "fxstreet": fetch_fxstreet_rss_items,
@@ -23,6 +28,129 @@ PROVIDER_FETCHERS = {
     "dailyforex": fetch_dailyforex_rss_items,
     "forexlive": fetch_forexlive_rss_items,
 }
+
+
+def _build_news_notification_summary(instance):
+    summary_source = (
+        getattr(instance, "teaser", None)
+        or strip_tags(getattr(instance, "body", None) or "")
+        or getattr(instance, "title", None)
+        or "Live market news updated."
+    )
+    return Truncator(" ".join(str(summary_source).split())).chars(180)
+
+
+def _notify_users_about_news(instance, *, event_name):
+    if not instance:
+        return
+
+    try:
+        from Dashboard.realtime import broadcast_notifications
+        from Mainapp.models import UserNotification
+        from firebase import send_push_to_users
+    except Exception:
+        logger.exception(
+            "News notification dependencies unavailable for provider_content_id=%s",
+            getattr(instance, "provider_content_id", None),
+        )
+        return
+
+    recipients = User.objects.filter(is_active=True).only("id")
+    title = Truncator(getattr(instance, "title", None) or "Live market news update").chars(255)
+    body = _build_news_notification_summary(instance)
+    redirect_url = getattr(instance, "source_url", None) or None
+    data = {
+        "type": "news_update",
+        "event": str(event_name or "updated"),
+        "news_id": str(getattr(instance, "id", "") or ""),
+        "provider_content_id": str(getattr(instance, "provider_content_id", "") or ""),
+        "language": str(getattr(instance, "language", "") or ""),
+        "news_type": str(getattr(instance, "news_type", "") or ""),
+        "source_url": str(redirect_url or ""),
+    }
+    image_url = getattr(instance, "image_url", None) or None
+
+    batch_users = []
+    for user in recipients.iterator(chunk_size=NOTIFICATION_BATCH_SIZE):
+        batch_users.append(user)
+        if len(batch_users) < NOTIFICATION_BATCH_SIZE:
+            continue
+        _flush_news_notification_batch(
+            batch_users,
+            title=title,
+            body=body,
+            redirect_url=redirect_url,
+            data=data,
+            image_url=image_url,
+            broadcast_notifications=broadcast_notifications,
+            user_notification_model=UserNotification,
+            instance=instance,
+        )
+        batch_users = []
+
+    if batch_users:
+        _flush_news_notification_batch(
+            batch_users,
+            title=title,
+            body=body,
+            redirect_url=redirect_url,
+            data=data,
+            image_url=image_url,
+            broadcast_notifications=broadcast_notifications,
+            user_notification_model=UserNotification,
+            instance=instance,
+        )
+
+
+def _flush_news_notification_batch(
+    users,
+    *,
+    title,
+    body,
+    redirect_url,
+    data,
+    image_url,
+    broadcast_notifications,
+    user_notification_model,
+    instance,
+):
+    if not users:
+        return
+
+    created_notifications = [
+        user_notification_model(
+            user=user,
+            title=title,
+            message=body,
+            notification_type="INFO",
+            redirect_url=redirect_url,
+        )
+        for user in users
+    ]
+    user_notification_model.objects.bulk_create(created_notifications)
+    broadcast_notifications(
+        user_notification_model.objects.filter(
+            id__in=[notification.id for notification in created_notifications]
+        ),
+        event_name="created",
+    )
+
+    try:
+        from firebase import send_push_to_users
+
+        send_push_to_users(
+            users=users,
+            title=title,
+            body=body,
+            data=data,
+            image_url=image_url,
+        )
+    except Exception:
+        logger.exception(
+            "FCM push failed for news provider_content_id=%s user_count=%s",
+            getattr(instance, "provider_content_id", None),
+            len(users),
+        )
 
 
 class Command(BaseCommand):
@@ -193,6 +321,12 @@ class Command(BaseCommand):
                     created_count += 1
                 else:
                     updated_count += 1
+
+                if broadcast:
+                    _notify_users_about_news(
+                        instance,
+                        event_name="created" if created else "updated",
+                    )
 
         return {
             "created": created_count,
