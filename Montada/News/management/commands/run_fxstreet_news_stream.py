@@ -1,5 +1,7 @@
 import logging
+import re
 import time
+from html import unescape
 
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
@@ -8,9 +10,11 @@ from django.utils.html import strip_tags
 from django.utils.text import Truncator
 
 from News.live_news_service import (
+    fetch_actionforex_rss_items,
+    fetch_cnn_business_arabic_rss_items,
     fetch_dailyforex_rss_items,
+    fetch_forexcrunch_rss_items,
     fetch_forexlive_rss_items,
-    fetch_fxstreet_arabic_rss_items,
     fetch_fxstreet_chinese_rss_items,
     fetch_fxstreet_rss_items,
     save_live_news_payload,
@@ -23,21 +27,28 @@ NOTIFICATION_BATCH_SIZE = 500
 
 PROVIDER_FETCHERS = {
     "fxstreet": fetch_fxstreet_rss_items,
-    "fxstreet_ar": fetch_fxstreet_arabic_rss_items,
     "fxstreet_zh": fetch_fxstreet_chinese_rss_items,
     "dailyforex": fetch_dailyforex_rss_items,
     "forexlive": fetch_forexlive_rss_items,
+    "actionforex": fetch_actionforex_rss_items,
+    "forexcrunch": fetch_forexcrunch_rss_items,
+    "cnn_business_ar": fetch_cnn_business_arabic_rss_items,
 }
+
+
+def _clean_notification_text(value):
+    cleaned = re.sub(r"<[^>]+>", " ", unescape(str(value or "")))
+    return " ".join(cleaned.split()).strip()
 
 
 def _build_news_notification_summary(instance):
     summary_source = (
-        getattr(instance, "teaser", None)
-        or strip_tags(getattr(instance, "body", None) or "")
-        or getattr(instance, "title", None)
+        _clean_notification_text(getattr(instance, "teaser", None))
+        or _clean_notification_text(getattr(instance, "body", None))
+        or _clean_notification_text(getattr(instance, "title", None))
         or "Live market news updated."
     )
-    return Truncator(" ".join(str(summary_source).split())).chars(180)
+    return Truncator(summary_source).chars(180)
 
 
 def _notify_users_about_news(instance, *, event_name):
@@ -56,7 +67,9 @@ def _notify_users_about_news(instance, *, event_name):
         return
 
     recipients = User.objects.filter(is_active=True).only("id")
-    title = Truncator(getattr(instance, "title", None) or "Live market news update").chars(255)
+    title = Truncator(
+        _clean_notification_text(getattr(instance, "title", None)) or "Live market news update"
+    ).chars(255)
     body = _build_news_notification_summary(instance)
     redirect_url = getattr(instance, "source_url", None) or None
     data = {
@@ -160,20 +173,18 @@ class Command(BaseCommand):
         parser.add_argument(
             "--providers",
             type=str,
-            default="fxstreet,fxstreet_ar,fxstreet_zh,dailyforex,forexlive",
-            help="Comma-separated provider keys to poll: fxstreet,fxstreet_ar,fxstreet_zh,dailyforex,forexlive",
+            default="fxstreet,fxstreet_zh,dailyforex,forexlive,actionforex,forexcrunch,cnn_business_ar",
+            help=(
+                "Comma-separated provider keys to poll: "
+                "fxstreet,fxstreet_zh,dailyforex,forexlive,"
+                "actionforex,forexcrunch,cnn_business_ar"
+            ),
         )
         parser.add_argument(
             "--fxstreet-feed-url",
             type=str,
             default="https://www.fxstreet.com/rss/news",
             help="Override the FXStreet RSS feed URL.",
-        )
-        parser.add_argument(
-            "--fxstreet-arabic-feed-url",
-            type=str,
-            default="https://ar.fxstreet.com/rss/news",
-            help="Override the Arabic FXStreet RSS feed URL.",
         )
         parser.add_argument(
             "--fxstreet-chinese-feed-url",
@@ -192,6 +203,24 @@ class Command(BaseCommand):
             type=str,
             default="https://www.forexlive.com/feed/",
             help="Override the ForexLive RSS feed URL.",
+        )
+        parser.add_argument(
+            "--actionforex-feed-url",
+            type=str,
+            default="https://www.actionforex.com/feed/",
+            help="Override the ActionForex RSS feed URL.",
+        )
+        parser.add_argument(
+            "--forexcrunch-feed-url",
+            type=str,
+            default="https://www.forexcrunch.com/feed/",
+            help="Override the Forex Crunch RSS feed URL.",
+        )
+        parser.add_argument(
+            "--cnn-business-ar-feed-url",
+            type=str,
+            default="https://cnnbusinessarabic.com/rssFeed/279/197",
+            help="Override the CNN Business Arabic currencies RSS feed URL.",
         )
         parser.add_argument(
             "--poll-interval-seconds",
@@ -223,10 +252,12 @@ class Command(BaseCommand):
         provider_names = self._parse_provider_names(options.get("providers") or "")
         feed_urls = {
             "fxstreet": (options.get("fxstreet_feed_url") or "").strip() or "https://www.fxstreet.com/rss/news",
-            "fxstreet_ar": (options.get("fxstreet_arabic_feed_url") or "").strip() or "https://ar.fxstreet.com/rss/news",
             "fxstreet_zh": (options.get("fxstreet_chinese_feed_url") or "").strip() or "https://www.fxstreet.hk/rss/news",
             "dailyforex": (options.get("dailyforex_feed_url") or "").strip() or "https://www.dailyforex.com/rss/forexnews.xml",
             "forexlive": (options.get("forexlive_feed_url") or "").strip() or "https://www.forexlive.com/feed/",
+            "actionforex": (options.get("actionforex_feed_url") or "").strip() or "https://www.actionforex.com/feed/",
+            "forexcrunch": (options.get("forexcrunch_feed_url") or "").strip() or "https://www.forexcrunch.com/feed/",
+            "cnn_business_ar": (options.get("cnn_business_ar_feed_url") or "").strip() or "https://cnnbusinessarabic.com/rssFeed/279/197",
         }
 
         first_cycle = True
@@ -274,7 +305,9 @@ class Command(BaseCommand):
                 names.append(cleaned)
         if not names:
             raise CommandError(
-                "No valid providers selected. Use: fxstreet,fxstreet_ar,fxstreet_zh,dailyforex,forexlive"
+                "No valid providers selected. Use: "
+                "fxstreet,fxstreet_zh,dailyforex,forexlive,"
+                "actionforex,forexcrunch,cnn_business_ar"
             )
         return names
 

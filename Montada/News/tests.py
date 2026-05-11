@@ -4,7 +4,10 @@ from django.test import SimpleTestCase, TestCase
 
 from News.live_news_service import (
     detect_news_language,
+    fetch_actionforex_rss_items,
+    fetch_cnn_business_arabic_rss_items,
     fetch_rss_article_details,
+    fetch_forexcrunch_rss_items,
     fetch_open_graph_image_url,
     fetch_rss_items,
     is_frontend_live_news_language,
@@ -65,6 +68,44 @@ class LiveNewsLanguageDetectionTests(SimpleTestCase):
         self.assertTrue(is_frontend_live_news_language("zh-cn"))
         self.assertFalse(is_frontend_live_news_language("it"))
         self.assertFalse(is_frontend_live_news_language("de"))
+
+
+class LiveNewsProviderWrapperTests(SimpleTestCase):
+    @patch("News.live_news_service.fetch_rss_items")
+    def test_actionforex_wrapper_uses_provider_specific_defaults(self, mock_fetch_rss_items):
+        fetch_actionforex_rss_items()
+
+        mock_fetch_rss_items.assert_called_once_with(
+            feed_url=["https://www.actionforex.com/feed/"],
+            provider_slug="actionforex",
+            news_type="actionforex_rss",
+            channel="actionforex",
+            timeout=20,
+        )
+
+    @patch("News.live_news_service.fetch_rss_items")
+    def test_forexcrunch_wrapper_uses_provider_specific_defaults(self, mock_fetch_rss_items):
+        fetch_forexcrunch_rss_items()
+
+        mock_fetch_rss_items.assert_called_once_with(
+            feed_url=["https://www.forexcrunch.com/feed/"],
+            provider_slug="forexcrunch",
+            news_type="forexcrunch_rss",
+            channel="forexcrunch",
+            timeout=20,
+        )
+
+    @patch("News.live_news_service.fetch_rss_items")
+    def test_cnn_business_arabic_wrapper_uses_provider_specific_defaults(self, mock_fetch_rss_items):
+        fetch_cnn_business_arabic_rss_items()
+
+        mock_fetch_rss_items.assert_called_once_with(
+            feed_url=["https://cnnbusinessarabic.com/rssFeed/279/197"],
+            provider_slug="cnn_business_ar",
+            news_type="cnn_business_ar_rss",
+            channel="cnn_business_ar",
+            timeout=20,
+        )
 
 
 class LiveNewsPersistenceTests(TestCase):

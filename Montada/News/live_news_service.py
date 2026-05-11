@@ -999,6 +999,51 @@ def fetch_forexlive_rss_items(*, feed_url=None, timeout=20):
     )
 
 
+def fetch_actionforex_rss_items(*, feed_url=None, timeout=20):
+    url = feed_url or getattr(
+        settings,
+        "ACTIONFOREX_RSS_NEWS_URL",
+        "https://www.actionforex.com/feed/",
+    )
+    return fetch_rss_items(
+        feed_url=[url],
+        provider_slug="actionforex",
+        news_type="actionforex_rss",
+        channel="actionforex",
+        timeout=timeout,
+    )
+
+
+def fetch_forexcrunch_rss_items(*, feed_url=None, timeout=20):
+    url = feed_url or getattr(
+        settings,
+        "FOREXCRUNCH_RSS_NEWS_URL",
+        "https://www.forexcrunch.com/feed/",
+    )
+    return fetch_rss_items(
+        feed_url=[url],
+        provider_slug="forexcrunch",
+        news_type="forexcrunch_rss",
+        channel="forexcrunch",
+        timeout=timeout,
+    )
+
+
+def fetch_cnn_business_arabic_rss_items(*, feed_url=None, timeout=20):
+    url = feed_url or getattr(
+        settings,
+        "CNN_BUSINESS_ARABIC_RSS_NEWS_URL",
+        "https://cnnbusinessarabic.com/rssFeed/279/197",
+    )
+    return fetch_rss_items(
+        feed_url=[url],
+        provider_slug="cnn_business_ar",
+        news_type="cnn_business_ar_rss",
+        channel="cnn_business_ar",
+        timeout=timeout,
+    )
+
+
 def fetch_rss_items(*, feed_url, provider_slug, news_type=None, channel=None, timeout=20):
     feed_urls = feed_url if isinstance(feed_url, (list, tuple)) else [feed_url]
     errors = []
