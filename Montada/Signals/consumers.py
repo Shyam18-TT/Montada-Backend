@@ -2,10 +2,12 @@ import json
 import logging
 from urllib.parse import parse_qs
 
+from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncWebsocketConsumer
 
 from .market_stream import (
     MARKET_DATA_GROUP_NAME,
+    load_market_snapshot,
     normalize_market_symbols,
     should_deliver_market_tick,
 )
@@ -36,10 +38,38 @@ class MarketDataConsumer(AsyncWebsocketConsumer):
                 }
             )
         )
+        await self._send_initial_snapshot()
 
     async def disconnect(self, close_code):
         if getattr(self, "_joined_group", False):
             await self.channel_layer.group_discard(MARKET_DATA_GROUP_NAME, self.channel_name)
+
+    async def _send_initial_snapshot(self):
+        try:
+            ticks = await database_sync_to_async(load_market_snapshot)(self.selected_symbols)
+        except Exception:
+            logger.exception("Failed to load initial market snapshot for websocket client.")
+            await self.send(
+                text_data=json.dumps(
+                    {
+                        "type": "market.snapshot",
+                        "ticks": [],
+                        "count": 0,
+                        "error": "Failed to load initial snapshot.",
+                    }
+                )
+            )
+            return
+
+        await self.send(
+            text_data=json.dumps(
+                {
+                    "type": "market.snapshot",
+                    "ticks": ticks,
+                    "count": len(ticks),
+                }
+            )
+        )
 
     async def receive(self, text_data=None, bytes_data=None):
         if not text_data:
@@ -65,6 +95,7 @@ class MarketDataConsumer(AsyncWebsocketConsumer):
                     }
                 )
             )
+            await self._send_initial_snapshot()
             return
 
         if message_type == "market.unsubscribe":

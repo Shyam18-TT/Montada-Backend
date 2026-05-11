@@ -2,6 +2,7 @@
 WebSocket consumer for live chat. Clients connect to a conversation room
 and receive new messages in real time when someone sends via REST (or via WS).
 """
+import asyncio
 import json
 import logging
 from urllib.parse import parse_qs
@@ -12,6 +13,7 @@ from django.contrib.auth import get_user_model
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
+AUTH_LOOKUP_TIMEOUT_SECONDS = 5
 
 
 def _get_user_from_token(token):
@@ -45,6 +47,24 @@ def get_chat_notification_group_name(user_id):
     return f"chat_notifications_{user_id}"
 
 
+async def _resolve_user_for_socket(scope, socket_name):
+    query = parse_qs(scope.get("query_string", b"").decode())
+    tokens = query.get("token", [])
+    token = tokens[0] if tokens else None
+    if not token:
+        logger.warning("%s websocket rejected because token query param is missing.", socket_name)
+        return None
+
+    try:
+        return await asyncio.wait_for(
+            database_sync_to_async(_get_user_from_token)(token),
+            timeout=AUTH_LOOKUP_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("%s websocket auth lookup timed out.", socket_name)
+        return None
+
+
 class ChatConsumer(AsyncWebsocketConsumer):
     """
     WebSocket connection to a conversation room.
@@ -57,16 +77,24 @@ class ChatConsumer(AsyncWebsocketConsumer):
         self.room_group_name = f"chat_conversation_{self.conversation_id}"
         self._joined_group = False
 
-        # Auth from query string ?token=...
-        query = parse_qs(self.scope.get("query_string", b"").decode())
-        tokens = query.get("token", [])
-        token = tokens[0] if tokens else None
-        user = await database_sync_to_async(_get_user_from_token)(token)
+        user = await _resolve_user_for_socket(self.scope, "chat")
         if not user:
             await self.close(code=4401)
             return
 
-        is_participant = await _check_participant(self.conversation_id, user)
+        try:
+            is_participant = await asyncio.wait_for(
+                _check_participant(self.conversation_id, user),
+                timeout=AUTH_LOOKUP_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "chat websocket participant lookup timed out for conversation_id=%s user_id=%s.",
+                self.conversation_id,
+                getattr(user, "id", None),
+            )
+            await self.close(code=4403)
+            return
         if not is_participant:
             await self.close(code=4403)
             return
@@ -102,10 +130,7 @@ class ChatNotificationConsumer(AsyncWebsocketConsumer):
     async def connect(self):
         self._joined_group = False
 
-        query = parse_qs(self.scope.get("query_string", b"").decode())
-        tokens = query.get("token", [])
-        token = tokens[0] if tokens else None
-        user = await database_sync_to_async(_get_user_from_token)(token)
+        user = await _resolve_user_for_socket(self.scope, "chat.notifications")
         if not user:
             await self.close(code=4401)
             return

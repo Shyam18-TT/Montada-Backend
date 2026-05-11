@@ -21,3 +21,7 @@ Montada/media/*
 Montada/credentials/*
 Montada/credentials/*.json
 Montada/logs/django_db.log
+Montada/logs/*.log
+Montada/runtime/
+Montada/bases/*.dat
+Montada/bases/**/*.dat

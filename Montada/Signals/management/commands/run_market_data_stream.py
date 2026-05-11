@@ -6,7 +6,12 @@ from asgiref.sync import async_to_sync
 from django.conf import settings
 from django.core.management.base import BaseCommand
 
-from Signals.market_stream import MARKET_DATA_GROUP_NAME, build_market_tick_payload
+from Signals.market_stream import (
+    MARKET_DATA_GROUP_NAME,
+    build_market_tick_payload,
+    load_market_snapshot_from_db,
+    save_market_snapshot,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -110,6 +115,7 @@ class Command(BaseCommand):
         self._publish_interval_seconds = publish_interval_ms / 1000.0
         self._pending_ticks = {}
         self._pending_ticks_lock = threading.Lock()
+        self._latest_ticks = {}
         self._stop_dispatcher = threading.Event()
         self._last_broadcast_error_at = 0.0
         self._dispatcher_thread = threading.Thread(
@@ -165,10 +171,10 @@ class Command(BaseCommand):
             manager.Disconnect()
             return
 
-        selected_count = 0
+        selected_symbols = []
         for symbol_name in symbols_to_add:
             if manager.SelectedAdd(symbol_name):
-                selected_count += 1
+                selected_symbols.append(symbol_name)
             else:
                 logger.warning(
                     "SelectedAdd failed for symbol=%s error=%s",
@@ -178,9 +184,26 @@ class Command(BaseCommand):
 
         self.stdout.write(
             self.style.SUCCESS(
-                f"Subscribed to {selected_count}/{len(symbols_to_add)} symbol(s)."
+                f"Subscribed to {len(selected_symbols)}/{len(symbols_to_add)} symbol(s)."
             )
         )
+
+        if selected_symbols:
+            try:
+                initial_snapshot = load_market_snapshot_from_db(selected_symbols)
+                self._latest_ticks = {
+                    tick["symbol"]: tick
+                    for tick in initial_snapshot
+                    if tick.get("symbol")
+                }
+                save_market_snapshot(self._latest_ticks.values())
+                self.stdout.write(
+                    self.style.SUCCESS(
+                        f"Prepared initial market snapshot for {len(self._latest_ticks)} subscribed symbol(s)."
+                    )
+                )
+            except Exception as exc:
+                logger.exception("Failed to prepare initial market snapshot: %s", exc)
 
         if not manager.TickSubscribe(sink):
             self.stderr.write(
@@ -247,6 +270,16 @@ class Command(BaseCommand):
         self._broadcast_ticks(ticks)
 
     def _broadcast_ticks(self, ticks):
+        for tick in ticks:
+            symbol = str((tick or {}).get("symbol") or "").strip()
+            if symbol:
+                self._latest_ticks[symbol] = tick
+
+        try:
+            save_market_snapshot(self._latest_ticks.values())
+        except Exception as exc:
+            logger.exception("Failed to persist market snapshot: %s", exc)
+
         for chunk_start in range(0, len(ticks), 200):
             chunk = ticks[chunk_start:chunk_start + 200]
             try:
