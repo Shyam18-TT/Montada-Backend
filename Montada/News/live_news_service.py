@@ -611,11 +611,40 @@ def normalize_fxstreet_payload(payload):
     return normalize_rss_payload(_with_rss_defaults(payload, provider_slug="fxstreet"))
 
 
+def _rss_uses_embedded_content(normalized):
+    news_type = str((normalized or {}).get("news_type") or "").strip().lower()
+    return news_type in {
+        "alyaum_ar_rss",
+    }
+
+
 def _enrich_rss_details(normalized, existing=None):
     if not isinstance(normalized, dict):
         return normalized
     if not str(normalized.get("news_type") or "").endswith("_rss"):
         return normalized
+
+    if _rss_uses_embedded_content(normalized):
+        embedded_body = _normalize_html_fragment(normalized.get("teaser"))
+        if embedded_body:
+            normalized["body"] = embedded_body
+        elif existing and existing.body:
+            normalized["body"] = existing.body
+
+        merged_tags = list(normalized.get("tags") or [])
+        if existing:
+            merged_tags.extend(existing.tags or [])
+            if existing.primary_image_url and not normalized.get("primary_image_url"):
+                normalized["primary_image_url"] = existing.primary_image_url
+                normalized["images"] = existing.images or []
+        normalized["tags"] = _dedupe_preserve_order(merged_tags)
+        normalized["language"] = detect_news_language(
+            normalized.get("title"),
+            normalized.get("teaser"),
+            normalized.get("body"),
+        )
+        return normalized
+
     details = fetch_rss_article_details(normalized.get("source_url"))
 
     image_url = details.get("image_url")
@@ -719,6 +748,13 @@ def _rss_requires_detail_refresh(existing, normalized):
     if not existing or not isinstance(normalized, dict):
         return True
     if not str(normalized.get("news_type") or "").endswith("_rss"):
+        return False
+    if _rss_uses_embedded_content(normalized):
+        for field in _rss_feed_identity_fields():
+            if getattr(existing, field) != normalized.get(field):
+                return True
+        if not existing.body and normalized.get("teaser"):
+            return True
         return False
     if not existing.body or not existing.primary_image_url:
         return True

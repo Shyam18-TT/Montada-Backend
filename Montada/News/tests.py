@@ -15,6 +15,7 @@ from News.live_news_service import (
     is_supported_live_news_language,
     normalize_fxstreet_payload,
     normalize_rss_payload,
+    _enrich_rss_details,
     save_live_news_payload,
 )
 from News.models import LiveNews
@@ -119,6 +120,24 @@ class LiveNewsProviderWrapperTests(SimpleTestCase):
             channel="alyaum_ar",
             timeout=20,
         )
+
+    @patch("News.live_news_service.fetch_rss_article_details")
+    def test_alyaum_rss_uses_embedded_teaser_body_without_article_crawl(self, mock_fetch_rss_article_details):
+        normalized = {
+            "news_type": "alyaum_ar_rss",
+            "title": "عنوان الخبر",
+            "teaser": "<p>ملخص <strong>الخبر</strong> من التغذية.</p>",
+            "body": None,
+            "tags": ["العربية"],
+            "primary_image_url": None,
+            "images": [],
+        }
+
+        enriched = _enrich_rss_details(normalized)
+
+        mock_fetch_rss_article_details.assert_not_called()
+        self.assertEqual(enriched["body"], "<p>ملخص <strong>الخبر</strong> من التغذية.</p>")
+        self.assertEqual(enriched["language"], "ar")
 
 
 class LiveNewsPersistenceTests(TestCase):
