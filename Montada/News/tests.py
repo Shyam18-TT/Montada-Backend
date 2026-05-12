@@ -5,6 +5,7 @@ from django.test import SimpleTestCase, TestCase
 from News.live_news_service import (
     detect_news_language,
     fetch_actionforex_rss_items,
+    fetch_alyaum_arabic_rss_items,
     fetch_cnn_business_arabic_rss_items,
     fetch_rss_article_details,
     fetch_forexcrunch_rss_items,
@@ -104,6 +105,18 @@ class LiveNewsProviderWrapperTests(SimpleTestCase):
             provider_slug="cnn_business_ar",
             news_type="cnn_business_ar_rss",
             channel="cnn_business_ar",
+            timeout=20,
+        )
+
+    @patch("News.live_news_service.fetch_rss_items")
+    def test_alyaum_arabic_wrapper_uses_provider_specific_defaults(self, mock_fetch_rss_items):
+        fetch_alyaum_arabic_rss_items()
+
+        mock_fetch_rss_items.assert_called_once_with(
+            feed_url=["https://www.alyaum.com/rssFeed/1005"],
+            provider_slug="alyaum_ar",
+            news_type="alyaum_ar_rss",
+            channel="alyaum_ar",
             timeout=20,
         )
 

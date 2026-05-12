@@ -1044,6 +1044,21 @@ def fetch_cnn_business_arabic_rss_items(*, feed_url=None, timeout=20):
     )
 
 
+def fetch_alyaum_arabic_rss_items(*, feed_url=None, timeout=20):
+    url = feed_url or getattr(
+        settings,
+        "ALYAUM_ARABIC_RSS_NEWS_URL",
+        "https://www.alyaum.com/rssFeed/1005",
+    )
+    return fetch_rss_items(
+        feed_url=[url],
+        provider_slug="alyaum_ar",
+        news_type="alyaum_ar_rss",
+        channel="alyaum_ar",
+        timeout=timeout,
+    )
+
+
 def fetch_rss_items(*, feed_url, provider_slug, news_type=None, channel=None, timeout=20):
     feed_urls = feed_url if isinstance(feed_url, (list, tuple)) else [feed_url]
     errors = []

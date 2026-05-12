@@ -11,6 +11,7 @@ from django.utils.text import Truncator
 
 from News.live_news_service import (
     fetch_actionforex_rss_items,
+    fetch_alyaum_arabic_rss_items,
     fetch_cnn_business_arabic_rss_items,
     fetch_dailyforex_rss_items,
     fetch_forexcrunch_rss_items,
@@ -33,6 +34,7 @@ PROVIDER_FETCHERS = {
     "actionforex": fetch_actionforex_rss_items,
     "forexcrunch": fetch_forexcrunch_rss_items,
     "cnn_business_ar": fetch_cnn_business_arabic_rss_items,
+    "alyaum_ar": fetch_alyaum_arabic_rss_items,
 }
 
 
@@ -173,11 +175,11 @@ class Command(BaseCommand):
         parser.add_argument(
             "--providers",
             type=str,
-            default="fxstreet,fxstreet_zh,dailyforex,forexlive,actionforex,forexcrunch,cnn_business_ar",
+            default="fxstreet,fxstreet_zh,dailyforex,forexlive,actionforex,forexcrunch,cnn_business_ar,alyaum_ar",
             help=(
                 "Comma-separated provider keys to poll: "
                 "fxstreet,fxstreet_zh,dailyforex,forexlive,"
-                "actionforex,forexcrunch,cnn_business_ar"
+                "actionforex,forexcrunch,cnn_business_ar,alyaum_ar"
             ),
         )
         parser.add_argument(
@@ -223,6 +225,12 @@ class Command(BaseCommand):
             help="Override the CNN Business Arabic currencies RSS feed URL.",
         )
         parser.add_argument(
+            "--alyaum-ar-feed-url",
+            type=str,
+            default="https://www.alyaum.com/rssFeed/1005",
+            help="Override the Alyaum Arabic RSS feed URL.",
+        )
+        parser.add_argument(
             "--poll-interval-seconds",
             type=int,
             default=30,
@@ -258,6 +266,7 @@ class Command(BaseCommand):
             "actionforex": (options.get("actionforex_feed_url") or "").strip() or "https://www.actionforex.com/feed/",
             "forexcrunch": (options.get("forexcrunch_feed_url") or "").strip() or "https://www.forexcrunch.com/feed/",
             "cnn_business_ar": (options.get("cnn_business_ar_feed_url") or "").strip() or "https://cnnbusinessarabic.com/rssFeed/279/197",
+            "alyaum_ar": (options.get("alyaum_ar_feed_url") or "").strip() or "https://www.alyaum.com/rssFeed/1005",
         }
 
         first_cycle = True
@@ -307,7 +316,7 @@ class Command(BaseCommand):
             raise CommandError(
                 "No valid providers selected. Use: "
                 "fxstreet,fxstreet_zh,dailyforex,forexlive,"
-                "actionforex,forexcrunch,cnn_business_ar"
+                "actionforex,forexcrunch,cnn_business_ar,alyaum_ar"
             )
         return names
 
@@ -324,7 +333,10 @@ class Command(BaseCommand):
                 items = fetcher(feed_url=feed_urls[provider_name])
             except Exception as exc:
                 failed_count += 1
-                logger.exception("RSS provider fetch failed provider=%s: %s", provider_name, exc)
+                if isinstance(exc, RuntimeError) and "All RSS feed URLs failed" in str(exc):
+                    logger.warning("RSS provider fetch failed provider=%s: %s", provider_name, exc)
+                else:
+                    logger.exception("RSS provider fetch failed provider=%s: %s", provider_name, exc)
                 self.stderr.write(
                     self.style.WARNING(
                         f"Skipping {provider_name} for this cycle because feed fetch failed: {exc}"
