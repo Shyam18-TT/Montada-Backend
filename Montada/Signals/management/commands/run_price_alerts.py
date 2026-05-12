@@ -24,6 +24,7 @@ from decimal import Decimal
 
 from django.core.management.base import BaseCommand
 from django.db import connections
+from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,8 @@ _manager_shutdown = threading.Event()
 _manager_thread = None
 _manager_connected = False
 _manager_first_tick_logged = set()  # symbols we already printed "first tick" for
+ENTRY_WATCH_UP = "up"
+ENTRY_WATCH_DOWN = "down"
 
 
 def _normalize_mt5_symbol(instrument_symbol):
@@ -274,6 +277,75 @@ def _check_signal_hit(signal, bid, ask=None):
     return None
 
 
+def _get_signal_entry_price(signal, bid, ask=None):
+    """
+    Return the executable market price for entering the signal.
+    BUY entries use ask, SELL entries use bid.
+    """
+    direction = (signal.direction or "").upper()
+    if direction == "BUY":
+        return ask if ask is not None else bid
+    if direction == "SELL":
+        return bid if bid is not None else ask
+    return bid if bid is not None else ask
+
+
+def _ensure_signal_entry_state(signal, bid, ask=None):
+    """
+    Persist entry activation state before TP/SL checks.
+
+    We infer whether price must move up or down to reach the entry from the
+    first observed tradable price, then only mark the signal as entered once
+    that crossing happens.
+    """
+    if getattr(signal, "entry_triggered_at", None):
+        current_price = _get_signal_entry_price(signal, bid, ask)
+        return True, Decimal(str(current_price)) if current_price is not None else None, False
+
+    current_price = _get_signal_entry_price(signal, bid, ask)
+    if current_price is None:
+        return False, None, False
+
+    try:
+        price = Decimal(str(current_price))
+        entry = signal.entry_price
+    except Exception:
+        return False, None, False
+
+    watch_direction = getattr(signal, "entry_watch_direction", None) or ""
+    watch_direction = watch_direction.strip().lower()
+
+    if price == entry:
+        signal.entry_triggered_at = timezone.now()
+        signal.save(update_fields=["entry_triggered_at", "updated_at"])
+        logger.info("Signal %s entry reached immediately at %s", signal.id, price)
+        return True, price, True
+
+    if watch_direction not in {ENTRY_WATCH_UP, ENTRY_WATCH_DOWN}:
+        signal.entry_watch_direction = ENTRY_WATCH_UP if price < entry else ENTRY_WATCH_DOWN
+        signal.save(update_fields=["entry_watch_direction", "updated_at"])
+        logger.debug(
+            "Signal %s entry watch initialized: current=%s entry=%s direction=%s",
+            signal.id,
+            price,
+            entry,
+            signal.entry_watch_direction,
+        )
+        return False, price, False
+
+    has_entered = (
+        (watch_direction == ENTRY_WATCH_UP and price >= entry)
+        or (watch_direction == ENTRY_WATCH_DOWN and price <= entry)
+    )
+    if not has_entered:
+        return False, price, False
+
+    signal.entry_triggered_at = timezone.now()
+    signal.save(update_fields=["entry_triggered_at", "updated_at"])
+    logger.info("Signal %s entry reached at %s", signal.id, price)
+    return True, price, True
+
+
 def _close_signal_and_notify(signal, hit_type, current_price):
     """Close the signal, create UserNotification for analyst, send FCM push (only once per signal)."""
     from Signals.models import TradingSignal
@@ -416,8 +488,93 @@ def _trigger_user_price_alert(alert, current_price):
     logger.info("PriceAlert %s triggered for %s at %s – user %s notified", alert.id, symbol, current_price, alert.user_id)
 
 
+def _get_alert_activation_price(alert, current_price):
+    """
+    Return the price level that must be touched before the alert becomes active.
+
+    Percentage alerts use reference_price as the activation level. Fixed-price alerts
+    arm immediately on the first observed market price by storing that observed price.
+    """
+    if getattr(alert, "reference_price", None) is not None:
+        return alert.reference_price
+    if getattr(alert, "activation_price", None) is not None:
+        return alert.activation_price
+    if current_price is None:
+        return None
+    try:
+        return Decimal(str(current_price))
+    except Exception:
+        return None
+
+
+def _ensure_user_alert_activation_state(alert, bid):
+    """
+    Persist the staged lifecycle for user price alerts.
+
+    The alert must first become armed before we evaluate its target condition.
+    """
+    if bid is None:
+        return False, None, False
+
+    try:
+        current_price = Decimal(str(bid))
+    except Exception:
+        return False, None, False
+
+    if getattr(alert, "armed_at", None):
+        return True, current_price, False
+
+    activation_price = _get_alert_activation_price(alert, current_price)
+    if activation_price is None:
+        return False, current_price, False
+
+    watch_direction = (getattr(alert, "activation_watch_direction", None) or "").strip().lower()
+    update_fields = []
+
+    if getattr(alert, "activation_price", None) != activation_price:
+        alert.activation_price = activation_price
+        update_fields.append("activation_price")
+
+    if current_price == activation_price:
+        alert.armed_at = timezone.now()
+        update_fields.extend(["armed_at", "updated_at"])
+        alert.save(update_fields=list(dict.fromkeys(update_fields)))
+        logger.info("PriceAlert %s armed immediately at %s", alert.id, current_price)
+        return True, current_price, True
+
+    if watch_direction not in {ENTRY_WATCH_UP, ENTRY_WATCH_DOWN}:
+        alert.activation_watch_direction = (
+            ENTRY_WATCH_UP if current_price < activation_price else ENTRY_WATCH_DOWN
+        )
+        update_fields.extend(["activation_watch_direction", "updated_at"])
+        alert.save(update_fields=list(dict.fromkeys(update_fields)))
+        logger.debug(
+            "PriceAlert %s activation watch initialized: current=%s activation=%s direction=%s",
+            alert.id,
+            current_price,
+            activation_price,
+            alert.activation_watch_direction,
+        )
+        return False, current_price, False
+
+    is_armed = (
+        (watch_direction == ENTRY_WATCH_UP and current_price >= activation_price)
+        or (watch_direction == ENTRY_WATCH_DOWN and current_price <= activation_price)
+    )
+    if not is_armed:
+        if update_fields:
+            alert.save(update_fields=list(dict.fromkeys(update_fields)))
+        return False, current_price, False
+
+    alert.armed_at = timezone.now()
+    update_fields.extend(["armed_at", "updated_at"])
+    alert.save(update_fields=list(dict.fromkeys(update_fields)))
+    logger.info("PriceAlert %s armed at %s", alert.id, current_price)
+    return True, current_price, True
+
+
 def _check_user_alert_hit(alert, bid):
-    """Return True if current price meets the alert condition (above/below target). Uses target_price or computed from target_percentage + reference_price."""
+    """Return True if an armed alert meets its target condition."""
     if bid is None:
         return False
     target = alert.get_effective_target_price()
@@ -623,6 +780,7 @@ class Command(BaseCommand):
             .only(
                 "id", "analyst_id", "direction", "entry_price", "take_profit", "stop_loss",
                 "instrument_id", "status", "is_win", "is_loss",
+                "entry_triggered_at", "entry_watch_direction",
             )
         )
         alerts = list(
@@ -699,6 +857,16 @@ class Command(BaseCommand):
             ask = quote.get("ask")
 
             for signal in self._signals_by_symbol.get(mt5_sym, []):
+                is_entered, entry_price, entry_marked_now = _ensure_signal_entry_state(signal, bid, ask)
+                if entry_marked_now:
+                    self.stdout.write(
+                        self.style.SUCCESS(
+                            "  >>> Activated signal %s at entry price %s from realtime tick %s"
+                            % (signal.id, entry_price, mt5_sym)
+                        )
+                    )
+                if not is_entered:
+                    continue
                 hit = _check_signal_hit(signal, bid, ask)
                 if not hit:
                     continue
@@ -713,6 +881,16 @@ class Command(BaseCommand):
                 )
 
             for alert in self._alerts_by_symbol.get(mt5_sym, []):
+                is_armed, current_price, armed_now = _ensure_user_alert_activation_state(alert, bid)
+                if armed_now:
+                    self.stdout.write(
+                        self.style.SUCCESS(
+                            "  >>> Armed price alert %s for %s at %s (user %s)"
+                            % (alert.id, mt5_sym, current_price, alert.user_id)
+                        )
+                    )
+                if not is_armed:
+                    continue
                 if not _check_user_alert_hit(alert, bid):
                     continue
                 _trigger_user_price_alert(alert, bid)
@@ -747,6 +925,7 @@ class Command(BaseCommand):
             .only(
                 "id", "analyst_id", "direction", "entry_price", "take_profit", "stop_loss",
                 "instrument_id", "status", "is_win", "is_loss",
+                "entry_triggered_at", "entry_watch_direction",
             )
         )
         alerts = list(
@@ -865,7 +1044,7 @@ class Command(BaseCommand):
             % (now, len(signals), len(alerts), symbol_list, price_source, {s: prices[s].get("bid") for s in symbol_list if s in prices})
         )
 
-        self.stdout.write("[CHECK] Step 3: Checking each signal (current price vs TP/SL)...")
+        self.stdout.write("[CHECK] Step 3: Checking each signal (entry first, then TP/SL)...")
         if self._verbose:
             self.stdout.write("  Signals being checked:")
 
@@ -882,6 +1061,28 @@ class Command(BaseCommand):
                 continue
             bid = quote.get("bid")
             ask = quote.get("ask")
+            is_entered, entry_price, entry_marked_now = _ensure_signal_entry_state(signal, bid, ask)
+            if entry_marked_now:
+                self.stdout.write(
+                    self.style.SUCCESS(
+                        "  >>> Activated signal %s at entry price %s"
+                        % (signal.id, entry_price)
+                    )
+                )
+            if not is_entered:
+                watch_direction = getattr(signal, "entry_watch_direction", None) or "pending"
+                self.stdout.write(
+                    "[CHECK]   Signal %s | %s | entry=%s | market=%s | waiting_for_entry (%s)"
+                    % (signal.id, mt5_sym, signal.entry_price, entry_price, watch_direction)
+                )
+                if self._verbose:
+                    inst = signal.instrument
+                    sym = inst.symbol if inst else mt5_sym
+                    self.stdout.write(
+                        "  - %s | %s %s | entry=%s | market=%s | waiting for activation"
+                        % (signal.id, sym, signal.direction, signal.entry_price, entry_price)
+                    )
+                continue
             hit = _check_signal_hit(signal, bid, ask)
             # Price used for the hit (bid for BUY, ask for SELL when available)
             used_price = ask if (signal.direction or "").upper() == "SELL" and ask is not None else bid
@@ -912,6 +1113,20 @@ class Command(BaseCommand):
                 if not quote:
                     continue
                 bid = quote.get("bid")
+                is_armed, current_price, armed_now = _ensure_user_alert_activation_state(alert, bid)
+                if armed_now:
+                    self.stdout.write(
+                        self.style.SUCCESS(
+                            "  >>> Armed price alert %s for %s at %s (user %s)"
+                            % (alert.id, mt5_sym, current_price, alert.user_id)
+                        )
+                    )
+                if not is_armed:
+                    self.stdout.write(
+                        "[CHECK]   PriceAlert %s | %s | activation=%s | market=%s | waiting_for_activation"
+                        % (alert.id, mt5_sym, alert.activation_price or alert.reference_price, current_price)
+                    )
+                    continue
                 if _check_user_alert_hit(alert, bid):
                     _trigger_user_price_alert(alert, bid)
                     self.stdout.write(

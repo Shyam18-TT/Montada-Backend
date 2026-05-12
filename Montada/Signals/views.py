@@ -68,6 +68,42 @@ def _log_signal_closed(user, signal):
     )
 
 
+def _reset_signal_lifecycle_if_needed(signal, *, old_status, old_direction, old_entry_price, old_instrument_id):
+    """
+    Clear auto-close lifecycle state when an open signal is edited or reopened.
+    """
+    if signal.status != TradingSignal.Status.OPEN:
+        return
+
+    needs_reset = (
+        old_status != TradingSignal.Status.OPEN
+        or old_direction != signal.direction
+        or old_entry_price != signal.entry_price
+        or old_instrument_id != signal.instrument_id
+    )
+    if not needs_reset:
+        return
+
+    signal.entry_triggered_at = None
+    signal.entry_watch_direction = None
+    signal.price_alert_fcm_sent = False
+    signal.is_win = None
+    signal.is_loss = None
+    signal.is_neutral = None
+    signal.updated_at = timezone.now()
+    signal.save(
+        update_fields=[
+            "entry_triggered_at",
+            "entry_watch_direction",
+            "price_alert_fcm_sent",
+            "is_win",
+            "is_loss",
+            "is_neutral",
+            "updated_at",
+        ]
+    )
+
+
 def _create_and_broadcast_notifications(users, *, title, body, notification_type="INFO", redirect_url=None):
     if not users:
         return
@@ -112,24 +148,14 @@ def _send_push_notifications(users, *, title, body, data):
 
 
 def _get_signal_notification_recipients(analyst):
-    from Subscriptions.models import AnalystContentPlan, UserAnalystPlanSubscription
-
-    now = timezone.now()
     recipient_ids = (
-        UserAnalystPlanSubscription.objects.filter(
-            status=UserAnalystPlanSubscription.Status.ACTIVE,
-            end_date__gte=now,
-            plan__is_active=True,
-            plan__analyst=analyst,
-            plan__scope__in=[
-                AnalystContentPlan.Scope.SIGNALS,
-                AnalystContentPlan.Scope.ALL,
-            ],
-            subscriber__sent_follow_requests__followed=analyst,
-            subscriber__sent_follow_requests__status=Follow.Status.ACCEPTED,
-            subscriber__sent_follow_requests__is_active=True,
+        Follow.objects.filter(
+            followed=analyst,
+            status=Follow.Status.ACCEPTED,
+            is_active=True,
+            follower__is_active=True,
         )
-        .values_list("subscriber_id", flat=True)
+        .values_list("follower_id", flat=True)
         .distinct()
     )
     return list(User.objects.filter(id__in=recipient_ids).distinct())
@@ -191,6 +217,52 @@ def _notify_signal_published(signal, *, old_status=None):
         "symbol": symbol,
         "direction": signal.direction or "",
         "status": signal.status or "",
+        "timeframe": timeframe,
+    }
+
+    _create_and_broadcast_notifications(recipients, title=title, body=body, notification_type="INFO")
+    _send_push_notifications(recipients, title=title, body=body, data=data_payload)
+
+
+def _notify_signal_closed(signal, *, old_status=None):
+    if (
+        not signal
+        or signal.status != TradingSignal.Status.CLOSED
+        or old_status == TradingSignal.Status.CLOSED
+    ):
+        return
+
+    recipients = _get_signal_notification_recipients(signal.analyst)
+    if not recipients:
+        return
+
+    analyst_name = (
+        getattr(signal.analyst, "name", None)
+        or getattr(signal.analyst, "username", None)
+        or getattr(signal.analyst, "email", "Analyst")
+    )
+    symbol = signal.instrument.symbol if signal.instrument else "signal"
+    timeframe = signal.timeframe.code if signal.timeframe else ""
+    if signal.is_win:
+        outcome = "profit"
+    elif signal.is_loss:
+        outcome = "loss"
+    else:
+        outcome = "neutral"
+
+    title = f"{analyst_name} closed a signal"
+    body = (
+        f"{analyst_name} closed the {signal.direction} signal for {symbol} as {outcome}"
+        + (f" ({timeframe})." if timeframe else ".")
+    )
+    data_payload = {
+        "type": "signal_closed",
+        "signal_id": str(signal.id),
+        "analyst_id": str(signal.analyst_id),
+        "symbol": symbol,
+        "direction": signal.direction or "",
+        "status": signal.status or "",
+        "close_outcome": outcome,
         "timeframe": timeframe,
     }
 
@@ -399,10 +471,21 @@ class AnalystSignalUpdateView(generics.RetrieveUpdateAPIView):
         partial = kwargs.pop('partial', False)
         instance = self.get_object()
         old_status = instance.status
+        old_direction = instance.direction
+        old_entry_price = instance.entry_price
+        old_instrument_id = instance.instrument_id
         serializer = self.get_serializer(instance, data=request.data, partial=partial)
         serializer.is_valid(raise_exception=True)
         self.perform_update(serializer)
+        _reset_signal_lifecycle_if_needed(
+            instance,
+            old_status=old_status,
+            old_direction=old_direction,
+            old_entry_price=old_entry_price,
+            old_instrument_id=old_instrument_id,
+        )
         _notify_signal_published(instance, old_status=old_status)
+        _notify_signal_closed(instance, old_status=old_status)
         if ActivityLog and old_status != TradingSignal.Status.CLOSED and instance.status == TradingSignal.Status.CLOSED:
             _log_signal_closed(request.user, instance)
         return Response({
@@ -417,6 +500,9 @@ class AnalystSignalUpdateView(generics.RetrieveUpdateAPIView):
         """
         instance = self.get_object()
         old_status = instance.status
+        old_direction = instance.direction
+        old_entry_price = instance.entry_price
+        old_instrument_id = instance.instrument_id
         # Allow only status and outcome fields for PATCH
         allowed = {'status', 'is_win', 'is_loss', 'is_neutral'}
         data = {k: request.data[k] for k in allowed if k in request.data}
@@ -427,7 +513,15 @@ class AnalystSignalUpdateView(generics.RetrieveUpdateAPIView):
         serializer = self.get_serializer(instance, data=data, partial=True)
         serializer.is_valid(raise_exception=True)
         self.perform_update(serializer)
+        _reset_signal_lifecycle_if_needed(
+            instance,
+            old_status=old_status,
+            old_direction=old_direction,
+            old_entry_price=old_entry_price,
+            old_instrument_id=old_instrument_id,
+        )
         _notify_signal_published(instance, old_status=old_status)
+        _notify_signal_closed(instance, old_status=old_status)
         if ActivityLog and old_status != TradingSignal.Status.CLOSED and instance.status == TradingSignal.Status.CLOSED:
             _log_signal_closed(request.user, instance)
         return Response({

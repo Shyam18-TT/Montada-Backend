@@ -97,6 +97,7 @@ class TradingSignalSerializer(serializers.ModelSerializer):
     timeframe_code = serializers.CharField(source='timeframe.code', read_only=True)
     timeframe_name = serializers.CharField(source='timeframe.name', read_only=True)
     close_outcome = serializers.SerializerMethodField()
+    is_entered = serializers.SerializerMethodField()
 
     # Accept IDs from frontend
     asset_class = serializers.PrimaryKeyRelatedField(
@@ -122,10 +123,13 @@ class TradingSignalSerializer(serializers.ModelSerializer):
             'timeframe', 'timeframe_code', 'timeframe_name',
             'confidence_level', 'analyst_note',
             'status', 'is_win', 'is_loss', 'is_neutral',
-            'close_outcome',
+            'close_outcome', 'is_entered', 'entry_triggered_at',
             'is_active', 'created_at', 'updated_at'
         )
-        read_only_fields = ('id', 'analyst', 'created_at', 'updated_at', 'close_outcome')
+        read_only_fields = (
+            'id', 'analyst', 'created_at', 'updated_at',
+            'close_outcome', 'is_entered', 'entry_triggered_at',
+        )
 
     def get_close_outcome(self, obj):
         """How the analyst closed the signal (matches is_win / is_loss / is_neutral)."""
@@ -138,6 +142,9 @@ class TradingSignalSerializer(serializers.ModelSerializer):
         if obj.is_neutral is True:
             return "neutral"
         return None
+
+    def get_is_entered(self, obj):
+        return obj.entry_triggered_at is not None
     
     def validate_confidence_level(self, value):
         """Validate confidence level is between 0 and 100"""
@@ -270,23 +277,27 @@ class PriceAlertSerializer(serializers.ModelSerializer):
     instrument_symbol = serializers.CharField(source='instrument.symbol', read_only=True)
     instrument_name = serializers.CharField(source='instrument.name', read_only=True)
     effective_target_price = serializers.SerializerMethodField()
+    is_armed = serializers.SerializerMethodField()
 
     class Meta:
         model = PriceAlert
         fields = (
             'id', 'instrument', 'instrument_symbol', 'instrument_name',
             'target_price', 'target_percentage', 'reference_price', 'condition', 'label',
-            'effective_target_price',
+            'effective_target_price', 'activation_price', 'is_armed', 'armed_at',
             'is_triggered', 'triggered_at', 'created_at', 'updated_at',
         )
         read_only_fields = (
             'id', 'instrument', 'instrument_symbol', 'instrument_name',
             'target_price', 'target_percentage', 'reference_price', 'condition', 'label',
-            'effective_target_price',
+            'effective_target_price', 'activation_price', 'is_armed', 'armed_at',
             'is_triggered', 'triggered_at', 'created_at', 'updated_at',
         )
 
     def get_effective_target_price(self, obj):
         eff = obj.get_effective_target_price()
         return str(eff) if eff is not None else None
+
+    def get_is_armed(self, obj):
+        return obj.armed_at is not None
 

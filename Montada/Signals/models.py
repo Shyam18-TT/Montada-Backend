@@ -227,6 +227,17 @@ class TradingSignal(models.Model):
     is_win = models.BooleanField(null=True, blank=True)
     is_loss = models.BooleanField(null=True, blank=True)
     is_neutral = models.BooleanField(null=True, blank=True)
+    entry_triggered_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When market price first reached the entry price and the signal became active.",
+    )
+    entry_watch_direction = models.CharField(
+        max_length=10,
+        null=True,
+        blank=True,
+        help_text="Internal direction used to determine whether price must move up or down to reach entry.",
+    )
 
     price_alert_fcm_sent = models.BooleanField(
         default=False,
@@ -367,6 +378,24 @@ class PriceAlert(models.Model):
         blank=True,
         null=True,
         help_text="Optional label for the alert",
+    )
+    activation_price = models.DecimalField(
+        max_digits=18,
+        decimal_places=5,
+        null=True,
+        blank=True,
+        help_text="Price level the market must touch before the alert becomes active.",
+    )
+    activation_watch_direction = models.CharField(
+        max_length=10,
+        null=True,
+        blank=True,
+        help_text="Internal direction used to determine whether price must move up or down to activate the alert.",
+    )
+    armed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the alert became active and started watching the target price.",
     )
     is_triggered = models.BooleanField(default=False)
     triggered_at = models.DateTimeField(null=True, blank=True)
