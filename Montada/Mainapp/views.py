@@ -109,7 +109,8 @@ Montada Team
 
                 return Response({
                     'message': 'Soft-deleted account restored. Please check your email for verification OTP to complete registration.',
-                    'email': user.email
+                    'email': user.email,
+                    'user': UserProfileSerializer(user).data,
                 }, status=status.HTTP_200_OK)
             
             # If user is already verified, return error
@@ -168,7 +169,8 @@ Montada Team
             
             return Response({
                 'message': 'Registration details updated. Please check your email for verification OTP to complete registration.',
-                'email': user.email
+                'email': user.email,
+                'user': UserProfileSerializer(user).data,
             }, status=status.HTTP_200_OK)
             
         except User.DoesNotExist:
@@ -225,7 +227,8 @@ Montada Team
         
         return Response({
             'message': 'Registration successful. Please check your email for verification OTP to complete registration.',
-            'email': user.email
+            'email': user.email,
+            'user': UserProfileSerializer(user).data,
         }, status=status.HTTP_201_CREATED)
 
 

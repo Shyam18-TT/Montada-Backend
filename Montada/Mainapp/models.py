@@ -33,6 +33,18 @@ class User(AbstractUser):
         default=False,
         help_text='True when the user has an active subscription for market news and live market data (includes in-date free trial).',
     )
+    news_notify_ar = models.BooleanField(
+        default=True,
+        help_text='Whether the user wants Arabic live news notifications.',
+    )
+    news_notify_en = models.BooleanField(
+        default=True,
+        help_text='Whether the user wants English live news notifications.',
+    )
+    news_notify_zh = models.BooleanField(
+        default=False,
+        help_text='Whether the user wants Chinese live news notifications.',
+    )
     free_trial_eligible = models.BooleanField(
         default=True,
         help_text='Whether this user may still receive their first in-app free trial automatically.',

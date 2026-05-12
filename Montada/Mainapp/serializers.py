@@ -4,7 +4,75 @@ from django.contrib.auth.password_validation import validate_password
 from .models import User, AccountDeletionOTP
 
 
-class UserRegistrationSerializer(serializers.ModelSerializer):
+NEWS_LANGUAGE_PREFERENCE_FIELDS = (
+    'news_notify_ar',
+    'news_notify_en',
+    'news_notify_zh',
+)
+DEFAULT_NEWS_LANGUAGE_PREFERENCES = {
+    'news_notify_ar': True,
+    'news_notify_en': True,
+    'news_notify_zh': False,
+}
+NEWS_LANGUAGE_OPTIONS = (
+    {'code': 'ar', 'label': 'Arabic'},
+    {'code': 'en', 'label': 'English'},
+    {'code': 'zh', 'label': 'Chinese'},
+)
+
+
+def _apply_news_language_preferences(attrs, *, instance=None):
+    provided_fields = [field for field in NEWS_LANGUAGE_PREFERENCE_FIELDS if field in attrs]
+    if not provided_fields:
+        if instance is None:
+            attrs.update(DEFAULT_NEWS_LANGUAGE_PREFERENCES)
+        return attrs
+
+    current_preferences = {
+        field: getattr(instance, field, DEFAULT_NEWS_LANGUAGE_PREFERENCES[field])
+        if instance is not None
+        else DEFAULT_NEWS_LANGUAGE_PREFERENCES[field]
+        for field in NEWS_LANGUAGE_PREFERENCE_FIELDS
+    }
+    for field in provided_fields:
+        current_preferences[field] = bool(attrs[field])
+
+    if sum(1 for field in NEWS_LANGUAGE_PREFERENCE_FIELDS if current_preferences[field]) != 2:
+        raise serializers.ValidationError(
+            {'news_language_preferences': 'Choose exactly 2 news notification languages.'}
+        )
+
+    attrs.update(current_preferences)
+    return attrs
+
+
+def _selected_news_language_codes(user):
+    selected = []
+    if getattr(user, 'news_notify_ar', False):
+        selected.append('ar')
+    if getattr(user, 'news_notify_en', False):
+        selected.append('en')
+    if getattr(user, 'news_notify_zh', False):
+        selected.append('zh')
+    return selected
+
+
+class NewsLanguagePreferenceSerializerMixin(serializers.Serializer):
+    news_notification_languages = serializers.SerializerMethodField(read_only=True)
+    news_notification_language_options = serializers.SerializerMethodField(read_only=True)
+    news_notification_selection_limit = serializers.SerializerMethodField(read_only=True)
+
+    def get_news_notification_languages(self, obj):
+        return _selected_news_language_codes(obj)
+
+    def get_news_notification_language_options(self, obj):
+        return list(NEWS_LANGUAGE_OPTIONS)
+
+    def get_news_notification_selection_limit(self, obj):
+        return 2
+
+
+class UserRegistrationSerializer(NewsLanguagePreferenceSerializerMixin, serializers.ModelSerializer):
     
     password = serializers.CharField(
         write_only=True,
@@ -19,6 +87,10 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
             'id', 'username', 'email', 'password',
             'name', 'phone_number', 'date_of_birth',
             'user_type', 'is_subscribed',
+            'news_notify_ar', 'news_notify_en', 'news_notify_zh',
+            'news_notification_languages',
+            'news_notification_language_options',
+            'news_notification_selection_limit',
             'experience', 'company', 'contact_details', 'social_links',
         )
         extra_kwargs = {
@@ -28,6 +100,9 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
             'date_of_birth': {'required': False},
             'user_type': {'required': True},
             'is_subscribed': {'required': False},
+            'news_notify_ar': {'required': False},
+            'news_notify_en': {'required': False},
+            'news_notify_zh': {'required': False},
             'experience': {'required': False},
             'company': {'required': False},
             'contact_details': {'required': False},
@@ -41,7 +116,7 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({
                 'password': 'Password is required for registration.'
             })
-        return attrs
+        return _apply_news_language_preferences(attrs, instance=self.instance)
 
     def create(self, validated_data):
         # Ensure username is set from email if not provided
@@ -103,7 +178,7 @@ class UserLoginSerializer(serializers.Serializer):
             )
 
 
-class UserProfileSerializer(serializers.ModelSerializer):
+class UserProfileSerializer(NewsLanguagePreferenceSerializerMixin, serializers.ModelSerializer):
     """
     Serializer for user profile. Includes analyst fields when user_type is analyst.
     """
@@ -113,10 +188,17 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'id', 'username', 'email', 'name',
             'phone_number', 'profile_picture', 'date_of_birth',
             'user_type', 'is_subscribed', 'is_verified',
+            'news_notify_ar', 'news_notify_en', 'news_notify_zh',
+            'news_notification_languages',
+            'news_notification_language_options',
+            'news_notification_selection_limit',
             'experience', 'company', 'contact_details', 'social_links',
             'created_at', 'updated_at',
         )
         read_only_fields = ('id', 'email', 'is_verified', 'created_at', 'updated_at')
+
+    def validate(self, attrs):
+        return _apply_news_language_preferences(attrs, instance=self.instance)
 
 
 class ChangePasswordSerializer(serializers.Serializer):

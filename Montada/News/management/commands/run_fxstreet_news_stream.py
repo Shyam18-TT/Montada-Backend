@@ -25,6 +25,11 @@ from News.live_news_service import (
 logger = logging.getLogger(__name__)
 User = get_user_model()
 NOTIFICATION_BATCH_SIZE = 500
+NEWS_LANGUAGE_RECIPIENT_FIELDS = {
+    "ar": "news_notify_ar",
+    "en": "news_notify_en",
+    "zh": "news_notify_zh",
+}
 
 PROVIDER_FETCHERS = {
     "fxstreet": fetch_fxstreet_rss_items,
@@ -53,6 +58,20 @@ def _build_news_notification_summary(instance):
     return Truncator(summary_source).chars(180)
 
 
+def _normalize_notification_language(language):
+    normalized = str(language or "").strip().lower().replace("_", "-")
+    return normalized.split("-", 1)[0] if normalized else ""
+
+
+def _get_news_notification_recipients(language):
+    preference_field = NEWS_LANGUAGE_RECIPIENT_FIELDS.get(
+        _normalize_notification_language(language)
+    )
+    if not preference_field:
+        return User.objects.none()
+    return User.objects.filter(is_active=True, **{preference_field: True}).only("id")
+
+
 def _notify_users_about_news(instance, *, event_name):
     if not instance:
         return
@@ -68,7 +87,7 @@ def _notify_users_about_news(instance, *, event_name):
         )
         return
 
-    recipients = User.objects.filter(is_active=True).only("id")
+    recipients = _get_news_notification_recipients(getattr(instance, "language", None))
     title = Truncator(
         _clean_notification_text(getattr(instance, "title", None)) or "Live market news update"
     ).chars(255)

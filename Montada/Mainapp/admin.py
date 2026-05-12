@@ -15,12 +15,28 @@ class UserAdmin(BaseUserAdmin):
     
     fieldsets = BaseUserAdmin.fieldsets + (
         ('Additional Info', {
-            'fields': ('phone_number', 'profile_picture', 'date_of_birth', 'is_verified')
+            'fields': (
+                'phone_number',
+                'profile_picture',
+                'date_of_birth',
+                'is_verified',
+                'news_notify_ar',
+                'news_notify_en',
+                'news_notify_zh',
+            )
         }),
     )
     
     add_fieldsets = BaseUserAdmin.add_fieldsets + (
         ('Additional Info', {
-            'fields': ('email', 'phone_number', 'profile_picture', 'date_of_birth')
+            'fields': (
+                'email',
+                'phone_number',
+                'profile_picture',
+                'date_of_birth',
+                'news_notify_ar',
+                'news_notify_en',
+                'news_notify_zh',
+            )
         }),
     )
