@@ -3201,12 +3201,8 @@ class AdminFCMBroadcastView(APIView):
             )
 
         # ── Resolve device tokens ────────────────────────────────────────────
-        from Mainapp.models import DeviceToken
-        token_strings = list(
-            DeviceToken.objects.filter(user__in=recipient_list)
-            .values_list("fcm_token", flat=True)
-            .distinct()
-        )
+        from firebase import get_push_tokens_for_users
+        token_strings = get_push_tokens_for_users(recipient_list)
         device_tokens_found = len(token_strings)
 
         # ── Send FCM push ────────────────────────────────────────────────────

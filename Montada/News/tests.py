@@ -1,7 +1,10 @@
 from unittest.mock import patch
 
+from django.contrib.auth import get_user_model
 from django.test import SimpleTestCase, TestCase
 
+from Mainapp.models import UserNotification
+from News.management.commands.run_fxstreet_news_stream import _flush_news_notification_batch
 from News.live_news_service import (
     detect_news_language,
     fetch_actionforex_rss_items,
@@ -19,6 +22,8 @@ from News.live_news_service import (
     save_live_news_payload,
 )
 from News.models import LiveNews
+
+User = get_user_model()
 
 
 class LiveNewsLanguageDetectionTests(SimpleTestCase):
@@ -564,3 +569,64 @@ class LiveNewsPersistenceTests(TestCase):
             LiveNews.objects.filter(provider_content_id=payload["id"]).exists()
         )
         mock_broadcast.assert_called_once_with(existing, event_name="deleted")
+
+
+class LiveNewsNotificationTests(TestCase):
+    @patch("firebase.send_push_to_users")
+    def test_flush_news_notification_batch_skips_recent_duplicates(self, mock_send_push_to_users):
+        first_user = User.objects.create_user(
+            email="first@example.com",
+            username="first@example.com",
+            password="Testpass123!",
+        )
+        second_user = User.objects.create_user(
+            email="second@example.com",
+            username="second@example.com",
+            password="Testpass123!",
+        )
+        UserNotification.objects.create(
+            user=first_user,
+            title="FXStreet update",
+            message="Gold remains bid near the highs.",
+            notification_type="INFO",
+            redirect_url="https://example.com/news/gold",
+        )
+
+        from unittest.mock import Mock
+
+        broadcast_mock = Mock()
+        instance = type("NewsInstance", (), {"provider_content_id": 12345})()
+
+        _flush_news_notification_batch(
+            [first_user, second_user],
+            title="FXStreet update",
+            body="Gold remains bid near the highs.",
+            redirect_url="https://example.com/news/gold",
+            data={"provider_content_id": "12345"},
+            image_url=None,
+            broadcast_notifications=broadcast_mock,
+            user_notification_model=UserNotification,
+            instance=instance,
+        )
+
+        self.assertEqual(
+            UserNotification.objects.filter(
+                user=first_user,
+                title="FXStreet update",
+                message="Gold remains bid near the highs.",
+                redirect_url="https://example.com/news/gold",
+            ).count(),
+            1,
+        )
+        self.assertEqual(
+            UserNotification.objects.filter(
+                user=second_user,
+                title="FXStreet update",
+                message="Gold remains bid near the highs.",
+                redirect_url="https://example.com/news/gold",
+            ).count(),
+            1,
+        )
+        broadcast_mock.assert_called_once()
+        sent_users = mock_send_push_to_users.call_args.kwargs["users"]
+        self.assertEqual([user.id for user in sent_users], [second_user.id])

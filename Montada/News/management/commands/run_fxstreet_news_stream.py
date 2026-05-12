@@ -1,11 +1,13 @@
 import logging
 import re
 import time
+from datetime import timedelta
 from html import unescape
 
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
 from django.db import ProgrammingError
+from django.utils import timezone
 from django.utils.html import strip_tags
 from django.utils.text import Truncator
 
@@ -25,6 +27,7 @@ from News.live_news_service import (
 logger = logging.getLogger(__name__)
 User = get_user_model()
 NOTIFICATION_BATCH_SIZE = 500
+NEWS_NOTIFICATION_DEDUPLICATION_WINDOW = timedelta(minutes=30)
 NEWS_LANGUAGE_RECIPIENT_FIELDS = {
     "ar": "news_notify_ar",
     "en": "news_notify_en",
@@ -151,6 +154,16 @@ def _flush_news_notification_batch(
     if not users:
         return
 
+    users = _dedupe_recent_news_notification_users(
+        users,
+        title=title,
+        body=body,
+        redirect_url=redirect_url,
+        user_notification_model=user_notification_model,
+    )
+    if not users:
+        return
+
     created_notifications = [
         user_notification_model(
             user=user,
@@ -185,6 +198,32 @@ def _flush_news_notification_batch(
             getattr(instance, "provider_content_id", None),
             len(users),
         )
+
+
+def _dedupe_recent_news_notification_users(
+    users,
+    *,
+    title,
+    body,
+    redirect_url,
+    user_notification_model,
+):
+    if not users or not redirect_url:
+        return list(users)
+
+    user_ids = [user.id for user in users]
+    recent_cutoff = timezone.now() - NEWS_NOTIFICATION_DEDUPLICATION_WINDOW
+    already_notified_user_ids = set(
+        user_notification_model.objects.filter(
+            user_id__in=user_ids,
+            title=title,
+            message=body,
+            notification_type="INFO",
+            redirect_url=redirect_url,
+            created_at__gte=recent_cutoff,
+        ).values_list("user_id", flat=True)
+    )
+    return [user for user in users if user.id not in already_notified_user_ids]
 
 
 class Command(BaseCommand):

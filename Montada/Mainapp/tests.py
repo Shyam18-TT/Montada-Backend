@@ -1,6 +1,7 @@
 from django.test import TestCase
 
-from .models import User
+from firebase import get_push_tokens_for_users
+from .models import DeviceToken, User
 from .serializers import UserProfileSerializer, UserRegistrationSerializer
 from News.management.commands.run_fxstreet_news_stream import _get_news_notification_recipients
 
@@ -107,3 +108,28 @@ class UserNewsLanguagePreferenceTests(TestCase):
 
         self.assertEqual(data["news_notification_languages"], ["en", "zh"])
         self.assertEqual(data["news_notification_selection_limit"], 2)
+
+
+class DeviceTokenSelectionTests(TestCase):
+    def test_get_push_tokens_for_users_prefers_latest_token_per_user(self):
+        user = User.objects.create_user(
+            email="tokens@example.com",
+            username="tokens@example.com",
+            password="Testpass123!",
+        )
+        other_user = User.objects.create_user(
+            email="other@example.com",
+            username="other@example.com",
+            password="Testpass123!",
+        )
+
+        old_token = DeviceToken.objects.create(user=user, fcm_token="old-token")
+        new_token = DeviceToken.objects.create(user=user, fcm_token="new-token")
+        other_token = DeviceToken.objects.create(user=other_user, fcm_token="other-token")
+
+        tokens = get_push_tokens_for_users([user, other_user])
+
+        self.assertNotIn(old_token.fcm_token, tokens)
+        self.assertIn(new_token.fcm_token, tokens)
+        self.assertIn(other_token.fcm_token, tokens)
+        self.assertEqual(len(tokens), 2)

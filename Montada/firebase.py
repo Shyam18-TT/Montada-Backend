@@ -51,6 +51,53 @@ if not firebase_admin._apps:
 _FCM_MULTICAST_CHUNK = 500  # FCM limit per MulticastMessage
 
 
+def _clean_tokens(tokens: Iterable[str]) -> list[str]:
+    cleaned_tokens: list[str] = []
+    seen_tokens: set[str] = set()
+    for token in tokens or []:
+        normalized = str(token or "").strip()
+        if not normalized or normalized in seen_tokens:
+            continue
+        seen_tokens.add(normalized)
+        cleaned_tokens.append(normalized)
+    return cleaned_tokens
+
+
+def get_push_tokens_for_users(users) -> list[str]:
+    """
+    Resolve a single most-recent FCM token per user.
+
+    We intentionally keep only the newest token row for each user here to avoid
+    duplicate push delivery when stale device tokens accumulate for the same
+    account over time.
+    """
+    try:
+        from Mainapp.models import DeviceToken
+    except ImportError:
+        logger.error("DeviceToken model not found – cannot resolve push tokens.")
+        return []
+
+    token_rows = (
+        DeviceToken.objects.filter(user__in=users)
+        .exclude(fcm_token__isnull=True)
+        .exclude(fcm_token__exact="")
+        .order_by("user_id", "-created_at", "-id")
+        .values_list("user_id", "fcm_token")
+    )
+
+    latest_tokens: list[str] = []
+    seen_user_ids: set[str] = set()
+    seen_tokens: set[str] = set()
+    for user_id, token in token_rows:
+        normalized = str(token or "").strip()
+        if not normalized or user_id in seen_user_ids or normalized in seen_tokens:
+            continue
+        seen_user_ids.add(user_id)
+        seen_tokens.add(normalized)
+        latest_tokens.append(normalized)
+    return latest_tokens
+
+
 def send_push_to_tokens(
     tokens: list[str],
     title: str,
@@ -78,6 +125,7 @@ def send_push_to_tokens(
         failed_tokens  – list of tokens that produced errors.
         errors         – list of error strings for failed tokens.
     """
+    tokens = _clean_tokens(tokens)
     if not tokens:
         return {"success_count": 0, "failure_count": 0, "failed_tokens": [], "errors": []}
 
@@ -175,17 +223,7 @@ def send_push_to_users(
     -------
     Same dict as send_push_to_tokens.
     """
-    try:
-        from Mainapp.models import DeviceToken
-    except ImportError:
-        logger.error("DeviceToken model not found – cannot send push notifications.")
-        return {"success_count": 0, "failure_count": 0, "failed_tokens": [], "errors": []}
-
-    tokens = list(
-        DeviceToken.objects.filter(user__in=users)
-        .values_list("fcm_token", flat=True)
-        .distinct()
-    )
+    tokens = get_push_tokens_for_users(users)
     if not tokens:
         logger.info("FCM: no device tokens found for the given users – skipping.")
         return {"success_count": 0, "failure_count": 0, "failed_tokens": [], "errors": []}
