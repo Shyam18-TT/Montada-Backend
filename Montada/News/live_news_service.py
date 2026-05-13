@@ -255,6 +255,13 @@ def is_frontend_live_news_language(language):
     return _normalize_language_code(language) in FRONTEND_LIVE_NEWS_LANGUAGES
 
 
+def live_news_group_name_for_language(language):
+    normalized = _normalize_language_code(language)
+    if normalized not in FRONTEND_LIVE_NEWS_LANGUAGES:
+        return None
+    return f"{LIVE_NEWS_GROUP_NAME}_{normalized}"
+
+
 def _primary_image_url(images):
     if not isinstance(images, list):
         return None
@@ -797,8 +804,16 @@ def broadcast_live_news(instance, *, event_name="upsert"):
         if not channel_layer:
             logger.warning("Live news broadcast skipped: no channel layer configured.")
             return
+        group_name = live_news_group_name_for_language(getattr(instance, "language", None))
+        if not group_name:
+            logger.debug(
+                "Live news broadcast skipped: unsupported language=%s provider_content_id=%s",
+                getattr(instance, "language", None),
+                getattr(instance, "provider_content_id", None),
+            )
+            return
         async_to_sync(channel_layer.group_send)(
-            LIVE_NEWS_GROUP_NAME,
+            group_name,
             {
                 "type": "news.update",
                 "event": event_name,

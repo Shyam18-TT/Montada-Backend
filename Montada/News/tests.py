@@ -6,6 +6,7 @@ from django.urls import reverse
 
 from Mainapp.models import UserNotification
 from News.management.commands.run_fxstreet_news_stream import _flush_news_notification_batch
+from News.consumers import _get_user_live_news_languages
 from News.live_news_service import (
     detect_news_language,
     fetch_actionforex_rss_items,
@@ -17,9 +18,11 @@ from News.live_news_service import (
     fetch_rss_items,
     is_frontend_live_news_language,
     is_supported_live_news_language,
+    live_news_group_name_for_language,
     normalize_fxstreet_payload,
     normalize_rss_payload,
     _enrich_rss_details,
+    broadcast_live_news,
     save_live_news_payload,
 )
 from News.models import LiveNews
@@ -633,6 +636,29 @@ class LiveNewsNotificationTests(TestCase):
         self.assertEqual([user.id for user in sent_users], [second_user.id])
 
 
+class LiveNewsSocketRoutingTests(SimpleTestCase):
+    def test_live_news_group_name_matches_frontend_language(self):
+        self.assertEqual(live_news_group_name_for_language("en"), "live_news_stream_en")
+        self.assertEqual(live_news_group_name_for_language("zh-cn"), "live_news_stream_zh")
+        self.assertIsNone(live_news_group_name_for_language("it"))
+
+    def test_consumer_uses_user_language_preferences(self):
+        user = type(
+            "UserStub",
+            (),
+            {"news_notify_ar": False, "news_notify_en": True, "news_notify_zh": True},
+        )()
+        self.assertEqual(_get_user_live_news_languages(user), ["en", "zh"])
+
+    def test_consumer_falls_back_to_default_languages_when_none_selected(self):
+        user = type(
+            "UserStub",
+            (),
+            {"news_notify_ar": False, "news_notify_en": False, "news_notify_zh": False},
+        )()
+        self.assertEqual(_get_user_live_news_languages(user), ["ar", "en"])
+
+
 class LiveNewsListViewTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user(
@@ -702,3 +728,28 @@ class LiveNewsListViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         returned_ids = [item["id"] for item in response.data["results"]]
         self.assertEqual(returned_ids, [str(arabic_item.id)])
+
+
+class LiveNewsBroadcastTests(TestCase):
+    @patch("News.live_news_service.async_to_sync", side_effect=lambda func: func)
+    @patch("News.live_news_service.get_channel_layer")
+    def test_broadcast_live_news_targets_language_specific_group(self, mock_get_channel_layer, mock_async_to_sync):
+        mock_layer = mock_get_channel_layer.return_value
+        instance = LiveNews.objects.create(
+            provider_content_id=2001,
+            title="Chinese headline",
+            teaser="Chinese teaser",
+            body="Chinese body",
+            language="zh",
+            is_active=True,
+        )
+
+        broadcast_live_news(instance, event_name="created")
+
+        mock_layer.group_send.assert_called_once()
+        args, kwargs = mock_layer.group_send.call_args
+        self.assertEqual(args[0], "live_news_stream_zh")
+        self.assertEqual(args[1]["type"], "news.update")
+        self.assertEqual(args[1]["event"], "created")
+        self.assertEqual(args[1]["item"]["id"], str(instance.id))
+        self.assertFalse(kwargs)
