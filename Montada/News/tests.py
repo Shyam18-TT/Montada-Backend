@@ -2,6 +2,7 @@ from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.test import SimpleTestCase, TestCase
+from django.urls import reverse
 
 from Mainapp.models import UserNotification
 from News.management.commands.run_fxstreet_news_stream import _flush_news_notification_batch
@@ -630,3 +631,74 @@ class LiveNewsNotificationTests(TestCase):
         broadcast_mock.assert_called_once()
         sent_users = mock_send_push_to_users.call_args.kwargs["users"]
         self.assertEqual([user.id for user in sent_users], [second_user.id])
+
+
+class LiveNewsListViewTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email="viewer@example.com",
+            username="viewer@example.com",
+            password="Testpass123!",
+            admin_granted_in_app_access=True,
+            news_notify_ar=False,
+            news_notify_en=True,
+            news_notify_zh=True,
+        )
+        self.client.force_login(self.user)
+        self.url = reverse("News:live_news_list")
+
+    def test_list_uses_user_default_languages_when_query_param_missing(self):
+        english_item = LiveNews.objects.create(
+            provider_content_id=1001,
+            title="English headline",
+            teaser="English teaser",
+            body="English body",
+            language="en",
+            is_active=True,
+        )
+        chinese_item = LiveNews.objects.create(
+            provider_content_id=1002,
+            title="Chinese headline",
+            teaser="Chinese teaser",
+            body="Chinese body",
+            language="zh",
+            is_active=True,
+        )
+        LiveNews.objects.create(
+            provider_content_id=1003,
+            title="Arabic headline",
+            teaser="Arabic teaser",
+            body="Arabic body",
+            language="ar",
+            is_active=True,
+        )
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, 200)
+        returned_ids = {item["id"] for item in response.data["results"]}
+        self.assertEqual(returned_ids, {str(english_item.id), str(chinese_item.id)})
+
+    def test_explicit_language_param_still_overrides_user_defaults(self):
+        arabic_item = LiveNews.objects.create(
+            provider_content_id=1004,
+            title="Arabic headline",
+            teaser="Arabic teaser",
+            body="Arabic body",
+            language="ar",
+            is_active=True,
+        )
+        LiveNews.objects.create(
+            provider_content_id=1005,
+            title="English headline",
+            teaser="English teaser",
+            body="English body",
+            language="en",
+            is_active=True,
+        )
+
+        response = self.client.get(self.url, {"language": "ar"})
+
+        self.assertEqual(response.status_code, 200)
+        returned_ids = [item["id"] for item in response.data["results"]]
+        self.assertEqual(returned_ids, [str(arabic_item.id)])

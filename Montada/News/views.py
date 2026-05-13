@@ -963,6 +963,17 @@ class LiveNewsListView(generics.ListAPIView):
     serializer_class = LiveNewsSerializer
     pagination_class = LiveNewsPagination
 
+    def _get_default_live_news_languages(self):
+        user = getattr(self.request, "user", None)
+        selected_languages = []
+        if getattr(user, "news_notify_ar", False):
+            selected_languages.append("ar")
+        if getattr(user, "news_notify_en", False):
+            selected_languages.append("en")
+        if getattr(user, "news_notify_zh", False):
+            selected_languages.append("zh")
+        return selected_languages or ["ar", "en"]
+
     def get_queryset(self):
         qs = LiveNews.objects.filter(
             is_active=True,
@@ -976,6 +987,8 @@ class LiveNewsListView(generics.ListAPIView):
         language = (self.request.query_params.get("language") or "").strip().lower()
         if language in FRONTEND_LIVE_NEWS_LANGUAGES:
             qs = qs.filter(language=language)
+        else:
+            qs = qs.filter(language__in=self._get_default_live_news_languages())
 
         search = (self.request.query_params.get("search") or "").strip()
         if search:
