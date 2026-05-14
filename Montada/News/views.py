@@ -974,21 +974,17 @@ class LiveNewsListView(generics.ListAPIView):
             selected_languages.append("zh")
         return selected_languages or ["ar", "en"]
 
+    def _get_requested_live_news_languages(self):
+        language = (self.request.query_params.get("language") or "").strip().lower()
+        if language in FRONTEND_LIVE_NEWS_LANGUAGES:
+            return [language]
+        return self._get_default_live_news_languages()
+
     def get_queryset(self):
         qs = LiveNews.objects.filter(
             is_active=True,
-            language__in=FRONTEND_LIVE_NEWS_LANGUAGES,
-        ).order_by(
-            "-source_updated_at",
-            "-source_created_at",
-            "-created_at",
+            language__in=self._get_requested_live_news_languages(),
         )
-
-        language = (self.request.query_params.get("language") or "").strip().lower()
-        if language in FRONTEND_LIVE_NEWS_LANGUAGES:
-            qs = qs.filter(language=language)
-        else:
-            qs = qs.filter(language__in=self._get_default_live_news_languages())
 
         search = (self.request.query_params.get("search") or "").strip()
         if search:
@@ -1010,7 +1006,11 @@ class LiveNewsListView(generics.ListAPIView):
         if symbol:
             qs = qs.filter(securities__icontains=symbol)
 
-        return qs
+        return qs.order_by(
+            "-source_updated_at",
+            "-source_created_at",
+            "-created_at",
+        )
 
     def list(self, request, *args, **kwargs):
         denied = check_active_subscription(request.user)

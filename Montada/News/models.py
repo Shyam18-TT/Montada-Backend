@@ -258,6 +258,10 @@ class LiveNews(models.Model):
             models.Index(fields=["news_type"]),
             models.Index(fields=["language"]),
             models.Index(fields=["is_active"]),
+            models.Index(
+                fields=["is_active", "language", "source_updated_at", "source_created_at", "created_at"],
+                name="live_news_listing_idx",
+            ),
         ]
         db_table = "live_news"
 
