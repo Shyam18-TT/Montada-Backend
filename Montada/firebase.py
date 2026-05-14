@@ -65,11 +65,11 @@ def _clean_tokens(tokens: Iterable[str]) -> list[str]:
 
 def get_push_tokens_for_users(users) -> list[str]:
     """
-    Resolve a single most-recent FCM token per user.
+    Resolve all distinct FCM tokens for the given users.
 
-    We intentionally keep only the newest token row for each user here to avoid
-    duplicate push delivery when stale device tokens accumulate for the same
-    account over time.
+    This allows the same account to stay logged in on multiple devices and
+    receive push notifications on each active device. Exact duplicate token
+    rows are still collapsed into a single send target.
     """
     try:
         from Mainapp.models import DeviceToken
@@ -85,17 +85,15 @@ def get_push_tokens_for_users(users) -> list[str]:
         .values_list("user_id", "fcm_token")
     )
 
-    latest_tokens: list[str] = []
-    seen_user_ids: set[str] = set()
+    resolved_tokens: list[str] = []
     seen_tokens: set[str] = set()
     for user_id, token in token_rows:
         normalized = str(token or "").strip()
-        if not normalized or user_id in seen_user_ids or normalized in seen_tokens:
+        if not normalized or normalized in seen_tokens:
             continue
-        seen_user_ids.add(user_id)
         seen_tokens.add(normalized)
-        latest_tokens.append(normalized)
-    return latest_tokens
+        resolved_tokens.append(normalized)
+    return resolved_tokens
 
 
 def send_push_to_tokens(

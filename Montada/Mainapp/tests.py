@@ -111,7 +111,7 @@ class UserNewsLanguagePreferenceTests(TestCase):
 
 
 class DeviceTokenSelectionTests(TestCase):
-    def test_get_push_tokens_for_users_prefers_latest_token_per_user(self):
+    def test_get_push_tokens_for_users_returns_all_distinct_tokens_for_users(self):
         user = User.objects.create_user(
             email="tokens@example.com",
             username="tokens@example.com",
@@ -126,10 +126,11 @@ class DeviceTokenSelectionTests(TestCase):
         old_token = DeviceToken.objects.create(user=user, fcm_token="old-token")
         new_token = DeviceToken.objects.create(user=user, fcm_token="new-token")
         other_token = DeviceToken.objects.create(user=other_user, fcm_token="other-token")
+        DeviceToken.objects.create(user=user, fcm_token="new-token")
 
         tokens = get_push_tokens_for_users([user, other_user])
 
-        self.assertNotIn(old_token.fcm_token, tokens)
+        self.assertIn(old_token.fcm_token, tokens)
         self.assertIn(new_token.fcm_token, tokens)
         self.assertIn(other_token.fcm_token, tokens)
-        self.assertEqual(len(tokens), 2)
+        self.assertEqual(len(tokens), 3)
