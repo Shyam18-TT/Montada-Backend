@@ -163,19 +163,19 @@ DATABASES = {
         # 'HOST': '3.76.105.23',
         # 'PORT': '1433',
 
-        # 'ENGINE': 'mssql',
-        # 'NAME': 'MontadaApp',
-        # 'USER': 'sa',
-        # 'PASSWORD': 'Montada@1234',
-        # 'HOST': '13.236.73.211',
-        # 'PORT': '1433',
-
         'ENGINE': 'mssql',
         'NAME': 'MontadaApp',
         'USER': 'sa',
         'PASSWORD': 'Montada@1234',
-        'HOST': '127.0.0.1',
+        'HOST': '13.236.73.211',
         'PORT': '1433',
+
+        # 'ENGINE': 'mssql',
+        # 'NAME': 'MontadaApp',
+        # 'USER': 'sa',
+        # 'PASSWORD': 'Montada@1234',
+        # 'HOST': '127.0.0.1',
+        # 'PORT': '1433',
 
         # 'OPTIONS': {
         #     'driver': 'ODBC Driver 18 for SQL Server',
@@ -346,6 +346,13 @@ BENZINGA_NEWS_DEFAULT_PAGE_SIZE = int(
 # When True, traders can view analyst signals and analyst articles without holding
 # an active UserAnalystPlanSubscription. Signal follow rules still apply separately.
 ANALYST_SUBSCRIPTION_FREE_ACCESS = True
+
+# Market news, live news, and live market data (MT5) paywall:
+# When True, any logged-in user can access these without an active Subscription.
+# Set env MARKET_NEWS_AND_DATA_FREE_ACCESS=false to require subscriptions in production.
+MARKET_NEWS_AND_DATA_FREE_ACCESS = os.environ.get(
+    "MARKET_NEWS_AND_DATA_FREE_ACCESS", "true"
+).lower() in ("1", "true", "yes", "on")
 
 # MT5 Manager API (for run_price_alerts --use-mt5-manager). Optional; can use env vars instead.
 MT5_MANAGER_SERVER   = os.environ.get("MT5_MANAGER_SERVER", "207.97.203.117:443")   # e.g. "192.168.1.100:443"
