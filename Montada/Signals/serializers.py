@@ -1,5 +1,33 @@
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+
 from rest_framework import serializers
+
 from .models import TradingSignal, AssetClass, Instrument, Timeframe, AppliedSignal, PriceAlert
+
+
+def _decimal_places_from_raw(raw):
+    """Infer fractional digit count from the value the client sent."""
+    if raw is None or raw == "":
+        return None
+    try:
+        value = Decimal(str(raw).strip())
+    except (InvalidOperation, ValueError):
+        return None
+    exponent = value.as_tuple().exponent
+    if exponent >= 0:
+        return 0
+    return -exponent
+
+
+def _quantize_to_input_places(value, raw):
+    """Round *value* to the same decimal places as *raw* (no extra padding)."""
+    if value is None:
+        return None
+    places = _decimal_places_from_raw(raw)
+    if places is None:
+        return Decimal(value).normalize()
+    quantizer = Decimal(1).scaleb(-places)
+    return Decimal(value).quantize(quantizer, rounding=ROUND_HALF_UP)
 
 
 class AssetClassSerializer(serializers.ModelSerializer):
@@ -241,17 +269,17 @@ class PriceAlertCreateSerializer(serializers.ModelSerializer):
     def validate_target_price(self, value):
         if value is not None and value <= 0:
             raise serializers.ValidationError("Target price must be greater than 0.")
-        return value
+        return _quantize_to_input_places(value, self.initial_data.get("target_price"))
 
     def validate_target_percentage(self, value):
         if value is not None and (value <= 0 or value >= 100):
             raise serializers.ValidationError("Target percentage must be between 0 and 100 (exclusive).")
-        return value
+        return _quantize_to_input_places(value, self.initial_data.get("target_percentage"))
 
     def validate_reference_price(self, value):
         if value is not None and value <= 0:
             raise serializers.ValidationError("Reference price must be greater than 0.")
-        return value
+        return _quantize_to_input_places(value, self.initial_data.get("reference_price"))
 
     def validate(self, attrs):
         has_price = attrs.get('target_price') is not None
@@ -270,6 +298,13 @@ class PriceAlertCreateSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         validated_data['user'] = self.context['request'].user
         return super().create(validated_data)
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        for field in ("target_price", "target_percentage", "reference_price"):
+            if data.get(field) is not None:
+                data[field] = str(Decimal(data[field]).normalize())
+        return data
 
 
 class PriceAlertSerializer(serializers.ModelSerializer):

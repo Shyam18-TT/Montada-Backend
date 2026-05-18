@@ -127,6 +127,49 @@ class NewsArticle(models.Model):
         return self.title
 
 
+class EconomicCalendarEvent(models.Model):
+    """
+    Stores economic calendar events fetched from external providers (e.g., Tradays).
+    """
+    class Importance(models.TextChoices):
+        NONE = "none", "None"
+        LOW = "low", "Low"
+        MEDIUM = "medium", "Medium"
+        HIGH = "high", "High"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    provider_id = models.BigIntegerField(unique=True, help_text="Unique ID from the provider (e.g. Tradays)")
+    
+    event_name = models.CharField(max_length=255)
+    currency_code = models.CharField(max_length=10, blank=True, null=True)
+    country_name = models.CharField(max_length=100, blank=True, null=True)
+    
+    importance = models.CharField(
+        max_length=10, 
+        choices=Importance.choices, 
+        default=Importance.NONE
+    )
+    
+    actual_value = models.CharField(max_length=100, blank=True, null=True)
+    forecast_value = models.CharField(max_length=100, blank=True, null=True)
+    previous_value = models.CharField(max_length=100, blank=True, null=True)
+    
+    release_date = models.DateTimeField(help_text="When the event happens")
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-release_date"]
+        indexes = [
+            models.Index(fields=["provider_id"]),
+            models.Index(fields=["release_date"]),
+            models.Index(fields=["importance"]),
+        ]
+        db_table = "economic_calendar_event"
+
+    def __str__(self):
+        return f"{self.event_name} - {self.release_date}"
 class NewsArticleLike(models.Model):
     """User like on an analyst news article. One like per user per article."""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

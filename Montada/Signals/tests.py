@@ -262,6 +262,60 @@ class SignalEntryLifecycleTests(TestCase):
         self.assertIsNone(signal.is_neutral)
 
 
+class PriceAlertCreateSerializerTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email="alert-create@example.com",
+            username="alert-create@example.com",
+            password="Testpass123!",
+            user_type="trader",
+        )
+        self.asset_class = AssetClass.objects.create(name="Forex")
+        self.instrument = Instrument.objects.create(
+            asset_class=self.asset_class,
+            symbol="XAUUSD",
+            name="Gold",
+        )
+
+    def _serializer(self, payload):
+        from rest_framework.test import APIRequestFactory
+
+        from Signals.serializers import PriceAlertCreateSerializer
+
+        request = APIRequestFactory().post("/signals/price-alerts/create/", payload, format="json")
+        request.user = self.user
+        return PriceAlertCreateSerializer(data=payload, context={"request": request})
+
+    def test_target_price_keeps_client_decimal_places(self):
+        serializer = self._serializer(
+            {
+                "instrument": str(self.instrument.id),
+                "target_price": "2650.5",
+                "condition": "above",
+            }
+        )
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        alert = serializer.save()
+        self.assertEqual(alert.target_price, Decimal("2650.5"))
+        self.assertEqual(serializer.data["target_price"], "2650.5")
+
+    def test_reference_price_and_percentage_keep_client_precision(self):
+        serializer = self._serializer(
+            {
+                "instrument": str(self.instrument.id),
+                "target_percentage": "5",
+                "reference_price": "100.25",
+                "condition": "above",
+            }
+        )
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        alert = serializer.save()
+        self.assertEqual(alert.target_percentage, Decimal("5"))
+        self.assertEqual(alert.reference_price, Decimal("100.25"))
+        self.assertEqual(serializer.data["target_percentage"], "5")
+        self.assertEqual(serializer.data["reference_price"], "100.25")
+
+
 class PriceAlertLifecycleTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user(

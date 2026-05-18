@@ -851,6 +851,8 @@ class PriceAlertCreateView(generics.CreateAPIView):
     """
     POST: Create a price alert for the authenticated user.
     Body: { "instrument": "<uuid>", "target_price": <decimal>, "condition": "above"|"below", "label": "optional" }
+
+    Price fields keep the decimal precision sent by the client (see PriceAlertCreateSerializer).
     """
     serializer_class = PriceAlertCreateSerializer
     permission_classes = [permissions.IsAuthenticated]

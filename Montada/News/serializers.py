@@ -1,6 +1,6 @@
 from django.conf import settings
 from rest_framework import serializers
-from .models import NewsArticle, NewsCategory, Tag, NewsArticleLike, NewsArticleComment, LiveNews
+from .models import NewsArticle, NewsCategory, Tag, NewsArticleLike, NewsArticleComment, LiveNews, EconomicCalendarEvent
 
 
 def _build_media_url(value):
@@ -173,6 +173,26 @@ class LiveNewsSerializer(serializers.ModelSerializer):
             "source_updated_at",
             "source_timestamp",
             "is_active",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = fields
+
+
+class EconomicCalendarEventSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = EconomicCalendarEvent
+        fields = (
+            "id",
+            "provider_id",
+            "event_name",
+            "currency_code",
+            "country_name",
+            "importance",
+            "actual_value",
+            "forecast_value",
+            "previous_value",
+            "release_date",
             "created_at",
             "updated_at",
         )

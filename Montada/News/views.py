@@ -12,7 +12,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .live_news_service import FRONTEND_LIVE_NEWS_LANGUAGES
-from .models import NewsArticle, NewsCategory, NewsArticleLike, NewsArticleComment, LiveNews
+from .models import NewsArticle, NewsCategory, NewsArticleLike, NewsArticleComment, LiveNews, EconomicCalendarEvent
 from Subscriptions.models import AnalystContentPlan, UserAnalystPlanSubscription
 from .serializers import (
     NewsArticleCreateSerializer,
@@ -20,6 +20,7 @@ from .serializers import (
     NewsCategorySerializer,
     NewsArticleCommentSerializer,
     LiveNewsSerializer,
+    EconomicCalendarEventSerializer,
 )
 from Subscriptions.access import check_active_subscription
 from Subscriptions.analyst_plan_access import analyst_subscription_free_access_enabled
@@ -1017,4 +1018,70 @@ class LiveNewsListView(generics.ListAPIView):
         if denied is not None:
             return denied
         return super().list(request, *args, **kwargs)
+
+
+class EconomicCalendarPagination(PageNumberPagination):
+    page_size = 50
+    page_size_query_param = "page_size"
+    max_page_size = 200
+
+
+class TradaysEconomicCalendarView(generics.ListAPIView):
+    """
+    GET /api/news/economic-calendar/
+    Returns economic calendar events stored in the database.
+    Events are synced periodically via: python manage.py fetch_economic_calendar
+
+    Query params:
+        date_from   : ISO date string YYYY-MM-DD — filter events on or after this date
+        date_to     : ISO date string YYYY-MM-DD — filter events on or before this date
+        importance  : none | low | medium | high — filter by importance level
+        currency    : e.g. USD, EUR — filter by currency code (case-insensitive)
+        page        : page number (default 1)
+        page_size   : items per page (default 50, max 200)
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = EconomicCalendarEventSerializer
+    pagination_class = EconomicCalendarPagination
+
+    def get_queryset(self):
+        from django.utils.dateparse import parse_date
+        from django.utils import timezone as tz
+        import datetime
+
+        qs = EconomicCalendarEvent.objects.all().order_by("release_date")
+
+        # Date filters
+        date_from = self.request.query_params.get("date_from")
+        date_to = self.request.query_params.get("date_to")
+
+        if date_from:
+            parsed = parse_date(date_from)
+            if parsed:
+                qs = qs.filter(release_date__date__gte=parsed)
+
+        if date_to:
+            parsed = parse_date(date_to)
+            if parsed:
+                qs = qs.filter(release_date__date__lte=parsed)
+
+        # If no date filters, default to today + 20 days
+        if not date_from and not date_to:
+            now = tz.now()
+            qs = qs.filter(
+                release_date__gte=now - datetime.timedelta(days=1),
+                release_date__lte=now + datetime.timedelta(days=20),
+            )
+
+        # Importance filter
+        importance = self.request.query_params.get("importance", "").strip().lower()
+        if importance in ("none", "low", "medium", "high"):
+            qs = qs.filter(importance=importance)
+
+        # Currency filter
+        currency = self.request.query_params.get("currency", "").strip().upper()
+        if currency:
+            qs = qs.filter(currency_code__iexact=currency)
+
+        return qs
 
