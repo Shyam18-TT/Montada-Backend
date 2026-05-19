@@ -1186,6 +1186,7 @@ class TradaysEconomicCalendarView(generics.ListAPIView):
         date_to     : ISO date string YYYY-MM-DD — filter events on or before this date
         importance  : none | low | medium | high — filter by importance level
         currency    : e.g. USD, EUR — filter by currency code (case-insensitive)
+        search      : free-text search against event_name and country_name
         page        : page number (default 1)
         page_size   : items per page (default 50, max 200)
     """
@@ -1231,6 +1232,14 @@ class TradaysEconomicCalendarView(generics.ListAPIView):
         currency = self.request.query_params.get("currency", "").strip().upper()
         if currency:
             qs = qs.filter(currency_code__iexact=currency)
+
+        # Search filter
+        search = self.request.query_params.get("search", "").strip()
+        if search:
+            from django.db.models import Q
+            qs = qs.filter(
+                Q(event_name__icontains=search) | Q(country_name__icontains=search)
+            )
 
         return qs
 
