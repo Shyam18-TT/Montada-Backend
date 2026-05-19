@@ -7,6 +7,7 @@ from django.contrib.auth import get_user_model
 from django.core.mail import send_mail
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
@@ -656,6 +657,7 @@ class SaveFCMToken(APIView):
 
     def post(self, request):
         token = (request.data.get("token") or "").strip()
+        device_id = (request.data.get("device_id") or "").strip() or None
         if not token:
             return Response(
                 {"error": "Token is required."},
@@ -664,25 +666,49 @@ class SaveFCMToken(APIView):
 
         user = request.user
         with transaction.atomic():
-            token_rows = list(
+            # Step 1 — Evict this device from any OTHER user's account.
+            # Matched by device_id (if provided) OR by the exact FCM token.
+            # This ensures one physical device is never registered under two users
+            # at the same time, while the current user's OTHER devices are untouched.
+            if device_id:
+                DeviceToken.objects.select_for_update().filter(
+                    Q(device_id=device_id) | Q(fcm_token=token)
+                ).exclude(user=user).delete()
+            else:
+                DeviceToken.objects.select_for_update().filter(
+                    fcm_token=token
+                ).exclude(user=user).delete()
+
+            # Step 2 — Upsert the current user's row for this device.
+            # Match by device_id first (most accurate); fall back to token match.
+            own_rows = list(
                 DeviceToken.objects.select_for_update()
-                .filter(fcm_token=token)
+                .filter(user=user)
+                .filter(Q(device_id=device_id) if device_id else Q(fcm_token=token))
                 .order_by("created_at", "id")
             )
 
-            if token_rows:
-                device_token = token_rows[0]
-                if device_token.user_id != user.id:
-                    device_token.user = user
-                    device_token.save(update_fields=["user"])
-                if len(token_rows) > 1:
+            if own_rows:
+                device_token = own_rows[0]
+                update_fields = []
+                if device_token.fcm_token != token:
+                    device_token.fcm_token = token
+                    update_fields.append("fcm_token")
+                if device_id is not None and device_token.device_id != device_id:
+                    device_token.device_id = device_id
+                    update_fields.append("device_id")
+                if update_fields:
+                    device_token.save(update_fields=update_fields)
+                # Drop duplicate rows for the same device under this user
+                if len(own_rows) > 1:
                     DeviceToken.objects.filter(
-                        id__in=[row.id for row in token_rows[1:]]
+                        id__in=[r.id for r in own_rows[1:]]
                     ).delete()
             else:
                 device_token = DeviceToken.objects.create(
                     user=user,
                     fcm_token=token,
+                    device_id=device_id,
                 )
 
         return Response(
