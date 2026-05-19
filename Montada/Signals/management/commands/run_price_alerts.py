@@ -391,6 +391,7 @@ def _close_signal_and_notify(signal, hit_type, current_price):
             title=title,
             message=message,
             notification_type="SUCCESS" if is_win else "WARNING",
+            category="TRADING_SIGNAL",
         )
         print("[CHECK] Step 4b: UserNotification created for analyst.")
     except Exception as e:
@@ -457,6 +458,7 @@ def _trigger_user_price_alert(alert, current_price):
             title=title,
             message=message,
             notification_type="SUCCESS",
+            category="PRICE_ALERT",
         )
     except Exception as e:
         logger.warning("UserNotification create for price alert failed: %s", e)

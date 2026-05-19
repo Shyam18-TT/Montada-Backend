@@ -3176,6 +3176,7 @@ class AdminFCMBroadcastView(APIView):
                     title=title,
                     message=message,
                     notification_type=notification_type,
+                    category=category,
                     redirect_url=redirect_url,
                 )
                 for user in recipient_list

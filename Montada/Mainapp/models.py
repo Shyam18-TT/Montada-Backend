@@ -297,6 +297,19 @@ class UserNotification(models.Model):
         ("ERROR", "Error"),
     )
 
+    class NotificationCategory(models.TextChoices):
+        NEWS = "NEWS", "News"
+        ECONOMIC_EVENT = "ECONOMIC_EVENT", "Economic Event"
+        MESSAGE = "MESSAGE", "Message"
+        PRICE_ALERT = "PRICE_ALERT", "Price Alert"
+        TRADING_SIGNAL = "TRADING_SIGNAL", "Trading Signal"
+        SYSTEM = "SYSTEM", "System"
+        COMPLIANCE = "COMPLIANCE", "Compliance"
+        CHAT = "CHAT", "Chat"
+        PROMOTION = "PROMOTION", "Promotion"
+        FOLLOWER = "FOLLOWER", "Follower"
+
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
     user = models.ForeignKey(
@@ -312,6 +325,12 @@ class UserNotification(models.Model):
         max_length=20,
         choices=NOTIFICATION_TYPES,
         default="INFO"
+    )
+
+    category = models.CharField(
+        max_length=50,
+        choices=NotificationCategory.choices,
+        default=NotificationCategory.SYSTEM
     )
 
     is_read = models.BooleanField(default=False)

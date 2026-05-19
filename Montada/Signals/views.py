@@ -116,6 +116,7 @@ def _create_and_broadcast_notifications(users, *, title, body, notification_type
                 title=title,
                 message=body,
                 notification_type=notification_type,
+                category="TRADING_SIGNAL",
                 redirect_url=redirect_url,
             )
             for user in users
@@ -1056,6 +1057,7 @@ class SignalPushNotificationView(generics.GenericAPIView):
                     title=title,
                     message=body,
                     notification_type="INFO",
+                    category="TRADING_SIGNAL",
                 )
                 for recipient in recipient_list
             ]

@@ -593,6 +593,7 @@ class LiveNewsNotificationTests(TestCase):
             title="FXStreet update",
             message="Gold remains bid near the highs.",
             notification_type="INFO",
+            category="NEWS",
             redirect_url="https://example.com/news/gold",
         )
 

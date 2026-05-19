@@ -215,6 +215,7 @@ class Command(BaseCommand):
             title=title,
             message=body,
             notification_type=notification_type,
+            category="ECONOMIC_EVENT",
             redirect_url=f"/economic-calendar/{event.id}/",
         )
 
@@ -377,6 +378,7 @@ class Command(BaseCommand):
                 title=title,
                 message=body,
                 notification_type=notification_type,
+                category="ECONOMIC_EVENT",
                 redirect_url=f"/economic-calendar/{event.id}/",
             )
             for user in users

@@ -170,6 +170,7 @@ def _flush_news_notification_batch(
             title=title,
             message=body,
             notification_type="INFO",
+            category="NEWS",
             redirect_url=redirect_url,
         )
         for user in users

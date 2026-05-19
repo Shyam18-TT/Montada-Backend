@@ -48,6 +48,7 @@ def _notify_analyst_follow(analyst_user, follower_user, title, message=None):
         title=title,
         message=message or title,
         notification_type="SUCCESS",
+        category="FOLLOWER",
     )
 
 
