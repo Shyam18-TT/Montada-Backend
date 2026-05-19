@@ -12,7 +12,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .live_news_service import FRONTEND_LIVE_NEWS_LANGUAGES
-from .models import NewsArticle, NewsCategory, NewsArticleLike, NewsArticleComment, LiveNews, EconomicCalendarEvent, EconomicCalendarReminder
+from .models import NewsArticle, NewsCategory, NewsArticleLike, NewsArticleComment, LiveNews, EconomicCalendarEvent, EconomicCalendarReminder, EconomicCalendarEventNotification
 from Subscriptions.models import AnalystContentPlan, UserAnalystPlanSubscription
 from .serializers import (
     NewsArticleCreateSerializer,
@@ -23,6 +23,7 @@ from .serializers import (
     EconomicCalendarEventSerializer,
     EconomicCalendarReminderCreateSerializer,
     EconomicCalendarReminderListSerializer,
+    EconomicCalendarEventNotificationSerializer,
 )
 from Subscriptions.access import check_active_subscription
 from Subscriptions.analyst_plan_access import analyst_subscription_free_access_enabled
@@ -1049,6 +1050,37 @@ class EconomicCalendarReminderDetailView(generics.RetrieveUpdateDestroyAPIView):
             {"message": "Reminder deleted successfully."},
             status=status.HTTP_204_NO_CONTENT,
         )
+
+
+class EconomicCalendarEventNotificationListView(generics.ListAPIView):
+    """
+    GET: List economic calendar event notification tracking records.
+    Shows which events had notifications sent and to whom.
+    
+    Query params: event_id (UUID), notification_type (reminder|event|broadcast), is_sent (true/false), page, page_size.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = EconomicCalendarEventNotificationSerializer
+    pagination_class = NewsArticleListPagination
+
+    def get_queryset(self):
+        qs = EconomicCalendarEventNotification.objects.select_related('event', 'user').order_by('-sent_at')
+        
+        # Optional filters
+        event_id = self.request.query_params.get("event_id")
+        if event_id:
+            qs = qs.filter(event_id=event_id)
+        
+        notification_type = self.request.query_params.get("notification_type")
+        if notification_type:
+            qs = qs.filter(notification_type=notification_type)
+        
+        is_sent = self.request.query_params.get("is_sent")
+        if is_sent is not None:
+            is_sent_bool = is_sent.lower() in ("true", "1", "yes")
+            qs = qs.filter(is_sent=is_sent_bool)
+        
+        return qs
 
 
 class ForexCategoryNewsView(APIView):

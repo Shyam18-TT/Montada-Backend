@@ -386,3 +386,134 @@ class EconomicCalendarReminder(models.Model):
     def __str__(self):
         return f"{self.user} - {self.event.event_name} reminder"
 
+
+class EconomicCalendarEventNotification(models.Model):
+    """
+    Tracks economic calendar event notifications sent to users.
+    Prevents duplicate notifications for the same event to the same user or group.
+    
+    Used by management command to track which notifications have been sent:
+    - Event-time notifications (sent to all subscribed users when event occurs)
+    - Reminder notifications (tracked separately but can reference this model)
+    """
+    
+    class NotificationType(models.TextChoices):
+        REMINDER = "reminder", "Reminder Notification"
+        EVENT = "event", "Event-Time Notification"
+        BROADCAST = "broadcast", "Broadcast to All Users"
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    
+    # Reference to the event
+    event = models.ForeignKey(
+        EconomicCalendarEvent,
+        on_delete=models.CASCADE,
+        related_name="event_notifications",
+        help_text="The economic calendar event"
+    )
+    
+    # User who received the notification (nullable for broadcast to all)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="economic_event_notifications",
+        blank=True,
+        null=True,
+        help_text="Specific user. NULL for broadcast to all subscribed users."
+    )
+    
+    # Type of notification
+    notification_type = models.CharField(
+        max_length=20,
+        choices=NotificationType.choices,
+        default=NotificationType.EVENT,
+        help_text="Type of notification sent"
+    )
+    
+    # Notification tracking
+    is_sent = models.BooleanField(default=True, help_text="Whether notification was successfully sent")
+    sent_at = models.DateTimeField(auto_now_add=True, help_text="When notification was sent")
+    
+    # Optional: Track if it was an all-users broadcast
+    sent_to_all_users = models.BooleanField(
+        default=False,
+        help_text="True if this notification was sent to all subscribed users"
+    )
+    
+    # For audit trail
+    error_message = models.TextField(
+        blank=True,
+        null=True,
+        help_text="Error message if notification failed to send"
+    )
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = "economic_calendar_event_notification"
+        ordering = ["-sent_at"]
+        # Prevent duplicate event notifications to same user
+        unique_together = ("event", "user", "notification_type", "sent_to_all_users")
+        indexes = [
+            models.Index(fields=["event"]),
+            models.Index(fields=["user"]),
+            models.Index(fields=["notification_type"]),
+            models.Index(fields=["sent_at"]),
+            models.Index(fields=["is_sent"]),
+            models.Index(fields=["event", "notification_type"]),
+            models.Index(fields=["user", "notification_type"]),
+        ]
+    
+    def __str__(self):
+        user_str = self.user.username if self.user else "All Users"
+        return f"{user_str} - {self.event.event_name} ({self.get_notification_type_display()})"
+    
+    @classmethod
+    def check_notification_sent(cls, event, user=None, notification_type=NotificationType.EVENT):
+        """
+        Check if a notification has already been sent for this event/user combo.
+        
+        Args:
+            event: EconomicCalendarEvent instance
+            user: User instance (None for broadcast to all)
+            notification_type: Type of notification
+        
+        Returns:
+            bool: True if notification already sent, False otherwise
+        """
+        return cls.objects.filter(
+            event=event,
+            user=user,
+            notification_type=notification_type,
+            is_sent=True
+        ).exists()
+    
+    @classmethod
+    def create_notification_record(cls, event, user=None, notification_type=NotificationType.EVENT, 
+                                   sent_to_all=False, is_sent=True, error_message=None):
+        """
+        Create a notification tracking record.
+        
+        Args:
+            event: EconomicCalendarEvent instance
+            user: User instance (None for broadcast)
+            notification_type: Type of notification
+            sent_to_all: Whether sent to all users
+            is_sent: Whether send was successful
+            error_message: Error details if failed
+        
+        Returns:
+            tuple: (notification_record, created)
+        """
+        return cls.objects.get_or_create(
+            event=event,
+            user=user,
+            notification_type=notification_type,
+            sent_to_all_users=sent_to_all,
+            defaults={
+                'is_sent': is_sent,
+                'error_message': error_message,
+            }
+        )
+

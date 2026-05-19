@@ -1,6 +1,6 @@
 from django.conf import settings
 from rest_framework import serializers
-from .models import NewsArticle, NewsCategory, Tag, NewsArticleLike, NewsArticleComment, LiveNews, EconomicCalendarEvent, EconomicCalendarReminder
+from .models import NewsArticle, NewsCategory, Tag, NewsArticleLike, NewsArticleComment, LiveNews, EconomicCalendarEvent, EconomicCalendarReminder, EconomicCalendarEventNotification
 
 
 def _build_media_url(value):
@@ -283,6 +283,32 @@ class EconomicCalendarReminderListSerializer(serializers.ModelSerializer):
             "is_sent",
             "sent_at",
             "is_active",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = fields
+
+
+class EconomicCalendarEventNotificationSerializer(serializers.ModelSerializer):
+    """Serializer for tracking economic calendar event notifications sent to users."""
+    event_name = serializers.CharField(source="event.event_name", read_only=True)
+    user_username = serializers.CharField(source="user.username", read_only=True, allow_null=True)
+    notification_type_display = serializers.CharField(source="get_notification_type_display", read_only=True)
+
+    class Meta:
+        model = EconomicCalendarEventNotification
+        fields = (
+            "id",
+            "event",
+            "event_name",
+            "user",
+            "user_username",
+            "notification_type",
+            "notification_type_display",
+            "is_sent",
+            "sent_at",
+            "sent_to_all_users",
+            "error_message",
             "created_at",
             "updated_at",
         )

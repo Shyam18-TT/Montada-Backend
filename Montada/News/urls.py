@@ -24,4 +24,7 @@ urlpatterns = [
     path('reminders/', views.EconomicCalendarReminderListView.as_view(), name='reminder_list'),
     path('reminders/create/', views.EconomicCalendarReminderCreateView.as_view(), name='reminder_create'),
     path('reminders/<uuid:pk>/', views.EconomicCalendarReminderDetailView.as_view(), name='reminder_detail'),
+    
+    # Economic Calendar Event Notifications (tracking)
+    path('event-notifications/', views.EconomicCalendarEventNotificationListView.as_view(), name='event_notification_list'),
 ]
