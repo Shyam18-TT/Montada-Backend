@@ -170,6 +170,7 @@ class EconomicCalendarEvent(models.Model):
 
     def __str__(self):
         return f"{self.event_name} - {self.release_date}"
+        
 class NewsArticleLike(models.Model):
     """User like on an analyst news article. One like per user per article."""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -310,4 +311,78 @@ class LiveNews(models.Model):
 
     def __str__(self):
         return self.title
+
+
+
+class EconomicCalendarReminder(models.Model):
+    """
+    Stores user reminders for economic calendar events.
+    """
+
+    class ReminderType(models.TextChoices):
+        BEFORE_5_MIN = "5_min_before", "5 Minutes Before"
+        BEFORE_15_MIN = "15_min_before", "15 Minutes Before"
+        BEFORE_30_MIN = "30_min_before", "30 Minutes Before"
+        BEFORE_1_HOUR = "1_hour_before", "1 Hour Before"
+        CUSTOM = "custom", "Custom"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+
+    # Relation to event
+    event = models.ForeignKey(
+        EconomicCalendarEvent,
+        on_delete=models.CASCADE,
+        related_name="reminders"
+    )
+
+    # User who created the reminder
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="economic_event_reminders"
+    )
+
+    # Reminder configuration
+    reminder_type = models.CharField(
+        max_length=20,
+        choices=ReminderType.choices,
+        default=ReminderType.BEFORE_15_MIN
+    )
+
+    # Used only when reminder_type = CUSTOM
+    custom_minutes_before = models.PositiveIntegerField(
+        blank=True,
+        null=True,
+        help_text="Custom reminder time in minutes before the event"
+    )
+
+    # Calculated reminder trigger time
+    reminder_time = models.DateTimeField(
+        help_text="Exact datetime when reminder should be triggered"
+    )
+
+    # Notification tracking
+    is_sent = models.BooleanField(default=False)
+    sent_at = models.DateTimeField(blank=True, null=True)
+
+    # Status
+    is_active = models.BooleanField(default=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "economic_calendar_reminder"
+        ordering = ["reminder_time"]
+        unique_together = ("event", "user", "reminder_time")
+        indexes = [
+            models.Index(fields=["user"]),
+            models.Index(fields=["event"]),
+            models.Index(fields=["reminder_time"]),
+            models.Index(fields=["is_sent"]),
+            models.Index(fields=["is_active"]),
+        ]
+
+    def __str__(self):
+        return f"{self.user} - {self.event.event_name} reminder"
 

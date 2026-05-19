@@ -1,6 +1,6 @@
 from django.conf import settings
 from rest_framework import serializers
-from .models import NewsArticle, NewsCategory, Tag, NewsArticleLike, NewsArticleComment, LiveNews, EconomicCalendarEvent
+from .models import NewsArticle, NewsCategory, Tag, NewsArticleLike, NewsArticleComment, LiveNews, EconomicCalendarEvent, EconomicCalendarReminder
 
 
 def _build_media_url(value):
@@ -193,6 +193,96 @@ class EconomicCalendarEventSerializer(serializers.ModelSerializer):
             "forecast_value",
             "previous_value",
             "release_date",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = fields
+
+
+class EconomicCalendarReminderCreateSerializer(serializers.ModelSerializer):
+    """Serializer for creating an economic calendar reminder."""
+
+    class Meta:
+        model = EconomicCalendarReminder
+        fields = (
+            "id",
+            "event",
+            "reminder_type",
+            "custom_minutes_before",
+            "is_active",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("id", "reminder_time", "is_sent", "sent_at", "created_at", "updated_at")
+        extra_kwargs = {
+            "event": {"required": True},
+            "reminder_type": {"default": EconomicCalendarReminder.ReminderType.BEFORE_15_MIN},
+            "custom_minutes_before": {"required": False, "allow_null": True},
+            "is_active": {"default": True},
+        }
+
+    def validate(self, data):
+        """Validate that custom_minutes_before is provided when reminder_type is CUSTOM."""
+        reminder_type = data.get("reminder_type")
+        custom_minutes_before = data.get("custom_minutes_before")
+
+        if reminder_type == EconomicCalendarReminder.ReminderType.CUSTOM:
+            if custom_minutes_before is None or custom_minutes_before <= 0:
+                raise serializers.ValidationError(
+                    {"custom_minutes_before": "custom_minutes_before must be a positive integer when reminder_type is CUSTOM."}
+                )
+        return data
+
+    def create(self, validated_data):
+        """Create reminder and calculate reminder_time based on event and reminder_type."""
+        from datetime import timedelta
+        from django.utils import timezone
+
+        event = validated_data["event"]
+        reminder_type = validated_data["reminder_type"]
+        custom_minutes_before = validated_data.get("custom_minutes_before")
+
+        # Calculate minutes before based on reminder_type
+        if reminder_type == EconomicCalendarReminder.ReminderType.BEFORE_5_MIN:
+            minutes_before = 5
+        elif reminder_type == EconomicCalendarReminder.ReminderType.BEFORE_15_MIN:
+            minutes_before = 15
+        elif reminder_type == EconomicCalendarReminder.ReminderType.BEFORE_30_MIN:
+            minutes_before = 30
+        elif reminder_type == EconomicCalendarReminder.ReminderType.BEFORE_1_HOUR:
+            minutes_before = 60
+        else:  # CUSTOM
+            minutes_before = custom_minutes_before
+
+        # Calculate reminder_time
+        reminder_time = event.release_date - timedelta(minutes=minutes_before)
+
+        validated_data["reminder_time"] = reminder_time
+        validated_data["user"] = self.context["request"].user
+
+        return super().create(validated_data)
+
+
+class EconomicCalendarReminderListSerializer(serializers.ModelSerializer):
+    """Serializer for listing economic calendar reminders with event details."""
+    event_name = serializers.CharField(source="event.event_name", read_only=True)
+    event_release_date = serializers.DateTimeField(source="event.release_date", read_only=True)
+    event_importance = serializers.CharField(source="event.importance", read_only=True)
+
+    class Meta:
+        model = EconomicCalendarReminder
+        fields = (
+            "id",
+            "event",
+            "event_name",
+            "event_release_date",
+            "event_importance",
+            "reminder_type",
+            "custom_minutes_before",
+            "reminder_time",
+            "is_sent",
+            "sent_at",
+            "is_active",
             "created_at",
             "updated_at",
         )

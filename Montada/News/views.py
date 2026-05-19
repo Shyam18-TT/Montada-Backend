@@ -12,7 +12,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .live_news_service import FRONTEND_LIVE_NEWS_LANGUAGES
-from .models import NewsArticle, NewsCategory, NewsArticleLike, NewsArticleComment, LiveNews, EconomicCalendarEvent
+from .models import NewsArticle, NewsCategory, NewsArticleLike, NewsArticleComment, LiveNews, EconomicCalendarEvent, EconomicCalendarReminder
 from Subscriptions.models import AnalystContentPlan, UserAnalystPlanSubscription
 from .serializers import (
     NewsArticleCreateSerializer,
@@ -21,6 +21,8 @@ from .serializers import (
     NewsArticleCommentSerializer,
     LiveNewsSerializer,
     EconomicCalendarEventSerializer,
+    EconomicCalendarReminderCreateSerializer,
+    EconomicCalendarReminderListSerializer,
 )
 from Subscriptions.access import check_active_subscription
 from Subscriptions.analyst_plan_access import analyst_subscription_free_access_enabled
@@ -932,6 +934,121 @@ def eodhd_category_news_response_for_request(request):
     if err is not None:
         return Response(err, status=status.HTTP_400_BAD_REQUEST)
     return Response(payload, status=status.HTTP_200_OK)
+
+
+class EconomicCalendarReminderCreateView(generics.CreateAPIView):
+    """
+    POST: Create an economic calendar reminder for the authenticated user.
+    Body: { "event": <uuid>, "reminder_type": "5_min_before|15_min_before|30_min_before|1_hour_before|custom", "custom_minutes_before": <int> }
+    
+    The reminder_time is automatically calculated based on the event's release_date and the reminder_type.
+    If reminder_type is CUSTOM, custom_minutes_before must be provided.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = EconomicCalendarReminderCreateSerializer
+    queryset = EconomicCalendarReminder.objects.all()
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        return Response(
+            {
+                "message": "Economic calendar reminder created successfully.",
+                "reminder": EconomicCalendarReminderListSerializer(serializer.instance, context={"request": request}).data,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class EconomicCalendarReminderListView(generics.ListAPIView):
+    """
+    GET: List all economic calendar reminders for the authenticated user.
+    Paginated, ordered by reminder_time (soonest first).
+    Query params: is_active (true/false), is_sent (true/false), page, page_size.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = EconomicCalendarReminderListSerializer
+    pagination_class = NewsArticleListPagination
+
+    def get_queryset(self):
+        qs = EconomicCalendarReminder.objects.filter(user=self.request.user).select_related("event").order_by("reminder_time")
+        
+        # Optional filters
+        is_active = self.request.query_params.get("is_active")
+        if is_active is not None:
+            is_active_bool = is_active.lower() in ("true", "1", "yes")
+            qs = qs.filter(is_active=is_active_bool)
+        
+        is_sent = self.request.query_params.get("is_sent")
+        if is_sent is not None:
+            is_sent_bool = is_sent.lower() in ("true", "1", "yes")
+            qs = qs.filter(is_sent=is_sent_bool)
+        
+        return qs
+
+
+class EconomicCalendarReminderDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """
+    GET: Retrieve a specific reminder.
+    PUT/PATCH: Update reminder (reminder_type, custom_minutes_before, is_active).
+    DELETE: Delete the reminder.
+    Only the user who created the reminder can access/modify it.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = EconomicCalendarReminderCreateSerializer
+    lookup_url_kwarg = "pk"
+    lookup_field = "pk"
+
+    def get_queryset(self):
+        return EconomicCalendarReminder.objects.filter(user=self.request.user).select_related("event")
+
+    def retrieve(self, request, *args, **kwargs):
+        instance = self.get_object()
+        serializer = EconomicCalendarReminderListSerializer(instance, context={"request": request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop("partial", False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        
+        # Recalculate reminder_time if reminder_type or custom_minutes_before changed
+        from datetime import timedelta
+        reminder_type = serializer.validated_data.get("reminder_type", instance.reminder_type)
+        custom_minutes_before = serializer.validated_data.get("custom_minutes_before", instance.custom_minutes_before)
+        
+        if reminder_type == EconomicCalendarReminder.ReminderType.BEFORE_5_MIN:
+            minutes_before = 5
+        elif reminder_type == EconomicCalendarReminder.ReminderType.BEFORE_15_MIN:
+            minutes_before = 15
+        elif reminder_type == EconomicCalendarReminder.ReminderType.BEFORE_30_MIN:
+            minutes_before = 30
+        elif reminder_type == EconomicCalendarReminder.ReminderType.BEFORE_1_HOUR:
+            minutes_before = 60
+        else:  # CUSTOM
+            minutes_before = custom_minutes_before or instance.custom_minutes_before
+        
+        reminder_time = instance.event.release_date - timedelta(minutes=minutes_before)
+        serializer.validated_data["reminder_time"] = reminder_time
+        
+        self.perform_update(serializer)
+        return Response(
+            {
+                "message": "Reminder updated successfully.",
+                "reminder": EconomicCalendarReminderListSerializer(serializer.instance, context={"request": request}).data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        self.perform_destroy(instance)
+        return Response(
+            {"message": "Reminder deleted successfully."},
+            status=status.HTTP_204_NO_CONTENT,
+        )
 
 
 class ForexCategoryNewsView(APIView):

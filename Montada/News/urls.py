@@ -19,4 +19,9 @@ urlpatterns = [
     path('trending-headlines/', views.ForexTrendingHeadlinesView.as_view(), name='forex_trending_headlines'),
     path('category-news/', views.ForexCategoryNewsView.as_view(), name='forex_category_news'),
     path('economic-calendar/', views.TradaysEconomicCalendarView.as_view(), name='economic_calendar'),
+    
+    # Economic Calendar Reminders
+    path('reminders/', views.EconomicCalendarReminderListView.as_view(), name='reminder_list'),
+    path('reminders/create/', views.EconomicCalendarReminderCreateView.as_view(), name='reminder_create'),
+    path('reminders/<uuid:pk>/', views.EconomicCalendarReminderDetailView.as_view(), name='reminder_detail'),
 ]
