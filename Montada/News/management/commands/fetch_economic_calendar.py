@@ -90,8 +90,8 @@ class Command(BaseCommand):
             )
 
             importance = event_data.get('Importance', 'none')
-            if importance not in ('none', 'low', 'medium', 'high'):
-                importance = 'none'
+            if importance not in ('low', 'medium', 'high'):
+                continue
 
             defaults = {
                 'event_name':     event_data.get('EventName') or '',
