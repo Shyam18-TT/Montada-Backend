@@ -191,13 +191,37 @@ class Command(BaseCommand):
         """
         event = reminder.event
         user = reminder.user
+        now = timezone.now()
 
-        # Build notification title and body
-        title = f"Event reminder: {event.event_name}"
+        # Calculate time remaining until event
+        time_delta = event.release_date - now
+        total_seconds = int(time_delta.total_seconds())
+        
+        # Format time remaining in human-readable format
+        if total_seconds < 60:
+            time_str = f"{total_seconds} seconds"
+        elif total_seconds < 3600:
+            minutes = total_seconds // 60
+            time_str = f"{minutes} minute{'s' if minutes != 1 else ''}"
+        elif total_seconds < 86400:
+            hours = total_seconds // 3600
+            time_str = f"{hours} hour{'s' if hours != 1 else ''}"
+        else:
+            days = total_seconds // 86400
+            time_str = f"{days} day{'s' if days != 1 else ''}"
+
+        # Get event details
+        event_title = event.event_name
+        country = event.country_name or "Unknown"
+        impact = event.get_importance_display()
+
+        # Build notification title and body for reminder
+        title = f"Reminder: {event_title}"
         body = (
-            f"{event.event_name} is happening now! "
-            f"Currency: {event.currency_code or 'N/A'} | "
-            f"Importance: {event.get_importance_display()}"
+            f"Reminder: The economic event '{event_title}' "
+            f"({country} - {impact} Impact) "
+            f"will start in {time_str}. "
+            f"Market volatility may increase around the event time."
         )
 
         # Determine notification type based on importance
@@ -226,8 +250,10 @@ class Command(BaseCommand):
             "event_name": event.event_name,
             "importance": event.importance,
             "currency_code": event.currency_code or "",
+            "country": country,
             "reminder_type": reminder.reminder_type,
             "custom_minutes_before": str(reminder.custom_minutes_before or ""),
+            "time_remaining": time_str,
         }
 
         send_push_to_users(
@@ -238,7 +264,7 @@ class Command(BaseCommand):
         )
 
         logger.info(
-            f"Sent reminder notification to {user.username} for event {event.event_name} ({event.id})"
+            f"Sent reminder notification to {user.username} for event {event.event_name} ({event.id}) - Event in {time_str}"
         )
 
     def _process_event_notifications(self, now, dry_run, verbose):
