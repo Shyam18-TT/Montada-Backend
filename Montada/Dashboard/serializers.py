@@ -13,6 +13,7 @@ class UserNotificationSerializer(serializers.ModelSerializer):
             "title",
             "message",
             "notification_type",
+            "category",
             "is_read",
             "redirect_url",
             "created_at",
