@@ -1195,7 +1195,7 @@ class TradaysEconomicCalendarView(generics.ListAPIView):
     pagination_class = EconomicCalendarPagination
 
     def get_queryset(self):
-        from django.utils.dateparse import parse_date
+        from django.utils.dateparse import parse_datetime
         from django.utils import timezone as tz
         import datetime
 
@@ -1205,15 +1205,18 @@ class TradaysEconomicCalendarView(generics.ListAPIView):
         date_from = self.request.query_params.get("date_from")
         date_to = self.request.query_params.get("date_to")
 
+        print(date_from)
+
         if date_from:
-            parsed = parse_date(date_from)
+            parsed = parse_datetime(date_from)
+            print(f"parsed = {parsed}")
             if parsed:
-                qs = qs.filter(release_date__date__gte=parsed)
+                qs = qs.filter(release_date__gte=parsed)
 
         if date_to:
-            parsed = parse_date(date_to)
+            parsed = parse_datetime(date_to)
             if parsed:
-                qs = qs.filter(release_date__date__lte=parsed)
+                qs = qs.filter(release_date__lte=parsed)
 
         # If no date filters, default to today + 20 days
         if not date_from and not date_to:
