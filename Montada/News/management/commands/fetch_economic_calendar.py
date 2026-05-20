@@ -27,10 +27,10 @@ class Command(BaseCommand):
         window_start = now - timedelta(days=1)  # include today's past events
         window_end = now + timedelta(days=self.DATE_WINDOW_DAYS)
 
-        date_from_str = window_start.strftime("%Y-%m-%d")
-        date_to_str = window_end.strftime("%Y-%m-%d")
+        date_from_str = window_start.strftime("%Y-%m-%dT%H:%M:%S")
+        date_to_str = window_end.strftime("%Y-%m-%dT%H:%M:%S")
         
-        dynamic_url = f"{self.TRADAYS_URL}&dateFrom={date_from_str}&dateTo={date_to_str}"
+        dynamic_url = f"{self.TRADAYS_URL}&from={date_from_str}&to={date_to_str}"
 
         # --- 1. Fetch raw HTML from Tradays widget ---
         try:
