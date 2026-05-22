@@ -873,14 +873,15 @@ class Command(BaseCommand):
                 if not hit:
                     continue
                 used_price = ask if (signal.direction or "").upper() == "SELL" and ask is not None else bid
-                _close_signal_and_notify(signal, hit, used_price)
-                processed_count += 1
-                self.stdout.write(
-                    self.style.SUCCESS(
-                        "  >>> Closed signal %s (%s) at %s from realtime tick %s"
-                        % (signal.id, hit, used_price, mt5_sym)
-                    )
-                )
+                # TEMPORARILY DISABLED: Auto-close signal on TP/SL hit
+                # _close_signal_and_notify(signal, hit, used_price)
+                # processed_count += 1
+                # self.stdout.write(
+                #     self.style.SUCCESS(
+                #         "  >>> Closed signal %s (%s) at %s from realtime tick %s"
+                #         % (signal.id, hit, used_price, mt5_sym)
+                #     )
+                # )
 
             for alert in self._alerts_by_symbol.get(mt5_sym, []):
                 is_armed, current_price, armed_now = _ensure_user_alert_activation_state(alert, bid)
@@ -1100,9 +1101,10 @@ class Command(BaseCommand):
                     "  - %s | %s %s | entry=%s TP=%s SL=%s | bid=%s | %s"
                     % (signal.id, sym, signal.direction, signal.entry_price, signal.take_profit, signal.stop_loss, used_price, status)
                 )
-            if hit:
-                _close_signal_and_notify(signal, hit, used_price)
-                self.stdout.write(self.style.SUCCESS("  >>> Closed signal %s (%s) at %s" % (signal.id, hit, used_price)))
+            # TEMPORARILY DISABLED: Auto-close signal on TP/SL hit
+            # if hit:
+            #     _close_signal_and_notify(signal, hit, used_price)
+            #     self.stdout.write(self.style.SUCCESS("  >>> Closed signal %s (%s) at %s" % (signal.id, hit, used_price)))
 
         # Step 4: Check user price alerts
         if alerts:
