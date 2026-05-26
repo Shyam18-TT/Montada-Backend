@@ -134,7 +134,13 @@ from .serializers import (
     AdminUserProfileSerializer,
     AdminInAppSubscriptionSettingsSerializer,
     AdminInAppFullAccessSerializer,
+    AdminEconomicCalendarReminderSettingsSerializer,
 )
+
+try:
+    from MontadaAdmin.models import EconomicCalendarGlobalReminderSettings
+except ImportError:
+    EconomicCalendarGlobalReminderSettings = None
 
 
 @method_decorator(csrf_exempt, name="dispatch")
@@ -3958,6 +3964,52 @@ class AdminUserInAppFullAccessView(APIView):
                     "admin_granted_in_app_access": user.admin_granted_in_app_access,
                     "admin_in_app_access_expires_at": user.admin_in_app_access_expires_at,
                 },
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class AdminEconomicCalendarReminderSettingsView(APIView):
+    """
+    GET: Global economic calendar advance reminder settings (singleton).
+    PATCH: Update is_enabled and/or minutes_before (1–1440).
+    When enabled, all active users are notified N minutes before each stored
+    economic event (via run_economic_calendar_reminders). Event-time notifications
+    are unchanged.
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request):
+        if (
+            EconomicCalendarGlobalReminderSettings is None
+            or AdminEconomicCalendarReminderSettingsSerializer is None
+        ):
+            return Response(
+                {"error": "Economic calendar reminder settings are not available."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        obj = EconomicCalendarGlobalReminderSettings.load()
+        return Response(AdminEconomicCalendarReminderSettingsSerializer(obj).data)
+
+    def patch(self, request):
+        if (
+            EconomicCalendarGlobalReminderSettings is None
+            or AdminEconomicCalendarReminderSettingsSerializer is None
+        ):
+            return Response(
+                {"error": "Economic calendar reminder settings are not available."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        obj = EconomicCalendarGlobalReminderSettings.load()
+        ser = AdminEconomicCalendarReminderSettingsSerializer(
+            obj, data=request.data, partial=True
+        )
+        ser.is_valid(raise_exception=True)
+        ser.save()
+        return Response(
+            {
+                "message": "Economic calendar reminder settings updated.",
+                "settings": AdminEconomicCalendarReminderSettingsSerializer(obj).data,
             },
             status=status.HTTP_200_OK,
         )

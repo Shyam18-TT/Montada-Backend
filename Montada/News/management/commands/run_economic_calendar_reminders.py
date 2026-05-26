@@ -4,8 +4,9 @@ Management command to periodically check economic calendar reminders and send no
 This command:
 1. Checks for reminders that should trigger (reminder_time <= now, is_active, not is_sent)
 2. Sends FCM push + in-app notifications to users for their reminders
-3. Sends event-time notifications to all subscribed users when events occur
-4. Marks reminders as sent to avoid duplicate notifications
+3. Sends admin-configured global advance reminders to all active users (MontadaAdmin settings)
+4. Sends event-time notifications to all subscribed users when events occur (unchanged)
+5. Marks reminders as sent to avoid duplicate notifications
 
 Usage (one-time run):
     python manage.py run_economic_calendar_reminders
@@ -27,11 +28,17 @@ from datetime import timedelta
 from django.core.management.base import BaseCommand
 from django.utils import timezone
 from django.db import transaction
+from django.db.models import Exists, OuterRef
 from django.contrib.auth import get_user_model
 
 from News.models import EconomicCalendarEvent, EconomicCalendarReminder, EconomicCalendarEventNotification
 from Mainapp.models import UserNotification
 from firebase import send_push_to_users
+
+try:
+    from MontadaAdmin.models import EconomicCalendarGlobalReminderSettings
+except ImportError:
+    EconomicCalendarGlobalReminderSettings = None
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
@@ -126,17 +133,21 @@ class Command(BaseCommand):
         if verbose:
             self.stdout.write(f"Current time: {now}")
 
-        # --- Step 1: Check and send reminders that should trigger ---
+        # --- Step 1: Check and send per-user reminders that should trigger ---
         reminders_sent = self._process_reminders(now, dry_run, verbose)
 
-        # --- Step 2: Check and send event-time notifications ---
+        # --- Step 2: Admin global advance reminders (all users, N minutes before) ---
+        global_reminders_sent = self._process_global_admin_reminders(now, dry_run, verbose)
+
+        # --- Step 3: Event-time notifications (unchanged) ---
         event_notifications_sent = self._process_event_notifications(now, dry_run, verbose)
 
         # --- Summary ---
         self.stdout.write(
             self.style.SUCCESS(
                 f'\n✓ Completed.\n'
-                f'  Reminders sent: {reminders_sent}\n'
+                f'  Per-user reminders sent: {reminders_sent}\n'
+                f'  Global advance reminders sent: {global_reminders_sent}\n'
                 f'  Event notifications sent: {event_notifications_sent}'
             )
         )
@@ -265,6 +276,173 @@ class Command(BaseCommand):
 
         logger.info(
             f"Sent reminder notification to {user.username} for event {event.event_name} ({event.id}) - Event in {time_str}"
+        )
+
+    def _process_global_admin_reminders(self, now, dry_run, verbose):
+        """
+        Notify all active users N minutes before each economic event, per admin settings.
+        Uses the same 5-minute catch-up window as event-time notifications.
+        """
+        if EconomicCalendarGlobalReminderSettings is None:
+            return 0
+
+        settings_obj = EconomicCalendarGlobalReminderSettings.load()
+        if not settings_obj.is_enabled:
+            if verbose:
+                self.stdout.write("Global economic reminders are disabled — skipping.")
+            return 0
+
+        minutes_before = settings_obj.minutes_before
+        if minutes_before <= 0:
+            return 0
+
+        # trigger_time = release_date - minutes_before; fire when trigger_time is in [now-5m, now]
+        window_start = now - timedelta(minutes=5)
+        window_end = now
+        release_start = window_start + timedelta(minutes=minutes_before)
+        release_end = window_end + timedelta(minutes=minutes_before)
+
+        notification_type = EconomicCalendarEventNotification.NotificationType.ADMIN_ADVANCE
+        already_sent = EconomicCalendarEventNotification.objects.filter(
+            event_id=OuterRef("pk"),
+            user__isnull=True,
+            notification_type=notification_type,
+            sent_to_all_users=True,
+            is_sent=True,
+        )
+
+        upcoming_events = EconomicCalendarEvent.objects.filter(
+            release_date__gte=release_start,
+            release_date__lte=release_end,
+        ).exclude(Exists(already_sent))
+
+        if verbose:
+            self.stdout.write(
+                f"Found {upcoming_events.count()} events for global {minutes_before}-min advance reminders."
+            )
+
+        count = 0
+
+        for event in upcoming_events:
+            try:
+                if dry_run:
+                    count += 1
+                    if verbose:
+                        self.stdout.write(
+                            f"  [dry-run] Would send global advance reminder for "
+                            f"{event.event_name} ({minutes_before} min before)"
+                        )
+                    continue
+
+                # Claim in DB before push so overlapping scheduler ticks cannot double-send.
+                if not EconomicCalendarEventNotification.claim_admin_advance_notification(event):
+                    if verbose:
+                        self.stdout.write(
+                            f"  ⊘ Global advance reminder already sent for {event.event_name} ({event.id})"
+                        )
+                    continue
+
+                users = list(User.objects.filter(is_active=True))
+                if not users:
+                    if verbose:
+                        self.stdout.write(
+                            f"  ⊘ No active users — skipped global advance for {event.event_name}"
+                        )
+                    continue
+
+                try:
+                    self._send_global_advance_notification(event, users, minutes_before)
+                except Exception as send_err:
+                    # Keep the claim row so the next scheduler tick cannot double-send.
+                    EconomicCalendarEventNotification.objects.filter(
+                        event=event,
+                        user=None,
+                        notification_type=notification_type,
+                        sent_to_all_users=True,
+                    ).update(error_message=str(send_err)[:1000])
+                    logger.exception(
+                        "Global advance reminder delivery failed for event %s",
+                        event.id,
+                        exc_info=send_err,
+                    )
+                    self.stderr.write(
+                        self.style.ERROR(
+                            f"Delivery failed for {event.event_name} ({event.id}); "
+                            "marked sent to prevent duplicate retries."
+                        )
+                    )
+                    continue
+
+                count += 1
+                if verbose:
+                    self.stdout.write(
+                        f"  ✓ Global advance reminder sent to {len(users)} users — "
+                        f"{event.event_name} ({minutes_before} min before)"
+                    )
+            except Exception as e:
+                self.stderr.write(
+                    self.style.ERROR(
+                        f"Error processing global advance reminder for event {event.id}: {str(e)}"
+                    )
+                )
+                logger.exception(
+                    f"Error processing global advance reminder for event {event.id}",
+                    exc_info=e,
+                )
+
+        return count
+
+    def _send_global_advance_notification(self, event, users, minutes_before):
+        """FCM + in-app notification to all active users before an economic event."""
+        country = event.country_name or "Unknown"
+        impact = event.get_importance_display()
+        title = f"Upcoming: {event.event_name}"
+        body = (
+            f"The economic event '{event.event_name}' "
+            f"({country} - {impact} Impact) "
+            f"starts in {minutes_before} minute{'s' if minutes_before != 1 else ''}. "
+            f"Market volatility may increase around the event time."
+        )
+
+        if event.importance == "high":
+            notification_type = "WARNING"
+        else:
+            notification_type = "INFO"
+
+        notifications_to_create = [
+            UserNotification(
+                user=user,
+                title=title,
+                message=body,
+                notification_type=notification_type,
+                category="ECONOMIC_EVENT",
+                redirect_url=f"/economic-calendar/{event.id}/",
+            )
+            for user in users
+        ]
+
+        data_payload = {
+            "type": "economic_global_reminder",
+            "event_id": str(event.id),
+            "event_name": event.event_name,
+            "importance": event.importance,
+            "currency_code": event.currency_code or "",
+            "country": country,
+            "minutes_before": str(minutes_before),
+        }
+
+        with transaction.atomic():
+            UserNotification.objects.bulk_create(notifications_to_create)
+            send_push_to_users(
+                users=users,
+                title=title,
+                body=body,
+                data=data_payload,
+            )
+
+        logger.info(
+            f"Sent global advance reminder ({minutes_before} min) to {len(users)} users "
+            f"for event {event.event_name} ({event.id})"
         )
 
     def _process_event_notifications(self, now, dry_run, verbose):

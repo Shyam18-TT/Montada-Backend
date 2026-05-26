@@ -401,6 +401,7 @@ class EconomicCalendarEventNotification(models.Model):
         REMINDER = "reminder", "Reminder Notification"
         EVENT = "event", "Event-Time Notification"
         BROADCAST = "broadcast", "Broadcast to All Users"
+        ADMIN_ADVANCE = "admin_advance", "Admin Global Advance Reminder"
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     
@@ -482,12 +483,40 @@ class EconomicCalendarEventNotification(models.Model):
         Returns:
             bool: True if notification already sent, False otherwise
         """
-        return cls.objects.filter(
+        qs = cls.objects.filter(
             event=event,
             user=user,
             notification_type=notification_type,
-            is_sent=True
-        ).exists()
+            is_sent=True,
+        )
+        if notification_type == cls.NotificationType.ADMIN_ADVANCE and user is None:
+            qs = qs.filter(sent_to_all_users=True)
+        return qs.exists()
+
+    @classmethod
+    def claim_admin_advance_notification(cls, event):
+        """
+        Atomically reserve the right to send the global admin advance reminder once.
+
+        Inserts a tracking row before push/in-app delivery so concurrent scheduler runs
+        and repeated ticks inside the catch-up window cannot duplicate notifications.
+
+        Returns:
+            bool: True if this caller should send; False if already claimed/sent.
+        """
+        from django.db import IntegrityError
+
+        try:
+            cls.objects.create(
+                event=event,
+                user=None,
+                notification_type=cls.NotificationType.ADMIN_ADVANCE,
+                sent_to_all_users=True,
+                is_sent=True,
+            )
+            return True
+        except IntegrityError:
+            return False
     
     @classmethod
     def create_notification_record(cls, event, user=None, notification_type=NotificationType.EVENT, 

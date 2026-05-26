@@ -15,6 +15,11 @@ except ImportError:
     UserAnalystPlanSubscription = None
     InAppSubscriptionSettings = None
 
+try:
+    from MontadaAdmin.models import EconomicCalendarGlobalReminderSettings
+except ImportError:
+    EconomicCalendarGlobalReminderSettings = None
+
 
 class AdminLoginSerializer(serializers.Serializer):
     """Email and password for admin login; validates credentials and sets user."""
@@ -90,6 +95,25 @@ if InAppSubscriptionSettings is not None:
             return value
 else:
     AdminInAppSubscriptionSettingsSerializer = None
+
+
+if EconomicCalendarGlobalReminderSettings is not None:
+    class AdminEconomicCalendarReminderSettingsSerializer(serializers.ModelSerializer):
+        """Singleton: global advance reminder minutes for all users before economic events."""
+
+        class Meta:
+            model = EconomicCalendarGlobalReminderSettings
+            fields = ("id", "is_enabled", "minutes_before", "updated_at")
+            read_only_fields = ("id", "updated_at")
+
+        def validate_minutes_before(self, value):
+            if value < 1 or value > 1440:
+                raise serializers.ValidationError(
+                    "minutes_before must be between 1 and 1440 (24 hours)."
+                )
+            return value
+else:
+    AdminEconomicCalendarReminderSettingsSerializer = None
 
 
 class AdminInAppFullAccessSerializer(serializers.Serializer):

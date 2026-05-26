@@ -50,6 +50,7 @@ from .views import (
     AdminPaymentHistoryView,
     AdminInAppSubscriptionSettingsView,
     AdminUserInAppFullAccessView,
+    AdminEconomicCalendarReminderSettingsView,
     AdminFCMBroadcastView,
     AdminUserPickerView,
     AdminEconomicCalendarView,
@@ -102,6 +103,11 @@ urlpatterns = [
 
     path("marketdata/live/", AdminGetMarketDataFromMT5.as_view(), name="admin_marketdata_live"),
     path("marketdata/economic-calendar/", AdminEconomicCalendarView.as_view(), name="admin_economic_calendar"),
+    path(
+        "marketdata/economic-calendar/reminder-settings/",
+        AdminEconomicCalendarReminderSettingsView.as_view(),
+        name="admin_economic_calendar_reminder_settings",
+    ),
     path("news/market-news/", AdminMarketNewsList.as_view(), name="admin_market_news"),
     path("news/category-news/", AdminCategoryNewsView.as_view(), name="admin_category_news"),
 
