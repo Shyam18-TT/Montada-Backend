@@ -66,6 +66,10 @@ def _normalize_notification_language(language):
     return normalized.split("-", 1)[0] if normalized else ""
 
 
+def _is_english_news_language(language):
+    return _normalize_notification_language(language) == "en"
+
+
 def _get_news_notification_recipients(language):
     preference_field = NEWS_LANGUAGE_RECIPIENT_FIELDS.get(
         _normalize_notification_language(language)
@@ -77,6 +81,8 @@ def _get_news_notification_recipients(language):
 
 def _notify_users_about_news(instance, *, event_name):
     if not instance:
+        return
+    if not _is_english_news_language(getattr(instance, "language", None)):
         return
 
     try:
@@ -409,7 +415,11 @@ class Command(BaseCommand):
 
             for item in items:
                 try:
-                    instance, created, changed = save_live_news_payload(item, broadcast=broadcast)
+                    item_broadcast = broadcast and _is_english_news_language(item.get("language"))
+                    instance, created, changed = save_live_news_payload(
+                        item,
+                        broadcast=item_broadcast,
+                    )
                 except ProgrammingError as exc:
                     if "live_news" in str(exc).lower():
                         raise CommandError(
@@ -426,7 +436,7 @@ class Command(BaseCommand):
                 else:
                     updated_count += 1
 
-                if broadcast:
+                if item_broadcast:
                     _notify_users_about_news(
                         instance,
                         event_name="created" if created else "updated",
