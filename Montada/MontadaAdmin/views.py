@@ -97,15 +97,17 @@ except ImportError:
     TradingSignalSerializer = None
 
 try:
-    from News.models import NewsCategory, NewsArticle
+    from News.models import NewsCategory, NewsArticle, LiveNews
 except ImportError:
     NewsCategory = None
     NewsArticle = None
+    LiveNews = None
 
 try:
-    from News.serializers import NewsArticleCreateSerializer
+    from News.serializers import NewsArticleCreateSerializer, LiveNewsSerializer
 except ImportError:
     NewsArticleCreateSerializer = None
+    LiveNewsSerializer = None
 
 try:
     from Dashboard.models import PollQuestion, PollOption, PollResponse
@@ -2546,70 +2548,82 @@ MARKET_NEWS_SYMBOLS_BY_CATEGORY = {
 }
 
 
-class AdminMarketNewsList(APIView):
+class AdminMarketNewsList(generics.ListAPIView):
     """
-    GET: Fetch market/finance news from Marketaux API (admin-only).
-    Same query params as News MarketNewsList: category, language, limit, page, symbols, etc.
+    GET: List market news from LiveNews table (admin-only).
+    Supports filters for category/language/providers.
     """
     permission_classes = [IsAuthenticated, IsAdminUser]
+    serializer_class = LiveNewsSerializer
+    pagination_class = AdminPageNumberPagination
 
-    def get(self, request):
-        api_token = getattr(django_settings, "MARKETAUX_API_TOKEN", None)
-        if not api_token:
+    def list(self, request, *args, **kwargs):
+        if LiveNews is None or LiveNewsSerializer is None:
             return Response(
-                {"error": "Market news API is not configured (MARKETAUX_API_TOKEN missing)."},
+                {"error": "Live news is not available."},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
-        params = {
-            "api_token": api_token,
-            "filter_entities": "true",
-        }
-        category = (request.query_params.get("category") or "all").strip().lower()
-        if category not in MARKET_NEWS_SYMBOLS_BY_CATEGORY:
-            return Response(
-                {
-                    "error": f"Invalid category: {category}.",
-                    "valid_categories": list(MARKET_NEWS_SYMBOLS_BY_CATEGORY.keys()),
-                },
-                status=status.HTTP_400_BAD_REQUEST,
+        return super().list(request, *args, **kwargs)
+
+    def _provider_tokens(self):
+        raw_values = []
+        providers_single = self.request.query_params.get("provider")
+        if providers_single:
+            raw_values.append(providers_single)
+        providers_csv = self.request.query_params.get("providers")
+        if providers_csv:
+            raw_values.append(providers_csv)
+
+        tokens = []
+        for raw_value in raw_values:
+            for token in str(raw_value or "").split(","):
+                cleaned = token.strip().lower().replace(" ", "_")
+                if cleaned and cleaned not in tokens:
+                    tokens.append(cleaned)
+        return tokens
+
+    def get_queryset(self):
+        queryset = LiveNews.objects.all().order_by(
+            "-source_updated_at",
+            "-source_created_at",
+            "-created_at",
+        )
+
+        # Keep default behavior to show active live news unless explicitly overridden.
+        is_active_raw = self.request.query_params.get("is_active")
+        if is_active_raw is None:
+            queryset = queryset.filter(is_active=True)
+        else:
+            active_value = str(is_active_raw).strip().lower()
+            if active_value in {"true", "1", "yes"}:
+                queryset = queryset.filter(is_active=True)
+            elif active_value in {"false", "0", "no"}:
+                queryset = queryset.filter(is_active=False)
+
+        language = (self.request.query_params.get("language") or "").strip().lower()
+        if language:
+            queryset = queryset.filter(language__iexact=language)
+
+        category = (self.request.query_params.get("category") or "all").strip().lower()
+        if category and category != "all":
+            queryset = queryset.filter(news_type__icontains=category)
+
+        providers = self._provider_tokens()
+        if providers:
+            provider_query = Q()
+            for provider in providers:
+                provider_query |= Q(news_type__istartswith=f"{provider}_")
+            queryset = queryset.filter(provider_query)
+
+        search = (self.request.query_params.get("search") or "").strip()
+        if search:
+            queryset = queryset.filter(
+                Q(title__icontains=search)
+                | Q(teaser__icontains=search)
+                | Q(body__icontains=search)
             )
-        category_symbols = MARKET_NEWS_SYMBOLS_BY_CATEGORY[category]
-        if category_symbols:
-            params["symbols"] = ",".join(category_symbols)
-        for key in MARKETAUX_ALLOWED_PARAMS:
-            val = request.query_params.get(key)
-            if val is not None:
-                params[key] = val
-        url = "https://api.marketaux.com/v1/news/all?" + urllib.parse.urlencode(params)
-        try:
-            req = urllib.request.Request(url, method="GET")
-            req.add_header(
-                "User-Agent",
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            )
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                data = json.loads(resp.read().decode())
-        except urllib.error.HTTPError as e:
-            body = e.read().decode() if e.fp else "{}"
-            try:
-                err_data = json.loads(body)
-            except Exception:
-                err_data = {"error": body or str(e)}
-            if "1010" in str(err_data.get("error", "")):
-                return Response(
-                    {
-                        "error": "Market news provider is blocking this server's region or network (Cloudflare 1010).",
-                        "code": "1010",
-                    },
-                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
-                )
-            return Response(err_data, status=e.code)
-        except Exception as e:
-            return Response(
-                {"error": "Failed to fetch market news.", "detail": str(e)},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
-        return Response(data, status=status.HTTP_200_OK)
+
+        return queryset
 
 
 class AdminCategoryNewsView(APIView):
