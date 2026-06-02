@@ -10,7 +10,7 @@ NEWS_LANGUAGE_PREFERENCE_FIELDS = (
     'news_notify_zh',
 )
 DEFAULT_NEWS_LANGUAGE_PREFERENCES = {
-    'news_notify_ar': True,
+    'news_notify_ar': False,
     'news_notify_en': True,
     'news_notify_zh': False,
 }
@@ -37,9 +37,9 @@ def _apply_news_language_preferences(attrs, *, instance=None):
     for field in provided_fields:
         current_preferences[field] = bool(attrs[field])
 
-    if sum(1 for field in NEWS_LANGUAGE_PREFERENCE_FIELDS if current_preferences[field]) != 2:
+    if sum(1 for field in NEWS_LANGUAGE_PREFERENCE_FIELDS if current_preferences[field]) != 1:
         raise serializers.ValidationError(
-            {'news_language_preferences': 'Choose exactly 2 news notification languages.'}
+            {'news_language_preferences': 'Choose any news notification languages.'}
         )
 
     attrs.update(current_preferences)
