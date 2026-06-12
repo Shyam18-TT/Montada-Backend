@@ -13,6 +13,26 @@ from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
+# Symbols that must never trigger change notifications, normalized via _normalize_symbol.
+_EXCLUDED_STOCK_SYMBOLS = frozenset({
+    "AAL", "AAPL", "ABNB", "AD.AVIATION", "AD.INSURANC", "AD.NATL.TAK",
+    "AD.SHIP", "ADBE", "ADCB", "ADIB", "ADNOC.DRILL", "ADNOC.GAS",
+    "ADNOC.LOGIS", "ADSGN", "AIG", "ALVG", "AMZN", "AXP", "AGTHIA.GRP",
+    "ALPHA.DHABI", "APEX", "BA", "BABA", "BAC", "BAYGN", "BK", "BKNG",
+    "BMRN", "BMWG", "BMY", "CAT", "CBD", "CBKG", "CME", "COST", "CSCO",
+    "CHIMERA", "DAL", "DBKGN", "DELL", "DEWA", "DIB", "DIS", "DU",
+    "EBAY", "EMAAR.DEVEL", "EMAAR.PROPT", "FAB.BANK", "FDX", "GE", "GM",
+    "GOOG", "GPRO", "GS", "GT", "GULFNAV", "GHITHA.HOLD", "HD", "HLT",
+    "HOG", "HPQ", "IBM", "IHC", "INTC", "JNJ", "JPM", "KMI", "KO",
+    "LHAG", "MA", "MCD", "MCO", "MMM", "MO", "MRK", "MRVL", "MS",
+    "MSFT", "MODON", "NBD.BANK", "NFLX", "NKE", "NMDC", "NVDA", "ORCL",
+    "PEP", "PFE", "PM", "PYPL", "PALMS.SPORT", "PARKIN", "PURE.HEALTH",
+    "QCOM", "RACE", "RAK.BANK", "ROKU", "RPH", "SAN", "SBUX", "SHOP",
+    "SIEGN", "SPOT", "SALIK", "TEF", "TMUS", "TSLA", "TAALEEM",
+    "TECOM.GROUP", "UA", "UAL", "UBER", "UPS", "VALE", "VOWG", "VZ",
+    "WFC", "WMT", "XOM", "YUM", "ZM",
+})
+
 DEFAULT_PRICE_URL = "https://trustcapital.com/api/get-MT5-price"
 DEFAULT_THRESHOLD_PERCENT = Decimal("0.5")
 DEFAULT_STATE_TTL_SECONDS = 60 * 60 * 24 * 7
@@ -210,6 +230,8 @@ class Command(BaseCommand):
         for raw_symbol, quote in live_quotes.items():
             symbol = _normalize_symbol(raw_symbol)
             if not symbol:
+                continue
+            if symbol in _EXCLUDED_STOCK_SYMBOLS:
                 continue
             if self.symbol_filter and symbol not in self.symbol_filter:
                 continue
