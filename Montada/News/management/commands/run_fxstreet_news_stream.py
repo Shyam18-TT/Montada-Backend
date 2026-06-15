@@ -415,10 +415,9 @@ class Command(BaseCommand):
 
             for item in items:
                 try:
-                    item_broadcast = broadcast and _is_english_news_language(item.get("language"))
                     instance, created, changed = save_live_news_payload(
                         item,
-                        broadcast=item_broadcast,
+                        broadcast=broadcast,
                     )
                 except ProgrammingError as exc:
                     if "live_news" in str(exc).lower():
@@ -436,7 +435,7 @@ class Command(BaseCommand):
                 else:
                     updated_count += 1
 
-                if item_broadcast:
+                if broadcast and _is_english_news_language(getattr(instance, "language", None)):
                     _notify_users_about_news(
                         instance,
                         event_name="created" if created else "updated",
