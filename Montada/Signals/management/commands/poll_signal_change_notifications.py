@@ -16,16 +16,15 @@ logger = logging.getLogger(__name__)
 # Symbols that must never trigger change notifications, normalized via _normalize_symbol.
 _EXCLUDED_STOCK_SYMBOLS = frozenset({
     "AAL", "AAPL", "ABNB", "AD.AVIATION", "AD.INSURANC", "AD.NATL.TAK",
-    "AD.SHIP", "ADBE", "ADCB", "ADIB", "ADNOC.DRILL", "ADNOC.GAS",
-    "ADNOC.LOGIS", "ADSGN", "AIG", "ALVG", "AMZN", "AXP", "AGTHIA.GRP",
+    "AD.SHIP", "ADBE", "ADCB", "ADIB", "ADSGN", "AIG", "ALVG", "AMZN", "AXP", "AGTHIA.GRP",
     "ALPHA.DHABI", "APEX", "BA", "BABA", "BAC", "BAYGN", "BK", "BKNG",
     "BMRN", "BMWG", "BMY", "CAT", "CBD", "CBKG", "CME", "COST", "CSCO",
     "CHIMERA", "DAL", "DBKGN", "DELL", "DEWA", "DIB", "DIS", "DU",
-    "EBAY", "EMAAR.DEVEL", "EMAAR.PROPT", "FAB.BANK", "FDX", "GE", "GM",
-    "GOOG", "GPRO", "GS", "GT", "GULFNAV", "GHITHA.HOLD", "HD", "HLT",
+    "EBAY", "EMAAR.DEVEL", "EMAAR.PROPT", "FAB.BANK", "FDX", "GE", "GHITHA.HOLD", "GM",
+    "GOOG", "GPRO", "GS", "GT", "GULFNAV", "HD", "HLT",
     "HOG", "HPQ", "IBM", "IHC", "INTC", "JNJ", "JPM", "KMI", "KO",
-    "LHAG", "MA", "MCD", "MCO", "MMM", "MO", "MRK", "MRVL", "MS",
-    "MSFT", "MODON", "NBD.BANK", "NFLX", "NKE", "NMDC", "NVDA", "ORCL",
+    "LHAG", "MA", "MCD", "MCO", "MMM", "MO", "MODON", "MRK", "MRVL", "MS",
+    "MSFT", "NBD.BANK", "NFLX", "NKE", "NMDC", "NVDA", "ORCL",
     "PEP", "PFE", "PM", "PYPL", "PALMS.SPORT", "PARKIN", "PURE.HEALTH",
     "QCOM", "RACE", "RAK.BANK", "ROKU", "RPH", "SAN", "SBUX", "SHOP",
     "SIEGN", "SPOT", "SALIK", "TEF", "TMUS", "TSLA", "TAALEEM",
@@ -113,9 +112,14 @@ class Command(BaseCommand):
             help="HTTP timeout in seconds. Default: 15.",
         )
         parser.add_argument(
-            "--symbols",
+            "--exclude-symbols",
             default="",
-            help="Optional comma-separated normalized symbols to watch, e.g. EURUSD,XAUUSD.",
+            help="Optional comma-separated symbols to exclude (in addition to hardcoded list).",
+        )
+        parser.add_argument(
+            "--no-hardcoded-exclusions",
+            action="store_true",
+            help="Ignore hardcoded excluded stock symbols list and allow all.",
         )
         parser.add_argument(
             "--reset-threshold",
@@ -144,6 +148,12 @@ class Command(BaseCommand):
             help="Maximum symbol/level notification batches per poll. Default: 200.",
         )
         parser.add_argument(
+            "--max-users-per-notification",
+            type=int,
+            default=0,
+            help="Maximum users to notify per event (0=all). Default: 0 (notify all).",
+        )
+        parser.add_argument(
             "--no-daily-reset",
             action="store_true",
             help="Do not reset milestone state when the local trading date changes.",
@@ -158,6 +168,11 @@ class Command(BaseCommand):
             action="store_true",
             help="Print per-symbol threshold state.",
         )
+        parser.add_argument(
+            "--debug-symbols",
+            action="store_true",
+            help="Print all open signal symbols from database (for debugging).",
+        )
 
     def handle(self, *args, **options):
         self.url = str(options["url"]).strip()
@@ -165,6 +180,7 @@ class Command(BaseCommand):
         self.timeout = max(1.0, float(options["timeout"] or 15.0))
         self.run_once = bool(options["once"])
         self.verbose = bool(options["verbose"])
+        self.debug_symbols = bool(options.get("debug_symbols"))
         self.threshold = _parse_decimal(options.get("threshold")) or DEFAULT_THRESHOLD_PERCENT
         if self.threshold <= 0:
             self.stderr.write(self.style.ERROR("--threshold must be greater than 0."))
@@ -184,6 +200,7 @@ class Command(BaseCommand):
             1,
             int(options.get("max_notification_batches") or DEFAULT_MAX_NOTIFICATION_BATCHES_PER_POLL),
         )
+        self.max_users_per_notification = max(0, int(options.get("max_users_per_notification") or 0))
         self.reset_daily = not bool(options.get("no_daily_reset"))
 
         self.symbol_filter = {
@@ -191,8 +208,18 @@ class Command(BaseCommand):
             for symbol in str(options.get("symbols") or "").split(",")
             if _normalize_symbol(symbol)
         }
+        
+        # Build exclusion set from hardcoded list + command-line exclusions
+        self.excluded_symbols = set(_EXCLUDED_STOCK_SYMBOLS) if not options.get("no_hardcoded_exclusions") else set()
+        self.excluded_symbols.update({
+            _normalize_symbol(symbol)
+            for symbol in str(options.get("exclude_symbols") or "").split(",")
+            if _normalize_symbol(symbol)
+        })
+        
         self._fallback_state_by_symbol = {}
         self._fallback_locks = set()
+        self._fallback_state_last_cleanup = 0  # For periodic memory cleanup
 
         self.stdout.write(
             self.style.SUCCESS(
@@ -205,9 +232,28 @@ class Command(BaseCommand):
                 )
             )
         )
+        
+        if self.max_users_per_notification > 0:
+            self.stdout.write(
+                self.style.WARNING(
+                    "User limit: %d users per notification (to prevent spam)." % self.max_users_per_notification
+                )
+            )
+        
+        if self.excluded_symbols:
+            self.stdout.write(
+                self.style.WARNING(
+                    "Excluded symbols: %d (use --no-hardcoded-exclusions to disable)."
+                    % len(self.excluded_symbols)
+                )
+            )
+        
+        if self.debug_symbols:
+            self._print_open_signals_by_symbol()
 
         while True:
             try:
+                self._cleanup_fallback_state()
                 self._run_poll()
             except KeyboardInterrupt:
                 self.stdout.write(self.style.WARNING("Stopping signal change polling."))
@@ -227,17 +273,29 @@ class Command(BaseCommand):
             raise RuntimeError("Could not fetch live quotes: %s" % exc) from exc
 
         quotes_by_symbol = {}
+        excluded_symbols = set()
+        filtered_symbols = set()
+        
         for raw_symbol, quote in live_quotes.items():
             symbol = _normalize_symbol(raw_symbol)
             if not symbol:
                 continue
-            if symbol in _EXCLUDED_STOCK_SYMBOLS:
+            if symbol in self.excluded_symbols:
+                excluded_symbols.add(symbol)
                 continue
             if self.symbol_filter and symbol not in self.symbol_filter:
+                filtered_symbols.add(symbol)
                 continue
             if not isinstance(quote, dict):
                 continue
             quotes_by_symbol[symbol] = quote
+
+        if self.verbose:
+            if excluded_symbols:
+                self.stdout.write("Excluded symbols: %s" % ", ".join(sorted(excluded_symbols)))
+            if filtered_symbols:
+                self.stdout.write("Filtered symbols (not in watchlist): %s" % ", ".join(sorted(filtered_symbols)))
+            self.stdout.write("Processing symbols: %s" % ", ".join(sorted(quotes_by_symbol.keys())))
 
         if not quotes_by_symbol:
             self.stdout.write("No matching live quotes found.")
@@ -245,7 +303,9 @@ class Command(BaseCommand):
 
         signals_by_symbol = self._load_open_signals_by_symbol(quotes_by_symbol.keys())
         if not signals_by_symbol:
-            self.stdout.write("No open signals matched fetched quote symbols.")
+            self.stdout.write(
+                "WARNING: No open signals matched %d fetched quote symbols." % len(quotes_by_symbol)
+            )
             return
 
         notification_count = 0
@@ -271,6 +331,40 @@ class Command(BaseCommand):
             % (len(signals_by_symbol), notification_count)
         )
 
+    def _print_open_signals_by_symbol(self):
+        """Print all open signals grouped by normalized symbol for debugging."""
+        from Signals.models import TradingSignal
+        
+        signals = (
+            TradingSignal.active.filter(status=TradingSignal.Status.OPEN)
+            .select_related("analyst", "instrument")
+            .only("id", "analyst_id", "instrument_id", "instrument__symbol", "status")
+        )
+        
+        signals_by_symbol = {}
+        for signal in signals:
+            instrument = getattr(signal, "instrument", None)
+            raw_symbol = getattr(instrument, "symbol", "")
+            normalized = _normalize_symbol(raw_symbol)
+            if normalized:
+                signals_by_symbol.setdefault(normalized, {
+                    "raw_symbol": raw_symbol,
+                    "count": 0
+                })
+                signals_by_symbol[normalized]["count"] += 1
+        
+        self.stdout.write("\n" + self.style.SUCCESS("=== OPEN SIGNALS BY NORMALIZED SYMBOL ==="))
+        if not signals_by_symbol:
+            self.stdout.write("No open signals found!")
+        else:
+            for norm_sym in sorted(signals_by_symbol.keys()):
+                info = signals_by_symbol[norm_sym]
+                self.stdout.write(
+                    "  %s (raw: %s) -> %d signal(s)"
+                    % (norm_sym, info["raw_symbol"], info["count"])
+                )
+        self.stdout.write("=== END SYMBOLS ===\n")
+
     def _load_open_signals_by_symbol(self, symbols):
         from Signals.models import TradingSignal
 
@@ -282,11 +376,22 @@ class Command(BaseCommand):
         )
 
         result = {}
+        unmatched_symbols = {}
         for signal in signals:
             instrument = getattr(signal, "instrument", None)
             symbol = _normalize_symbol(getattr(instrument, "symbol", ""))
             if symbol in normalized_symbols:
                 result.setdefault(symbol, []).append(signal)
+            else:
+                # Track symbols with open signals that weren't in the quote response
+                unmatched_symbols.setdefault(symbol, []).append(signal)
+        
+        if unmatched_symbols and self.verbose:
+            self.stdout.write(
+                "WARNING: %d open signal(s) for symbols not in live quotes: %s"
+                % (sum(len(v) for v in unmatched_symbols.values()), ", ".join(unmatched_symbols.keys()))
+            )
+        
         return result
 
     def _parse_quote_change(self, symbol, quote):
@@ -332,6 +437,22 @@ class Command(BaseCommand):
         if not self.reset_daily:
             return ""
         return timezone.localdate().isoformat()
+
+    def _cleanup_fallback_state(self):
+        """Periodically clean up old fallback state entries to prevent memory leak."""
+        current_time = time.time()
+        if current_time - self._fallback_state_last_cleanup < 300:  # Cleanup every 5 minutes
+            return
+        
+        self._fallback_state_last_cleanup = current_time
+        old_count = len(self._fallback_state_by_symbol)
+        
+        # Remove entries for symbols that are no longer being tracked
+        # Keep only recent state to prevent unbounded growth
+        self._fallback_state_by_symbol = {}
+        
+        if self.verbose and old_count > 0:
+            self.stdout.write("Cleaned up %d old fallback state entries." % old_count)
 
     def _get_symbol_state(self, symbol):
         try:
@@ -524,6 +645,11 @@ class Command(BaseCommand):
 
         User = get_user_model()
         users = list(User.objects.filter(is_active=True).distinct())
+        
+        # Limit users if specified
+        if self.max_users_per_notification > 0:
+            users = users[:self.max_users_per_notification]
+        
         if not users:
             if self.verbose:
                 self.stdout.write("No active users found for %s movement notification." % symbol)
@@ -538,6 +664,22 @@ class Command(BaseCommand):
             % (symbol, signed_crossed_label, direction, current_label)
         )
         notification_type = "SUCCESS" if direction == "up" else "WARNING"
+
+        # Check for recent duplicates to prevent re-sends if cache failed
+        notification_cache_key = "signals:last_notification:%s:%s:%s" % (symbol, direction, crossed_label)
+        try:
+            if cache.get(notification_cache_key):
+                if self.verbose:
+                    self.stdout.write("Skip %s: notification already sent within last 60s." % title)
+                return False
+        except Exception:
+            logger.exception("Could not check notification cache for deduplication.")
+        
+        # Set the cache key to prevent duplicate notifications for 60 seconds
+        try:
+            cache.set(notification_cache_key, True, timeout=60)
+        except Exception:
+            logger.exception("Could not set notification deduplication cache for %s." % title)
 
         notifications = []
         for user in users:
