@@ -2,10 +2,13 @@ import time
 import re
 import json
 import requests
+import logging
 from datetime import datetime, timezone, timedelta
 from django.core.management.base import BaseCommand
 from django.db import transaction
 from News.models import EconomicCalendarEvent
+
+logger = logging.getLogger(__name__)
 
 
 class Command(BaseCommand):
@@ -19,13 +22,52 @@ class Command(BaseCommand):
     DATE_WINDOW_DAYS = 20
     MAX_RETRIES = 3
     RETRY_DELAY = 0.5  # seconds
+    VALID_IMPORTANCE_LEVELS = ('low', 'medium', 'high')
 
-    def handle(self, *args, **options):
-        self.stdout.write(self.style.SUCCESS('Starting economic calendar fetch...'))
+    def add_arguments(self, parser):
+        parser.add_argument(
+            '--cleanup',
+            action='store_true',
+            help='Delete events outside the current window after sync.'
+        )
+        parser.add_argument(
+            '--retry-delay',
+            type=float,
+            default=self.RETRY_DELAY,
+            help='Retry delay in seconds for deadlock handling.'
+        )
 
+    def get_date_window(self):
+        """Calculate and return the date window for event filtering."""
         now = datetime.now(tz=timezone.utc)
         window_start = now - timedelta(days=1)  # include today's past events
         window_end = now + timedelta(days=self.DATE_WINDOW_DAYS)
+        return now, window_start, window_end
+
+    def get_safe_value(self, value):
+        """Convert value to string, handling None/empty cases gracefully."""
+        if value is None or value == '':
+            return None
+        return str(value).strip()
+
+    def cleanup_old_events(self, window_start, window_end):
+        """Delete events outside the current window."""
+        deleted_count, _ = EconomicCalendarEvent.objects.exclude(
+            release_date__gte=window_start,
+            release_date__lte=window_end
+        ).delete()
+        if deleted_count > 0:
+            self.stdout.write(self.style.WARNING(f'Cleaned up {deleted_count} old events outside window.'))
+
+    def handle(self, *args, **options):
+        self.stdout.write(self.style.SUCCESS('Starting economic calendar fetch...'))
+        
+        # Get retry delay from options
+        retry_delay = options.get('retry_delay', self.RETRY_DELAY)
+        cleanup = options.get('cleanup', False)
+
+        # Calculate date window (single calculation)
+        now, window_start, window_end = self.get_date_window()
 
         date_from_str = window_start.strftime("%Y-%m-%dT%H:%M:%S")
         date_to_str = window_end.strftime("%Y-%m-%dT%H:%M:%S")
@@ -55,20 +97,32 @@ class Command(BaseCommand):
         self.stdout.write(f'Fetched {len(all_events)} total events from provider.')
 
         # --- 3. Filter to a 20-day window from today ---
-        now = datetime.now(tz=timezone.utc)
-        window_start = now - timedelta(days=1)  # include today's past events
-        window_end = now + timedelta(days=self.DATE_WINDOW_DAYS)
-
         filtered_events = []
+        skipped_count = 0
+        
         for ev in all_events:
             ts = ev.get('ReleaseDate')
             if not ts:
                 continue
+            
             release_dt = datetime.fromtimestamp(ts / 1000.0, tz=timezone.utc)
-            if window_start <= release_dt <= window_end:
-                filtered_events.append(ev)
+            if not (window_start <= release_dt <= window_end):
+                continue
+            
+            # Validate importance level
+            importance = ev.get('Importance', 'none')
+            if importance not in self.VALID_IMPORTANCE_LEVELS:
+                skipped_count += 1
+                logger.warning(
+                    f"Event '{ev.get('EventName')}' has invalid importance '{importance}', skipping."
+                )
+                continue
+            
+            filtered_events.append(ev)
 
         self.stdout.write(f'Filtered to {len(filtered_events)} events within {self.DATE_WINDOW_DAYS}-day window.')
+        if skipped_count > 0:
+            self.stdout.write(self.style.WARNING(f'Skipped {skipped_count} events with invalid importance level.'))
 
         # --- 4. Upsert each event into the database using bulk operations ---
         provider_ids = [ev.get('Id') for ev in filtered_events if ev.get('Id')]
@@ -90,17 +144,15 @@ class Command(BaseCommand):
             )
 
             importance = event_data.get('Importance', 'none')
-            if importance not in ('low', 'medium', 'high'):
-                continue
 
             defaults = {
                 'event_name':     event_data.get('EventName') or '',
                 'currency_code':  event_data.get('CurrencyCode') or '',
                 'country_name':   event_data.get('CountryName') or '',
                 'importance':     importance,
-                'actual_value':   str(event_data.get('ActualValue', '')),
-                'forecast_value': str(event_data.get('ForecastValue', '')),
-                'previous_value': str(event_data.get('PreviousValue', '')),
+                'actual_value':   self.get_safe_value(event_data.get('ActualValue')),
+                'forecast_value': self.get_safe_value(event_data.get('ForecastValue')),
+                'previous_value': self.get_safe_value(event_data.get('PreviousValue')),
                 'release_date':   release_date,
             }
 
@@ -132,11 +184,11 @@ class Command(BaseCommand):
                             'actual_value', 'forecast_value', 'previous_value', 'release_date'
                         ]
                         EconomicCalendarEvent.objects.bulk_update(events_to_update, update_fields, batch_size=500)
-                break # success
+                break  # success
             except Exception as e:
                 if '1205' in str(e) or 'deadlock' in str(e).lower():
                     if attempt < self.MAX_RETRIES - 1:
-                        time.sleep(self.RETRY_DELAY)
+                        time.sleep(retry_delay)
                         continue
                     else:
                         self.stderr.write(self.style.ERROR(f'Deadlock failed after {self.MAX_RETRIES} retries during bulk operations.'))
@@ -152,3 +204,7 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS(
             f'\nDone! Created: {len(events_to_create)} | Updated: {len(events_to_update)}'
         ))
+
+        # --- 5. Optional cleanup of old events ---
+        if cleanup:
+            self.cleanup_old_events(window_start, window_end)

@@ -173,10 +173,13 @@ class Command(BaseCommand):
         for reminder in pending_reminders:
             try:
                 if not dry_run:
-                    self._send_reminder_notification(reminder)
+                    # Mark as sent FIRST (before sending) to prevent duplicate sends if push fails
                     reminder.is_sent = True
                     reminder.sent_at = now
                     reminder.save(update_fields=['is_sent', 'sent_at', 'updated_at'])
+                    
+                    # Send notification after marking as sent
+                    self._send_reminder_notification(reminder)
 
                 count += 1
 
@@ -193,6 +196,8 @@ class Command(BaseCommand):
                     )
                 )
                 logger.exception(f"Error processing reminder {reminder.id}", exc_info=e)
+                # Note: reminder is already marked as sent, so we won't retry even if push failed
+                # This prevents duplicate sends in subsequent runs
 
         return count
 
@@ -485,11 +490,43 @@ class Command(BaseCommand):
                         )
                     continue
 
-                # Get all users with active reminders or subscriptions for this event
-                users_to_notify = self._get_users_for_event_notification(event)
-
                 if not dry_run:
-                    self._send_event_notification(event, users_to_notify)
+                    # Claim notification FIRST (in separate transaction) before sending
+                    # This prevents duplicate sends if FCM push fails
+                    claimed = EconomicCalendarEventNotification.create_notification_record(
+                        event=event,
+                        user=None,
+                        notification_type=EconomicCalendarEventNotification.NotificationType.BROADCAST,
+                        sent_to_all=True,
+                        is_sent=False  # Mark as in-progress, not yet sent
+                    )
+                    
+                    if not claimed:
+                        if verbose:
+                            self.stdout.write(
+                                f"  ⊘ Event notification already claimed by another process for {event.event_name} ({event.id})"
+                            )
+                        continue
+                    
+                    try:
+                        # Get all users with active reminders or subscriptions for this event
+                        users_to_notify = self._get_users_for_event_notification(event)
+                        
+                        # Send the actual notifications
+                        self._send_event_notification(event, users_to_notify, mark_sent=True)
+                        
+                    except Exception as send_err:
+                        # Mark as failed but keep the claim to prevent retries
+                        EconomicCalendarEventNotification.objects.filter(
+                            event=event,
+                            user=None,
+                            notification_type=EconomicCalendarEventNotification.NotificationType.BROADCAST,
+                            sent_to_all_users=True,
+                        ).update(is_sent=True, error_message=str(send_err)[:1000])
+                        logger.exception(f"Error sending event notification for event {event.id}", exc_info=send_err)
+                        raise
+                else:
+                    users_to_notify = self._get_users_for_event_notification(event)
 
                 count += 1
 
@@ -532,10 +569,14 @@ class Command(BaseCommand):
 
         return list(all_users)
 
-    def _send_event_notification(self, event, users):
+    def _send_event_notification(self, event, users, mark_sent=False):
         """
         Send FCM push + in-app notifications for an economic event to all users.
-        Also creates tracking record to prevent duplicate notifications.
+        
+        Args:
+            event: The economic calendar event
+            users: List of users to notify
+            mark_sent: If True, mark the tracking record as sent after successful delivery
         """
         if not users:
             return
@@ -598,15 +639,15 @@ class Command(BaseCommand):
                 body=body,
                 data=data_payload,
             )
-
-            # Create tracking record to prevent duplicate broadcast notifications
-            EconomicCalendarEventNotification.create_notification_record(
+        
+        # Mark as sent AFTER successful delivery (in separate transaction)
+        if mark_sent:
+            EconomicCalendarEventNotification.objects.filter(
                 event=event,
                 user=None,
                 notification_type=EconomicCalendarEventNotification.NotificationType.BROADCAST,
-                sent_to_all=True,
-                is_sent=True
-            )
+                sent_to_all_users=True,
+            ).update(is_sent=True)
 
         logger.info(
             f"Sent event notification to {len(users)} users for event {event.event_name} ({event.id})"
