@@ -70,9 +70,8 @@ def get_push_tokens_for_users(users) -> list[str]:
     Deduplication strategy
     ----------------------
     - Rows with a non-null ``device_id``: only the **most recent** token per
-      (user, device_id) pair is kept. This prevents duplicate notifications
-      when the same physical device re-registers with a new FCM token while
-      old rows still exist.
+      physical ``device_id`` is kept. This prevents duplicate notifications
+      when the same device is registered under multiple users.
     - Rows with ``device_id=NULL``: treated as anonymous devices; deduplicated
       by token string only (legacy behaviour).
     - Identical token strings that appear more than once are always collapsed
@@ -88,24 +87,24 @@ def get_push_tokens_for_users(users) -> list[str]:
         DeviceToken.objects.filter(user__in=users)
         .exclude(fcm_token__isnull=True)
         .exclude(fcm_token__exact="")
-        .order_by("user_id", "device_id", "-created_at", "-id")
-        .values_list("user_id", "device_id", "fcm_token")
+        .order_by("device_id", "-created_at", "-id")
+        .values_list("device_id", "fcm_token")
     )
 
     resolved_tokens: list[str] = []
     seen_tokens: set[str] = set()
-    seen_devices: set[str] = set()  # global across all users — one send per physical device
+    seen_device_ids: set[str] = set()  # global across all users — one send per physical device
 
-    for user_id, device_id, token in token_rows:
+    for device_id, token in token_rows:
         normalized = str(token or "").strip()
         if not normalized or normalized in seen_tokens:
             continue
 
-        if device_id:
-            device_key = str(device_id).strip()
-            if device_key in seen_devices:
+        device_key = str(device_id or "").strip()
+        if device_key:
+            if device_key in seen_device_ids:
                 continue
-            seen_devices.add(device_key)
+            seen_device_ids.add(device_key)
 
         seen_tokens.add(normalized)
         resolved_tokens.append(normalized)

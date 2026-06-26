@@ -134,3 +134,31 @@ class DeviceTokenSelectionTests(TestCase):
         self.assertIn(new_token.fcm_token, tokens)
         self.assertIn(other_token.fcm_token, tokens)
         self.assertEqual(len(tokens), 3)
+
+    def test_get_push_tokens_for_users_deduplicates_shared_device_across_users(self):
+        user1 = User.objects.create_user(
+            email="device1@example.com",
+            username="device1@example.com",
+            password="Testpass123!",
+        )
+        user2 = User.objects.create_user(
+            email="device2@example.com",
+            username="device2@example.com",
+            password="Testpass123!",
+        )
+
+        DeviceToken.objects.create(
+            user=user1,
+            fcm_token="first-token",
+            device_id="shared-device-1",
+        )
+        DeviceToken.objects.create(
+            user=user2,
+            fcm_token="second-token",
+            device_id="shared-device-1",
+        )
+
+        tokens = get_push_tokens_for_users([user1, user2])
+
+        self.assertEqual(len(tokens), 1)
+        self.assertIn(tokens[0], ["first-token", "second-token"])
