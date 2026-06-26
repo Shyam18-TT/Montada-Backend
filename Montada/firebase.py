@@ -100,7 +100,7 @@ def get_push_tokens_for_users(users) -> list[str]:
         if not normalized or normalized in seen_tokens:
             continue
 
-        device_key = str(device_id or "").strip()
+        device_key = str(device_id or "").strip().lower()
         if device_key:
             if device_key in seen_device_ids:
                 continue
@@ -109,6 +109,12 @@ def get_push_tokens_for_users(users) -> list[str]:
         seen_tokens.add(normalized)
         resolved_tokens.append(normalized)
 
+    logger.debug(
+        "FCM token resolution: %d unique token(s) from %d device_id(s) for %d user(s)",
+        len(resolved_tokens),
+        len(seen_device_ids),
+        len(users) if hasattr(users, '__len__') else 0,
+    )
     return resolved_tokens
 
 
