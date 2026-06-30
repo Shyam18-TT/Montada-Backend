@@ -151,6 +151,7 @@ def send_push_to_tokens(
 
     # Ensure data values are all strings (FCM requirement)
     clean_data = {str(k): str(v) for k, v in (data or {}).items()}
+    clean_data["source"] = "montada-app"
 
     notification = messaging.Notification(
         title=title,
