@@ -1,10 +1,11 @@
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
+from firebase import send_push_to_tokens
 from Followers.models import Follow
 from Signals.management.commands.run_price_alerts import (
     ENTRY_WATCH_DOWN,
@@ -55,6 +56,25 @@ class MarketStreamTests(SimpleTestCase):
         self.assertEqual(payload["bid"], 1.35)
         self.assertEqual(payload["ask"], 1.35012)
         self.assertIn("received_at", payload)
+
+
+class FirebasePushPayloadTests(SimpleTestCase):
+    @patch("firebase.messaging.send_each_for_multicast")
+    @patch("firebase.messaging.MulticastMessage")
+    def test_send_push_to_tokens_includes_source_payload(self, mock_multicast_message, mock_send_each):
+        mock_response = Mock(success_count=1, failure_count=0, responses=[Mock(success=True, exception=None)])
+        mock_send_each.return_value = mock_response
+
+        send_push_to_tokens(
+            tokens=["test-token"],
+            title="Market change",
+            body="Price crossed threshold",
+            data={"type": "signal_change_threshold"},
+        )
+
+        message_kwargs = mock_multicast_message.call_args.kwargs
+        self.assertEqual(message_kwargs["data"]["source"], "montada-app")
+        self.assertEqual(message_kwargs["data"]["type"], "signal_change_threshold")
 
 
 class SignalFollowerNotificationTests(TestCase):

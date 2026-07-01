@@ -714,6 +714,7 @@ class Command(BaseCommand):
             "signal_ids": ",".join(str(signal_id) for signal_id in signal_ids),
             "bid": str(quote.get("bid") or ""),
             "ask": str(quote.get("ask") or ""),
+            "source": "montada-app",
         }
         try:
             from firebase import send_push_to_users
