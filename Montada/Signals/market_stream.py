@@ -2,6 +2,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from django.conf import settings
 from django.db import connections
@@ -24,13 +26,93 @@ def should_deliver_market_tick(selected_symbols, symbol):
         return True
     return str(symbol or "").strip().lower() in selected_symbols
 
-def build_market_tick_payload(symbol, bid=None, ask=None):
-    return {
+
+DEFAULT_TRUSTCAPITAL_PRICE_URL = "https://trustcapital.com/api/get-MT5-price"
+
+
+def _normalize_symbol_for_api(symbol):
+    return str(symbol or "").strip().upper()
+
+
+def fetch_trustcapital_open_prices(symbols=None, url=DEFAULT_TRUSTCAPITAL_PRICE_URL, timeout=15):
+    normalized_symbols = {
+        _normalize_symbol_for_api(symbol)
+        for symbol in (symbols or [])
+        if _normalize_symbol_for_api(symbol)
+    }
+
+    try:
+        request = Request(url, headers={"Accept": "application/json"})
+        with urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, json.JSONDecodeError, OSError):
+        return {}
+
+    if not isinstance(payload, dict):
+        return {}
+
+    live_quote = (payload.get("data") or {}).get("live_quote") or {}
+    if not isinstance(live_quote, dict):
+        return {}
+
+    open_prices = {}
+    for raw_symbol, quote in live_quote.items():
+        symbol = _normalize_symbol_for_api(raw_symbol)
+        if not symbol:
+            continue
+        if normalized_symbols and symbol not in normalized_symbols:
+            continue
+        if not isinstance(quote, dict):
+            continue
+
+        ask_today = quote.get("ask_today")
+        bid_today = quote.get("bid_today")
+        if ask_today is None or bid_today is None:
+            continue
+
+        open_prices[symbol] = {
+            "ask_today": float(ask_today),
+            "bid_today": float(bid_today),
+        }
+
+    return open_prices
+
+
+def calculate_daily_change(ask, ask_open):
+    try:
+        ask_value = float(ask) if ask is not None else None
+        ask_open_value = float(ask_open) if ask_open is not None else None
+    except (TypeError, ValueError):
+        return None, None
+
+    if ask_value is None or ask_open_value is None:
+        return None, None
+
+    change = round(ask_value - ask_open_value, 4)
+    change_percentage = round((abs(change) / ask_open_value) * 100, 2) if ask_open_value else 0.0
+    return change, change_percentage
+
+
+def build_market_tick_payload(symbol, bid=None, ask=None, ask_open=None, bid_open=None):
+    payload = {
         "symbol": str(symbol or "").strip(),
         "bid": float(bid) if bid is not None else None,
         "ask": float(ask) if ask is not None else None,
         "received_at": datetime.now(timezone.utc).isoformat(),
     }
+
+    if ask_open is not None:
+        payload["ask_open"] = float(ask_open)
+    if bid_open is not None:
+        payload["bid_open"] = float(bid_open)
+
+    daily_change, daily_change_percentage = calculate_daily_change(ask, ask_open)
+    if daily_change is not None:
+        payload["daily_change"] = daily_change
+    if daily_change_percentage is not None:
+        payload["daily_change_percentage"] = daily_change_percentage
+
+    return payload
 
 
 def _market_snapshot_file_path():
@@ -47,6 +129,10 @@ def save_market_snapshot(ticks):
                 "symbol": str((tick or {}).get("symbol") or "").strip(),
                 "bid": (tick or {}).get("bid"),
                 "ask": (tick or {}).get("ask"),
+                "ask_open": (tick or {}).get("ask_open"),
+                "bid_open": (tick or {}).get("bid_open"),
+                "daily_change": (tick or {}).get("daily_change"),
+                "daily_change_percentage": (tick or {}).get("daily_change_percentage"),
                 "received_at": (tick or {}).get("received_at"),
             }
             for tick in (ticks or [])
@@ -111,7 +197,14 @@ def load_market_snapshot_from_db(symbols):
         symbol = str(row[0] or "").strip()
         if not symbol:
             continue
-        ticks.append(build_market_tick_payload(symbol=symbol, bid=row[1], ask=row[2]))
+
+        ticks.append(
+            build_market_tick_payload(
+                symbol=symbol,
+                bid=row[1],
+                ask=row[2],
+            )
+        )
 
     ticks.sort(key=lambda item: item["symbol"])
     return ticks

@@ -1,5 +1,7 @@
 from unittest.mock import Mock, patch
 from decimal import Decimal
+import json
+import time
 
 from django.contrib.auth import get_user_model
 from django.test import SimpleTestCase, TestCase
@@ -7,6 +9,7 @@ from django.utils import timezone
 
 from firebase import send_push_to_tokens
 from Followers.models import Follow
+from Signals.management.commands.poll_signal_change_notifications import Command
 from Signals.management.commands.run_price_alerts import (
     ENTRY_WATCH_DOWN,
     ENTRY_WATCH_UP,
@@ -17,6 +20,7 @@ from Signals.management.commands.run_price_alerts import (
 from Signals.management.commands.run_market_data_stream import _is_allowed_symbol
 from Signals.market_stream import (
     build_market_tick_payload,
+    fetch_trustcapital_open_prices,
     normalize_market_symbols,
     should_deliver_market_tick,
 )
@@ -29,6 +33,93 @@ from Signals.views import (
 )
 
 User = get_user_model()
+
+
+class SignalChangeNotificationThresholdTests(TestCase):
+    def setUp(self):
+        self.command = Command()
+        self.command.threshold = Decimal("0.5")
+
+    def test_share_asset_class_uses_one_percent_threshold(self):
+        asset_class = AssetClass.objects.create(name="Shares")
+        instrument = Instrument.objects.create(asset_class=asset_class, symbol="AAPL")
+        signal = TradingSignal.objects.create(
+            analyst=User.objects.create_user(
+                email="analyst@example.com",
+                username="analyst@example.com",
+                password="Testpass123!",
+                user_type="analyst",
+            ),
+            asset_class=asset_class,
+            instrument=instrument,
+            timeframe=Timeframe.objects.create(code="H1", name="1 Hour"),
+            direction=TradingSignal.Direction.BUY,
+            entry_price="1.00000",
+            stop_loss="0.95000",
+            take_profit="1.10000",
+            confidence_level=80,
+            status=TradingSignal.Status.OPEN,
+        )
+
+        self.assertEqual(self.command._get_notification_threshold([signal]), Decimal("1.0"))
+
+    def test_non_share_asset_class_keeps_half_percent_threshold(self):
+        asset_class = AssetClass.objects.create(name="Forex")
+        instrument = Instrument.objects.create(asset_class=asset_class, symbol="EURUSD")
+        signal = TradingSignal.objects.create(
+            analyst=User.objects.create_user(
+                email="analyst2@example.com",
+                username="analyst2@example.com",
+                password="Testpass123!",
+                user_type="analyst",
+            ),
+            asset_class=asset_class,
+            instrument=instrument,
+            timeframe=Timeframe.objects.create(code="H4", name="4 Hours"),
+            direction=TradingSignal.Direction.SELL,
+            entry_price="1.10000",
+            stop_loss="1.05000",
+            take_profit="1.00000",
+            confidence_level=75,
+            status=TradingSignal.Status.OPEN,
+        )
+
+        self.assertEqual(self.command._get_notification_threshold([signal]), Decimal("0.5"))
+
+    def test_mena_share_asset_class_keeps_half_percent_threshold(self):
+        asset_class = AssetClass.objects.create(name="Mena Shares")
+        instrument = Instrument.objects.create(asset_class=asset_class, symbol="DEWA")
+        signal = TradingSignal.objects.create(
+            analyst=User.objects.create_user(
+                email="analyst3@example.com",
+                username="analyst3@example.com",
+                password="Testpass123!",
+                user_type="analyst",
+            ),
+            asset_class=asset_class,
+            instrument=instrument,
+            timeframe=Timeframe.objects.create(code="D1", name="1 Day"),
+            direction=TradingSignal.Direction.BUY,
+            entry_price="10.00000",
+            stop_loss="9.50000",
+            take_profit="11.00000",
+            confidence_level=70,
+            status=TradingSignal.Status.OPEN,
+        )
+
+        self.assertEqual(self.command._get_notification_threshold([signal]), Decimal("0.5"))
+
+    def test_level_notification_does_not_repeat_within_cooldown_window(self):
+        self.command.notification_cooldown_seconds = 300
+        current_time = int(time.time())
+        previous_state = {
+            "notification_history": {
+                "up": {"1": current_time - 60},
+            }
+        }
+
+        self.assertTrue(self.command._is_level_notification_in_cooldown("up", "1", previous_state, current_time))
+        self.assertFalse(self.command._is_level_notification_in_cooldown("up", "1", previous_state, current_time + 600))
 
 
 class MarketStreamTests(SimpleTestCase):
@@ -56,6 +147,55 @@ class MarketStreamTests(SimpleTestCase):
         self.assertEqual(payload["bid"], 1.35)
         self.assertEqual(payload["ask"], 1.35012)
         self.assertIn("received_at", payload)
+
+    def test_build_market_tick_payload_includes_daily_change(self):
+        payload = build_market_tick_payload(
+            "EURUSD", bid=1.10, ask=1.1005, ask_open=1.0950, bid_open=1.0945
+        )
+        self.assertEqual(payload["symbol"], "EURUSD")
+        self.assertEqual(payload["ask_open"], 1.0950)
+        self.assertEqual(payload["bid_open"], 1.0945)
+        self.assertEqual(payload["daily_change"], round(1.1005 - 1.0950, 4))
+        self.assertEqual(payload["daily_change_percentage"], round(abs(1.1005 - 1.0950) / 1.0950 * 100, 2))
+        self.assertIn("received_at", payload)
+
+    @patch("Signals.market_stream.urlopen")
+    def test_fetch_trustcapital_open_prices(self, mock_urlopen):
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return json.dumps(
+                    {
+                        "data": {
+                            "live_quote": {
+                                "EURUSD": {
+                                    "ask_today": 1.14339,
+                                    "bid_today": 1.14329,
+                                },
+                                "GBPUSD": {
+                                    "ask_today": 1.3347,
+                                    "bid_today": 1.33454,
+                                },
+                            }
+                        }
+                    }
+                ).encode("utf-8")
+
+        mock_urlopen.return_value = FakeResponse()
+        open_prices = fetch_trustcapital_open_prices(["EURUSD", "GBPUSD"])
+
+        self.assertEqual(
+            open_prices,
+            {
+                "EURUSD": {"ask_today": 1.14339, "bid_today": 1.14329},
+                "GBPUSD": {"ask_today": 1.3347, "bid_today": 1.33454},
+            },
+        )
 
 
 class FirebasePushPayloadTests(SimpleTestCase):

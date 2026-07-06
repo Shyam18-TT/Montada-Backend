@@ -34,9 +34,11 @@ _EXCLUDED_STOCK_SYMBOLS = frozenset({
 
 DEFAULT_PRICE_URL = "https://trustcapital.com/api/get-MT5-price"
 DEFAULT_THRESHOLD_PERCENT = Decimal("0.5")
+DEFAULT_US_EU_SHARE_THRESHOLD_PERCENT = Decimal("1.0")
 DEFAULT_STATE_TTL_SECONDS = 60 * 60 * 24 * 7
 DEFAULT_LOCK_TTL_SECONDS = 60
 DEFAULT_MAX_NOTIFICATION_BATCHES_PER_POLL = 200
+DEFAULT_NOTIFICATION_COOLDOWN_SECONDS = 300
 STATE_CACHE_KEY_PREFIX = "signals:change-notifications:state"
 LOCK_CACHE_KEY_PREFIX = "signals:change-notifications:lock"
 
@@ -154,6 +156,12 @@ class Command(BaseCommand):
             help="Maximum users to notify per event (0=all). Default: 0 (notify all).",
         )
         parser.add_argument(
+            "--notification-cooldown-seconds",
+            type=int,
+            default=DEFAULT_NOTIFICATION_COOLDOWN_SECONDS,
+            help="Seconds to wait before sending the same direction/level notification again. Default: 300.",
+        )
+        parser.add_argument(
             "--no-daily-reset",
             action="store_true",
             help="Do not reset milestone state when the local trading date changes.",
@@ -182,6 +190,7 @@ class Command(BaseCommand):
         self.verbose = bool(options["verbose"])
         self.debug_symbols = bool(options.get("debug_symbols"))
         self.threshold = _parse_decimal(options.get("threshold")) or DEFAULT_THRESHOLD_PERCENT
+        self.share_threshold = DEFAULT_US_EU_SHARE_THRESHOLD_PERCENT
         if self.threshold <= 0:
             self.stderr.write(self.style.ERROR("--threshold must be greater than 0."))
             return
@@ -202,6 +211,10 @@ class Command(BaseCommand):
         )
         self.max_users_per_notification = max(0, int(options.get("max_users_per_notification") or 0))
         self.reset_daily = not bool(options.get("no_daily_reset"))
+        self.notification_cooldown_seconds = max(
+            0,
+            int(options.get("notification_cooldown_seconds") or DEFAULT_NOTIFICATION_COOLDOWN_SECONDS),
+        )
 
         self.symbol_filter = {
             _normalize_symbol(symbol)
@@ -223,11 +236,12 @@ class Command(BaseCommand):
 
         self.stdout.write(
             self.style.SUCCESS(
-                "Polling %s every %ss; threshold=%s%%; reset=%s%%."
+                "Polling %s every %ss; default-threshold=%s%%; share-threshold=%s%%; reset=%s%%."
                 % (
                     self.url,
                     self.interval,
                     _format_percent(self.threshold),
+                    _format_percent(self.share_threshold),
                     _format_percent(self.reset_threshold),
                 )
             )
@@ -316,14 +330,15 @@ class Command(BaseCommand):
                 continue
             direction, signed_change_percentage = parsed_quote
 
-            signal_ids = [signal.id for signal in signals_by_symbol.get(symbol, [])]
+            signals = signals_by_symbol.get(symbol, [])
+            signal_ids = [signal.id for signal in signals]
 
             notification_count += self._maybe_notify_symbol(
                 symbol,
                 direction,
                 signed_change_percentage,
                 quote,
-                signal_ids,
+                signals,
             )
 
         self.stdout.write(
@@ -337,8 +352,8 @@ class Command(BaseCommand):
         
         signals = (
             TradingSignal.active.filter(status=TradingSignal.Status.OPEN)
-            .select_related("analyst", "instrument")
-            .only("id", "analyst_id", "instrument_id", "instrument__symbol", "status")
+            .select_related("analyst", "instrument__asset_class")
+            .only("id", "analyst_id", "instrument_id", "instrument__symbol", "instrument__asset_class", "status")
         )
         
         signals_by_symbol = {}
@@ -371,8 +386,8 @@ class Command(BaseCommand):
         normalized_symbols = set(symbols)
         signals = (
             TradingSignal.active.filter(status=TradingSignal.Status.OPEN)
-            .select_related("analyst", "instrument")
-            .only("id", "analyst_id", "instrument_id", "instrument__symbol", "status")
+            .select_related("analyst", "instrument__asset_class")
+            .only("id", "analyst_id", "instrument_id", "instrument__symbol", "instrument__asset_class", "status")
         )
 
         result = {}
@@ -466,13 +481,14 @@ class Command(BaseCommand):
             return None
         return state
 
-    def _set_symbol_state(self, symbol, direction, step_count, notified_levels=None):
+    def _set_symbol_state(self, symbol, direction, step_count, notified_levels=None, threshold=None, notification_history=None):
         state = {
             "direction": direction,
             "step_count": int(step_count),
             "trading_day": self._current_state_day(),
-            "threshold": str(self.threshold),
+            "threshold": str(threshold if threshold is not None else self.threshold),
             "notified_levels": notified_levels or {},
+            "notification_history": notification_history or {},
         }
         try:
             cache.set(self._state_cache_key(symbol), state, timeout=self.state_ttl)
@@ -512,6 +528,25 @@ class Command(BaseCommand):
         start = max(1, int(previous_step_count) + 1)
         return range(start, int(current_step_count) + 1)
 
+    def _is_level_notification_in_cooldown(self, direction, level_key, previous, current_time=None):
+        if self.notification_cooldown_seconds <= 0:
+            return False
+
+        history = previous.get("notification_history") if previous else None
+        if not isinstance(history, dict):
+            return False
+
+        direction_history = history.get(direction)
+        if not isinstance(direction_history, dict):
+            return False
+
+        timestamp = direction_history.get(level_key)
+        if not isinstance(timestamp, (int, float)):
+            return False
+
+        current_time = current_time if current_time is not None else int(time.time())
+        return (current_time - timestamp) < self.notification_cooldown_seconds
+
     def _get_notified_levels(self, previous):
         notified_levels = previous.get("notified_levels") if previous else None
         if isinstance(notified_levels, dict):
@@ -540,7 +575,17 @@ class Command(BaseCommand):
             "down": sorted(notified_levels.get("down", set())),
         }
 
-    def _maybe_notify_symbol(self, symbol, direction, change_percentage, quote, signal_ids):
+    def _serialize_notification_history(self, previous):
+        previous_history = previous.get("notification_history") if previous else None
+        if not isinstance(previous_history, dict):
+            previous_history = {}
+
+        return {
+            "up": dict(previous_history.get("up", {}) or {}),
+            "down": dict(previous_history.get("down", {}) or {}),
+        }
+
+    def _maybe_notify_symbol(self, symbol, direction, change_percentage, quote, signals):
         lock_token = self._acquire_symbol_lock(symbol)
         if not lock_token:
             if self.verbose:
@@ -548,13 +593,24 @@ class Command(BaseCommand):
             return 0
 
         try:
-            return self._maybe_notify_symbol_locked(symbol, direction, change_percentage, quote, signal_ids)
+            return self._maybe_notify_symbol_locked(symbol, direction, change_percentage, quote, signals)
         finally:
             self._release_symbol_lock(symbol, lock_token)
 
-    def _maybe_notify_symbol_locked(self, symbol, direction, change_percentage, quote, signal_ids):
+    def _get_notification_threshold(self, signals=None):
+        if signals:
+            for signal in signals:
+                instrument = getattr(signal, "instrument", None)
+                asset_class = getattr(instrument, "asset_class", None)
+                asset_class_name = str(getattr(asset_class, "name", "") or "").strip().lower()
+                if asset_class_name in {"share", "shares", "stock", "stocks", "equity", "equities"}:
+                    return self.share_threshold
+        return self.threshold
+
+    def _maybe_notify_symbol_locked(self, symbol, direction, change_percentage, quote, signals):
         previous = self._get_symbol_state(symbol)
         abs_percentage = abs(change_percentage)
+        effective_threshold = self._get_notification_threshold(signals)
 
         if abs_percentage <= self.reset_threshold:
             if previous:
@@ -566,14 +622,14 @@ class Command(BaseCommand):
                     )
             return 0
 
-        step_count = int((abs_percentage / self.threshold).to_integral_value(rounding=ROUND_FLOOR))
+        step_count = int((abs_percentage / effective_threshold).to_integral_value(rounding=ROUND_FLOOR))
         if step_count <= 0:
             return 0
 
         previous_direction = previous.get("direction") if previous else None
         previous_step_count = int(previous.get("step_count", 0)) if previous else 0
         previous_threshold = str(previous.get("threshold") or "") if previous else ""
-        same_threshold = previous_threshold == str(self.threshold)
+        same_threshold = previous_threshold == str(effective_threshold)
         if previous_direction != direction or not same_threshold:
             previous_step_count = 0
         notified_levels = self._get_notified_levels(previous)
@@ -585,13 +641,14 @@ class Command(BaseCommand):
                     % (
                         symbol,
                         direction,
-                        _format_percent(self.threshold * Decimal(previous_step_count)),
+                        _format_percent(effective_threshold * Decimal(previous_step_count)),
                     )
                 )
             return 0
 
         sent_count = 0
         highest_notified_step_count = previous_step_count
+        notification_history = self._serialize_notification_history(previous)
         for crossed_step_count in self._crossed_step_counts(previous_step_count, step_count):
             if self._notification_batches_this_poll >= self.max_notification_batches:
                 logger.warning(
@@ -600,9 +657,22 @@ class Command(BaseCommand):
                     symbol,
                 )
                 break
-            crossed_percentage = self.threshold * Decimal(crossed_step_count)
+            crossed_percentage = effective_threshold * Decimal(crossed_step_count)
             crossed_level_key = _level_key(crossed_percentage)
             if crossed_level_key in notified_levels.get(direction, set()):
+                highest_notified_step_count = crossed_step_count
+                continue
+            if self._is_level_notification_in_cooldown(direction, crossed_level_key, previous, int(time.time())):
+                if self.verbose:
+                    self.stdout.write(
+                        "Skip %s: %s %s%% already notified within %ss."
+                        % (
+                            symbol,
+                            direction,
+                            _format_percent(crossed_percentage),
+                            self.notification_cooldown_seconds,
+                        )
+                    )
                 highest_notified_step_count = crossed_step_count
                 continue
             signed_crossed_percentage = crossed_percentage if direction == "up" else -crossed_percentage
@@ -613,12 +683,13 @@ class Command(BaseCommand):
                 crossed_percentage=crossed_percentage,
                 current_percentage=change_percentage,
                 quote=quote,
-                signal_ids=signal_ids,
+                signal_ids=[signal.id for signal in signals],
             ):
                 sent_count += 1
                 self._notification_batches_this_poll += 1
                 highest_notified_step_count = crossed_step_count
                 notified_levels.setdefault(direction, set()).add(crossed_level_key)
+                notification_history.setdefault(direction, {})[crossed_level_key] = int(time.time())
 
         state_step_count = highest_notified_step_count if sent_count else step_count
         self._set_symbol_state(
@@ -626,6 +697,8 @@ class Command(BaseCommand):
             direction,
             state_step_count,
             self._serialize_notified_levels(notified_levels),
+            threshold=effective_threshold,
+            notification_history=notification_history,
         )
         return sent_count
 

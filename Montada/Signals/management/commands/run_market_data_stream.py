@@ -9,6 +9,7 @@ from django.core.management.base import BaseCommand
 from Signals.market_stream import (
     MARKET_DATA_GROUP_NAME,
     build_market_tick_payload,
+    fetch_trustcapital_open_prices,
     load_market_snapshot_from_db,
     save_market_snapshot,
 )
@@ -190,12 +191,23 @@ class Command(BaseCommand):
 
         if selected_symbols:
             try:
+                trustcapital_open_prices = fetch_trustcapital_open_prices(selected_symbols)
                 initial_snapshot = load_market_snapshot_from_db(selected_symbols)
                 self._latest_ticks = {
                     tick["symbol"]: tick
                     for tick in initial_snapshot
                     if tick.get("symbol")
                 }
+
+                for symbol, open_price in trustcapital_open_prices.items():
+                    latest = self._latest_ticks.get(symbol) or {}
+                    if latest.get("ask_open") is None and open_price.get("ask_today") is not None:
+                        latest["ask_open"] = open_price["ask_today"]
+                    if latest.get("bid_open") is None and open_price.get("bid_today") is not None:
+                        latest["bid_open"] = open_price["bid_today"]
+                    if symbol not in self._latest_ticks:
+                        self._latest_ticks[symbol] = latest
+
                 save_market_snapshot(self._latest_ticks.values())
                 self.stdout.write(
                     self.style.SUCCESS(
@@ -237,10 +249,21 @@ class Command(BaseCommand):
         class TickSink:
             def OnTick(self, symbol, tick):  # noqa: N802 - MT5Manager callback naming
                 try:
+                    latest = self_outer._latest_ticks.get(symbol, {})
+                    ask = getattr(tick, "ask", None)
+                    bid = getattr(tick, "bid", None)
+                    ask_open = latest.get("ask_open") if latest else None
+                    bid_open = latest.get("bid_open") if latest else None
+                    if ask_open is None and ask is not None:
+                        ask_open = ask
+                    if bid_open is None and bid is not None:
+                        bid_open = bid
                     payload = build_market_tick_payload(
                         symbol=symbol,
-                        bid=getattr(tick, "bid", None),
-                        ask=getattr(tick, "ask", None),
+                        bid=bid,
+                        ask=ask,
+                        ask_open=ask_open,
+                        bid_open=bid_open,
                     )
                     with self_outer._pending_ticks_lock:
                         self_outer._pending_ticks[payload["symbol"]] = payload
