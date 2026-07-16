@@ -66,6 +66,7 @@ INSTALLED_APPS = [
     'Subscriptions',
     'Signals',
     'Followers',
+    'Moderation.apps.ModerationConfig',
     'Dashboard.apps.DashboardConfig',
     'MontadaAdmin',
     'News',
@@ -156,19 +157,19 @@ CACHES = {
 DATABASES = {
         'default': {
 
-        # 'ENGINE': 'mssql',
-        # 'NAME': 'MontadaApp',
-        # 'USER': 'sa',
-        # 'PASSWORD': 'Montada@1234',
-        # 'HOST': '13.236.73.211',
-        # 'PORT': '1433',
-
         'ENGINE': 'mssql',
         'NAME': 'MontadaApp',
         'USER': 'sa',
         'PASSWORD': 'Montada@1234',
-        'HOST': '127.0.0.1',
+        'HOST': '13.236.73.211',
         'PORT': '1433',
+
+        # 'ENGINE': 'mssql',
+        # 'NAME': 'MontadaApp',
+        # 'USER': 'sa',
+        # 'PASSWORD': 'Montada@1234',
+        # 'HOST': '127.0.0.1',
+        # 'PORT': '1433',
 
         # 'OPTIONS': {
         #     'driver': 'ODBC Driver 18 for SQL Server',

@@ -43,6 +43,28 @@ def _check_participant(conversation_id, user):
     ).exists()
 
 
+@database_sync_to_async
+def _check_conversation_not_blocked(conversation_id, user):
+    if not user:
+        return False
+    try:
+        from Moderation.models import users_are_blocked
+        from .models import Conversation
+
+        conversation = Conversation.objects.prefetch_related("participants").get(pk=conversation_id)
+        for participant in conversation.participants.exclude(pk=user.pk):
+            if users_are_blocked(user, participant):
+                return False
+        return True
+    except Exception:
+        logger.exception(
+            "Failed to evaluate chat websocket block status for conversation_id=%s user_id=%s.",
+            conversation_id,
+            getattr(user, "id", None),
+        )
+        return False
+
+
 def get_chat_notification_group_name(user_id):
     return f"chat_notifications_{user_id}"
 
@@ -96,6 +118,22 @@ class ChatConsumer(AsyncWebsocketConsumer):
             await self.close(code=4403)
             return
         if not is_participant:
+            await self.close(code=4403)
+            return
+        try:
+            is_not_blocked = await asyncio.wait_for(
+                _check_conversation_not_blocked(self.conversation_id, user),
+                timeout=AUTH_LOOKUP_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "chat websocket block lookup timed out for conversation_id=%s user_id=%s.",
+                self.conversation_id,
+                getattr(user, "id", None),
+            )
+            await self.close(code=4403)
+            return
+        if not is_not_blocked:
             await self.close(code=4403)
             return
 

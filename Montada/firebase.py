@@ -118,6 +118,40 @@ def get_push_tokens_for_users(users) -> list[str]:
     return resolved_tokens
 
 
+def _source_user_id_from_payload(data):
+    for key in ("source_user_id", "from_user_id", "sender_id", "analyst_id", "trader_id"):
+        value = (data or {}).get(key)
+        if value:
+            return str(value)
+    return None
+
+
+def _filter_users_who_blocked_source(users, data):
+    user_list = list(users)
+    source_user_id = _source_user_id_from_payload(data)
+    if not source_user_id:
+        return user_list
+    try:
+        from Moderation.models import UserBlock
+
+        blocked_recipient_ids = set(
+            UserBlock.objects.filter(blocked_id=source_user_id)
+            .values_list("blocker_id", flat=True)
+        )
+    except Exception:
+        logger.exception("FCM block filtering failed; sending to original recipients.")
+        return user_list
+
+    filtered_users = [
+        user for user in user_list
+        if getattr(user, "id", None) not in blocked_recipient_ids
+    ]
+    skipped_count = len(user_list) - len(filtered_users)
+    if skipped_count:
+        logger.info("FCM: skipped %d recipient(s) who blocked source user %s.", skipped_count, source_user_id)
+    return filtered_users
+
+
 def send_push_to_tokens(
     tokens: list[str],
     title: str,
@@ -244,6 +278,7 @@ def send_push_to_users(
     -------
     Same dict as send_push_to_tokens.
     """
+    users = _filter_users_who_blocked_source(users, data)
     tokens = get_push_tokens_for_users(users)
     if not tokens:
         logger.info("FCM: no device tokens found for the given users – skipping.")

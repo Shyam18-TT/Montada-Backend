@@ -78,39 +78,104 @@ def fetch_trustcapital_open_prices(symbols=None, url=DEFAULT_TRUSTCAPITAL_PRICE_
     return open_prices
 
 
-def calculate_daily_change(ask, ask_open):
+def calculate_daily_change(bid, bid_open):
     try:
-        ask_value = float(ask) if ask is not None else None
-        ask_open_value = float(ask_open) if ask_open is not None else None
+        bid_value = float(bid) if bid is not None else None
+        bid_open_value = float(bid_open) if bid_open is not None else None
     except (TypeError, ValueError):
         return None, None
 
-    if ask_value is None or ask_open_value is None:
+    if bid_value is None or bid_open_value is None:
         return None, None
 
-    change = round(ask_value - ask_open_value, 4)
-    change_percentage = round((abs(change) / ask_open_value) * 100, 2) if ask_open_value else 0.0
+    # Match PHP logic used by the price API:
+    # change = bid_current - bid_today (rounded to 4 decimals)
+    # change_percentage = (abs(change) / bid_today) * 100 (rounded to 2 decimals)
+    change = round(bid_value - bid_open_value, 4)
+    change_percentage = round((abs(change) / bid_open_value) * 100, 2) if bid_open_value else 0.0
     return change, change_percentage
 
 
-def build_market_tick_payload(symbol, bid=None, ask=None, ask_open=None, bid_open=None):
+def build_market_tick_payload(symbol, bid=None, ask=None, ask_open=None, bid_open=None, digits=None):
+    # Determine rounding digits (match Dashboard default of 4 when unknown)
+    try:
+        round_digits = int(digits) if digits is not None else 4
+    except (TypeError, ValueError):
+        round_digits = 4
+
     payload = {
         "symbol": str(symbol or "").strip(),
-        "bid": float(bid) if bid is not None else None,
-        "ask": float(ask) if ask is not None else None,
         "received_at": datetime.now(timezone.utc).isoformat(),
+        "digits": round_digits,
     }
 
-    if ask_open is not None:
-        payload["ask_open"] = float(ask_open)
-    if bid_open is not None:
-        payload["bid_open"] = float(bid_open)
+    # Keep raw bid/ask values in the payload (preserve existing behaviour/tests),
+    # but compute rounded copies for change calculations to match PHP logic.
+    if bid is not None:
+        try:
+            bid_val = float(bid)
+            payload["bid"] = bid_val
+            bid_rounded = round(bid_val, round_digits)
+        except (TypeError, ValueError):
+            payload["bid"] = None
+            bid_rounded = None
+    else:
+        payload["bid"] = None
+        bid_rounded = None
 
-    daily_change, daily_change_percentage = calculate_daily_change(ask, ask_open)
+    if ask is not None:
+        try:
+            ask_val = float(ask)
+            payload["ask"] = ask_val
+            ask_rounded = round(ask_val, round_digits)
+        except (TypeError, ValueError):
+            payload["ask"] = None
+            ask_rounded = None
+    else:
+        payload["ask"] = None
+        ask_rounded = None
+
+    # Round and include open values as well
+    if ask_open is not None:
+        try:
+            ask_open_val = float(ask_open)
+            payload["ask_open"] = ask_open_val
+            ask_open_rounded = round(ask_open_val, round_digits)
+        except (TypeError, ValueError):
+            payload["ask_open"] = None
+            ask_open_rounded = None
+    else:
+        payload["ask_open"] = None
+        ask_open_rounded = None
+
+    if bid_open is not None:
+        try:
+            bid_open_val = float(bid_open)
+            payload["bid_open"] = bid_open_val
+            bid_open_rounded = round(bid_open_val, round_digits)
+        except (TypeError, ValueError):
+            payload["bid_open"] = None
+            bid_open_rounded = None
+    else:
+        payload["bid_open"] = None
+        bid_open_rounded = None
+
+    # Calculate daily change using rounded values (bid_rounded and bid_open_rounded)
+    daily_change, daily_change_percentage = calculate_daily_change(bid_rounded, bid_open_rounded)
     if daily_change is not None:
         payload["daily_change"] = daily_change
     if daily_change_percentage is not None:
         payload["daily_change_percentage"] = daily_change_percentage
+
+    # Also include string-formatted values matching the PHP API behavior:
+    # - "change": signed number with "+" prefix for non-negative values (negative numbers keep their "-" sign)
+    # - "change_percentage": percentage as absolute value prefixed with "-" when negative (no "+" for positive)
+    if daily_change is not None:
+        change_symbol = "+" if daily_change >= 0 else ""
+        payload["change"] = f"{change_symbol}{round(daily_change, 4)}"
+    if daily_change_percentage is not None:
+        percentage_symbol = "" if daily_change >= 0 else "-"
+        payload["change_percentage"] = f"{percentage_symbol}{round(daily_change_percentage, 2)}"
 
     return payload
 
@@ -129,10 +194,13 @@ def save_market_snapshot(ticks):
                 "symbol": str((tick or {}).get("symbol") or "").strip(),
                 "bid": (tick or {}).get("bid"),
                 "ask": (tick or {}).get("ask"),
+                "digits": (tick or {}).get("digits"),
                 "ask_open": (tick or {}).get("ask_open"),
                 "bid_open": (tick or {}).get("bid_open"),
                 "daily_change": (tick or {}).get("daily_change"),
                 "daily_change_percentage": (tick or {}).get("daily_change_percentage"),
+                "change": (tick or {}).get("change"),
+                "change_percentage": (tick or {}).get("change_percentage"),
                 "received_at": (tick or {}).get("received_at"),
             }
             for tick in (ticks or [])
@@ -186,7 +254,8 @@ def load_market_snapshot_from_db(symbols):
         return []
 
     placeholders = ",".join(["%s"] * len(normalized_symbols))
-    sql = f"SELECT Symbol, BidLast, AskLast FROM mt5_prices WHERE Symbol IN ({placeholders})"
+    # Include Digits column so we can round open prices consistently with MT5
+    sql = f"SELECT Symbol, BidLast, AskLast, Digits FROM mt5_prices WHERE Symbol IN ({placeholders})"
 
     with connections["mt5clients"].cursor() as cursor:
         cursor.execute(sql, normalized_symbols)
@@ -198,11 +267,14 @@ def load_market_snapshot_from_db(symbols):
         if not symbol:
             continue
 
+        digits = row[3] if len(row) > 3 else None
+
         ticks.append(
             build_market_tick_payload(
                 symbol=symbol,
                 bid=row[1],
                 ask=row[2],
+                digits=digits,
             )
         )
 

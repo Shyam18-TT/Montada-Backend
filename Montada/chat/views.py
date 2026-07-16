@@ -28,11 +28,29 @@ from .serializers import (
 User = get_user_model()
 
 
+def _users_are_blocked(user_a, user_b):
+    try:
+        from Moderation.models import users_are_blocked
+
+        return users_are_blocked(user_a, user_b)
+    except Exception:
+        logger.exception("Failed to evaluate user block relationship.")
+        return False
+
+
 def _user_can_access_conversation(user, conversation):
     return ConversationParticipant.objects.filter(
         conversation=conversation,
         user=user,
     ).exists()
+
+
+def _conversation_blocked_for_user(user, conversation):
+    other_participants = conversation.participants.exclude(pk=user.pk)
+    for participant in other_participants:
+        if _users_are_blocked(user, participant):
+            return True
+    return False
 
 
 def _broadcast_new_message(conversation_id, message_payload):
@@ -89,7 +107,10 @@ def _broadcast_chat_notification(conversation, message, recipients):
             logger.warning("Chat notification broadcast: no channel layer configured.")
             return
 
+        sender = getattr(message, "sender", None)
         for recipient in recipients:
+            if sender and _users_are_blocked(sender, recipient):
+                continue
             notification_payload = _build_chat_notification_payload(
                 conversation,
                 message,
@@ -132,6 +153,10 @@ class ConversationListCreateView(APIView):
             .prefetch_related("participants", "participant_links")
             .order_by("-updated_at")
         )
+        convos = [
+            convo for convo in convos
+            if not _conversation_blocked_for_user(request.user, convo)
+        ]
         paginator = self.pagination_class()
         page = paginator.paginate_queryset(convos, request)
         serializer = ConversationListSerializer(
@@ -164,6 +189,11 @@ class ConversationListCreateView(APIView):
                 {"error": "Cannot start a conversation with yourself."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        if _users_are_blocked(request.user, other):
+            return Response(
+                {"error": "You cannot start a conversation with this user."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         try:
             conv, created = Conversation.get_or_create_direct(request.user, other)
         except ValueError as e:
@@ -189,6 +219,11 @@ class ConversationDetailView(APIView):
                 {"error": "You are not part of this conversation."},
                 status=status.HTTP_403_FORBIDDEN,
             )
+        if _conversation_blocked_for_user(request.user, conv):
+            return Response(
+                {"error": "This conversation is blocked."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         serializer = ConversationDetailSerializer(conv)
         return Response(serializer.data)
 
@@ -204,6 +239,8 @@ class MessageListCreateView(APIView):
     def get_conversation(self, conversation_id):
         conv = get_object_or_404(Conversation, pk=conversation_id)
         if not _user_can_access_conversation(self.request.user, conv):
+            return None
+        if _conversation_blocked_for_user(self.request.user, conv):
             return None
         return conv
 
@@ -262,6 +299,11 @@ class MessageMarkReadView(APIView):
         if not _user_can_access_conversation(request.user, conv):
             return Response(
                 {"error": "You are not part of this conversation."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if _conversation_blocked_for_user(request.user, conv):
+            return Response(
+                {"error": "This conversation is blocked."},
                 status=status.HTTP_403_FORBIDDEN,
             )
         now = timezone.now()
@@ -347,6 +389,8 @@ class AnalystBroadcastMessageView(APIView):
         sent = 0
         now = timezone.now()
         for recipient in recipients:
+            if _users_are_blocked(request.user, recipient):
+                continue
             conv, _ = Conversation.get_or_create_direct(request.user, recipient)
             msg = ChatMessage.objects.create(
                 conversation=conv,

@@ -201,10 +201,16 @@ class Command(BaseCommand):
 
                 for symbol, open_price in trustcapital_open_prices.items():
                     latest = self._latest_ticks.get(symbol) or {}
+                    # If snapshot has digits, round the open prices to match PHP/MT5 behaviour
+                    digits = latest.get("digits")
                     if latest.get("ask_open") is None and open_price.get("ask_today") is not None:
-                        latest["ask_open"] = open_price["ask_today"]
+                        latest["ask_open"] = (
+                            round(open_price["ask_today"], int(digits)) if digits is not None else open_price["ask_today"]
+                        )
                     if latest.get("bid_open") is None and open_price.get("bid_today") is not None:
-                        latest["bid_open"] = open_price["bid_today"]
+                        latest["bid_open"] = (
+                            round(open_price["bid_today"], int(digits)) if digits is not None else open_price["bid_today"]
+                        )
                     if symbol not in self._latest_ticks:
                         self._latest_ticks[symbol] = latest
 
@@ -254,6 +260,13 @@ class Command(BaseCommand):
                     bid = getattr(tick, "bid", None)
                     ask_open = latest.get("ask_open") if latest else None
                     bid_open = latest.get("bid_open") if latest else None
+                    # Determine digits: prefer tick attribute, then latest snapshot
+                    digits = (
+                        getattr(tick, "Digits", None)
+                        or getattr(tick, "digits", None)
+                        or latest.get("digits")
+                        or None
+                    )
                     if ask_open is None and ask is not None:
                         ask_open = ask
                     if bid_open is None and bid is not None:
@@ -264,6 +277,7 @@ class Command(BaseCommand):
                         ask=ask,
                         ask_open=ask_open,
                         bid_open=bid_open,
+                        digits=digits,
                     )
                     with self_outer._pending_ticks_lock:
                         self_outer._pending_ticks[payload["symbol"]] = payload

@@ -150,13 +150,16 @@ class MarketStreamTests(SimpleTestCase):
 
     def test_build_market_tick_payload_includes_daily_change(self):
         payload = build_market_tick_payload(
-            "EURUSD", bid=1.10, ask=1.1005, ask_open=1.0950, bid_open=1.0945
+            "EURUSD", bid=1.1005, ask=1.1010, ask_open=1.0950, bid_open=1.0945
         )
         self.assertEqual(payload["symbol"], "EURUSD")
         self.assertEqual(payload["ask_open"], 1.0950)
         self.assertEqual(payload["bid_open"], 1.0945)
-        self.assertEqual(payload["daily_change"], round(1.1005 - 1.0950, 4))
-        self.assertEqual(payload["daily_change_percentage"], round(abs(1.1005 - 1.0950) / 1.0950 * 100, 2))
+        self.assertEqual(payload["daily_change"], round(1.1005 - 1.0945, 4))
+        self.assertEqual(
+            payload["daily_change_percentage"],
+            round(abs(1.1005 - 1.0945) / 1.0945 * 100, 2),
+        )
         self.assertIn("received_at", payload)
 
     @patch("Signals.market_stream.urlopen")
