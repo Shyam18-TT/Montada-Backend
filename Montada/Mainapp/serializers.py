@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from django.contrib.auth import authenticate
 from django.contrib.auth.password_validation import validate_password
+from .blocked import AccountBlocked, is_account_blocked
 from .models import User, AccountDeletionOTP
 
 
@@ -160,6 +161,8 @@ class UserLoginSerializer(serializers.Serializer):
                 raise serializers.ValidationError(
                     'This account has been deleted. Please register again to restore it.'
                 )
+            if existing_user and is_account_blocked(existing_user):
+                raise AccountBlocked()
             user = authenticate(request=self.context.get('request'),
                               username=email, password=password)
             if not user:

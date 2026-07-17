@@ -1,5 +1,5 @@
 from django.urls import path
-from rest_framework_simplejwt.views import TokenRefreshView
+from .token_refresh import BlockAwareTokenRefreshView
 from .views import (
     RegisterView,
     login_view,
@@ -26,7 +26,7 @@ urlpatterns = [
     path('resend-verification-otp/', resend_verification_otp_view, name='resend_verification_otp'),
     
     path('login/', login_view, name='login'),
-    path('token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    path('token/refresh/', BlockAwareTokenRefreshView.as_view(), name='token_refresh'),
     path('profile/', UserProfileView.as_view(), name='profile'),
     path('change-password/', ChangePasswordView.as_view(), name='change_password'),
     path('logout/', logout_view, name='logout'),
@@ -43,4 +43,3 @@ urlpatterns = [
     path('test-json', TestJson.as_view(), name='test-json'),
 
 ]
-

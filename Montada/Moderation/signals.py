@@ -23,7 +23,7 @@ def notify_team_on_new_report(sender, instance, created, **kwargs):
         f"A new moderation report was filed.\n\n"
         f"Report ID: {instance.id}\n"
         f"Reporter: {instance.reporter_id}\n"
-        f"Reported user: {instance.reported_user_id_raw}\n"
+        f"Reported user: {instance.reported_user_id or 'deleted'}\n"
         f"Content type: {instance.content_type}\n"
         f"Content ID: {instance.content_id}\n"
         f"Reason: {instance.reason}\n"
@@ -56,7 +56,7 @@ def notify_team_on_new_report(sender, instance, created, **kwargs):
             payload = {
                 "text": (
                     f"New moderation report `{instance.id}`: {instance.reason} "
-                    f"against user `{instance.reported_user_id_raw}`"
+                    f"against user `{instance.reported_user_id or 'deleted'}`"
                 )
             }
             request = Request(
@@ -68,4 +68,3 @@ def notify_team_on_new_report(sender, instance, created, **kwargs):
             urlopen(request, timeout=5).read()
         except Exception:
             logger.exception("Failed to send moderation Slack webhook.")
-

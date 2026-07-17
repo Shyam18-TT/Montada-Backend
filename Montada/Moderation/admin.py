@@ -55,7 +55,6 @@ class ModerationReportAdmin(admin.ModelAdmin):
     )
     list_filter = ("status", "reason", "created_at", "content_type", "platform")
     search_fields = (
-        "reported_user_id_raw",
         "content_id",
         "content_excerpt",
         "details",
@@ -71,4 +70,3 @@ class UserBlockAdmin(admin.ModelAdmin):
     list_display = ("id", "blocker", "blocked", "created_at")
     list_filter = ("created_at",)
     search_fields = ("blocker__email", "blocked__email")
-

@@ -27,7 +27,7 @@ class ModerationReport(models.Model):
         blank=True,
         related_name="reports_against",
     )
-    reported_user_id_raw = models.CharField(max_length=64)
+
     content_type = models.CharField(max_length=40)
     content_id = models.CharField(max_length=64, blank=True)
     content_excerpt = models.TextField(blank=True, max_length=500)

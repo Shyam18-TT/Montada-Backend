@@ -27,12 +27,12 @@ class ModerationReportCreateView(APIView):
         report = serializer.save()
         return Response(
             ModerationReportSerializer(report, context={"request": request}).data,
-            status=status.HTTP_201_CREATED,
+            status=status.HTTP_200_OK,
         )
 
 
 class UserBlockCreateView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAdminUser]
 
     def post(self, request):
         serializer = UserBlockSerializer(data=request.data)
@@ -59,7 +59,6 @@ class UserBlockCreateView(APIView):
             ModerationReport.objects.create(
                 reporter=request.user,
                 reported_user=blocked_user,
-                reported_user_id_raw=str(blocked_user_id),
                 content_type="user",
                 reason="blocked_by_user",
                 reported_at=timezone.now(),
@@ -67,5 +66,5 @@ class UserBlockCreateView(APIView):
             )
         return Response(
             UserBlockSerializer(block).data,
-            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+            status=status.HTTP_200_OK,
         )

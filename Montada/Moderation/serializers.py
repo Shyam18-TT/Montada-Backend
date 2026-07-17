@@ -15,9 +15,9 @@ class ModerationReportSerializer(serializers.ModelSerializer):
         model = ModerationReport
         fields = (
             "id",
+            "reporter",
             "content_type",
             "reported_user_id",
-            "reported_user_id_raw",
             "reported_user",
             "content_id",
             "content_excerpt",
@@ -30,7 +30,7 @@ class ModerationReportSerializer(serializers.ModelSerializer):
         )
         read_only_fields = (
             "id",
-            "reported_user_id_raw",
+            "reporter",
             "reported_user",
             "status",
             "created_at",
@@ -49,19 +49,26 @@ class ModerationReportSerializer(serializers.ModelSerializer):
         value = str(value or "").strip()
         if not value:
             raise serializers.ValidationError("reported_user_id is required.")
+        try:
+            if not User.objects.filter(pk=value).exists():
+                raise serializers.ValidationError("Reported user not found.")
+        except (User.DoesNotExist, DjangoValidationError, TypeError, ValueError):
+            raise serializers.ValidationError("Reported user ID is invalid.")
         return value
 
     def create(self, validated_data):
         reported_user_id = validated_data.pop("reported_user_id")
-        reported_user = None
         try:
-            reported_user = User.objects.filter(pk=reported_user_id).first()
-        except (DjangoValidationError, TypeError, ValueError):
-            reported_user = None
+            reported_user = User.objects.get(pk=reported_user_id)
+        except (User.DoesNotExist, DjangoValidationError, TypeError, ValueError):
+            # The ID is validated above; retain a safe error if the record is
+            # removed between validation and creation.
+            raise serializers.ValidationError(
+                {"reported_user_id": "Reported user not found."}
+            )
         return ModerationReport.objects.create(
             reporter=self.context["request"].user,
             reported_user=reported_user,
-            reported_user_id_raw=reported_user_id,
             **validated_data,
         )
 

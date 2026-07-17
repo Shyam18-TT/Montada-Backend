@@ -157,19 +157,19 @@ CACHES = {
 DATABASES = {
         'default': {
 
-        'ENGINE': 'mssql',
-        'NAME': 'MontadaApp',
-        'USER': 'sa',
-        'PASSWORD': 'Montada@1234',
-        'HOST': '13.236.73.211',
-        'PORT': '1433',
-
         # 'ENGINE': 'mssql',
         # 'NAME': 'MontadaApp',
         # 'USER': 'sa',
         # 'PASSWORD': 'Montada@1234',
-        # 'HOST': '127.0.0.1',
+        # 'HOST': '13.236.73.211',
         # 'PORT': '1433',
+
+        'ENGINE': 'mssql',
+        'NAME': 'MontadaApp',
+        'USER': 'sa',
+        'PASSWORD': 'Montada@1234',
+        'HOST': '127.0.0.1',
+        'PORT': '1433',
 
         # 'OPTIONS': {
         #     'driver': 'ODBC Driver 18 for SQL Server',
@@ -258,8 +258,9 @@ AUTH_USER_MODEL = 'Mainapp.User'
 # REST Framework Configuration
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
+        'Mainapp.authentication.BlockAwareJWTAuthentication',
     ),
+    'EXCEPTION_HANDLER': 'Mainapp.exceptions.api_exception_handler',
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAuthenticated',
     ),
