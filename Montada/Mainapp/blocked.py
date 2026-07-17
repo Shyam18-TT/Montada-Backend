@@ -2,7 +2,7 @@ from rest_framework.exceptions import APIException
 
 
 class AccountBlocked(APIException):
-    status_code = 403
+    status_code = 451
     default_detail = "This account has been blocked."
     default_code = "ACCOUNT_BLOCKED"
 
