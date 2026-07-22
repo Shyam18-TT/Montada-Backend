@@ -12,6 +12,7 @@ from calendar import monthrange
 from datetime import timedelta, datetime
 from django.conf import settings as django_settings
 from django.core.cache import cache
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils import timezone
 from django.db import connections
 from django.db.models import (
@@ -34,6 +35,7 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+
 
 from django.contrib.auth import authenticate, get_user_model
 from django.shortcuts import get_object_or_404
@@ -116,6 +118,8 @@ except ImportError:
     PollOption = None
     PollResponse = None
 
+from Moderation.models import UserBlock, ModerationReport
+
 from .serializers import (
     AdminAnalystListSerializer,
     AdminAnalystWithPlansTableSerializer,
@@ -137,6 +141,8 @@ from .serializers import (
     AdminInAppSubscriptionSettingsSerializer,
     AdminInAppFullAccessSerializer,
     AdminEconomicCalendarReminderSettingsSerializer,
+    UserBlockSerializer,
+    ModerationReportSerializer
 )
 
 try:
@@ -4027,3 +4033,96 @@ class AdminEconomicCalendarReminderSettingsView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+
+class UserBlockCreateView(APIView):
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def post(self, request):
+        serializer = UserBlockSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        blocked_user_id = serializer.validated_data["blocked_user_id"]
+        try:
+            blocked_user = User.objects.get(pk=blocked_user_id)
+        except (User.DoesNotExist, DjangoValidationError, TypeError, ValueError):
+            return Response(
+                {"error": "Blocked user not found."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if blocked_user.pk == request.user.pk:
+            return Response(
+                {"error": "You cannot block yourself."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        block, created = UserBlock.objects.get_or_create(
+            blocker=request.user,
+            blocked=blocked_user,
+        )
+        if created:
+            ModerationReport.objects.create(
+                reporter=request.user,
+                reported_user=blocked_user,
+                content_type="user",
+                reason="blocked_by_user",
+                reported_at=timezone.now(),
+                platform=str(request.data.get("platform") or "")[:16],
+            )
+        return Response(
+            UserBlockSerializer(block).data,
+            status=status.HTTP_200_OK,
+        )
+
+
+class ModerationReportListView(generics.ListAPIView):
+    permission_classes = [IsAuthenticated, IsAdminUser]
+    serializer_class = ModerationReportSerializer
+
+    class _Pagination(PageNumberPagination):
+            page_size = 50
+            page_size_query_param = "page_size"
+            max_page_size = 200
+    
+    pagination_class = _Pagination
+
+    def get_queryset(self):
+        qs = (
+            ModerationReport.objects
+            .order_by("-created_at")
+        )
+        search = (self.request.query_params.get("search") or "").strip()
+        if search:
+            qs = qs.filter(
+                Q(content_type__icontains=search) | Q(reason__icontains=search) |
+                Q(details__icontains=search) | Q(platform__icontains=search) 
+            )
+        if self.request.query_params.get("status",None):
+            report_status = self.request.query_params.get("status").strip().lower()
+            qs = qs.filter(status=report_status)
+
+        from_date = self.request.query_params.get("from_date")
+        to_date = self.request.query_params.get("to_date")
+
+        if from_date:
+            try:
+                from_dt = datetime.strptime(from_date, "%Y-%m-%d")
+                qs = qs.filter(created_at__gte=from_dt)
+            except ValueError:
+                pass
+
+        if to_date:
+            try:
+                # Include the entire to_date
+                to_dt = datetime.strptime(to_date, "%Y-%m-%d") + timedelta(days=1)
+                qs = qs.filter(created_at__lt=to_dt)
+            except ValueError:
+                pass
+
+        return qs
+
+        return qs
+
+ 
+    
+

@@ -31,6 +31,7 @@ class ModerationReportCreateView(APIView):
         )
 
 
+
 class UserBlockCreateView(APIView):
     permission_classes = [permissions.IsAdminUser]
 

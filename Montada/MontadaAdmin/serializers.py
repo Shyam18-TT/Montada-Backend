@@ -20,6 +20,8 @@ try:
 except ImportError:
     EconomicCalendarGlobalReminderSettings = None
 
+from Moderation.models import UserBlock, ModerationReport
+
 
 class AdminLoginSerializer(serializers.Serializer):
     """Email and password for admin login; validates credentials and sets user."""
@@ -676,3 +678,153 @@ try:
             read_only_fields = ("id", "created_at", "updated_at")
 except ImportError:
     AdminCreateSignalSerializer = None
+
+
+
+
+class UserBlockSerializer(serializers.ModelSerializer):
+    blocked_user_id = serializers.CharField(write_only=True, max_length=64)
+
+    class Meta:
+        model = UserBlock
+        fields = ("id", "blocked_user_id", "blocked", "created_at")
+        read_only_fields = ("id", "blocked", "created_at")
+
+    def validate_blocked_user_id(self, value):
+        value = str(value or "").strip()
+        if not value:
+            raise serializers.ValidationError("blocked_user_id is required.")
+        return value
+
+
+
+
+class ModerationReportSerializer(serializers.ModelSerializer):
+    # Read-only user details
+    reporter_name = serializers.CharField(
+        source="reporter.get_full_name",
+        read_only=True
+    )
+    reporter_username = serializers.CharField(
+        source="reporter.username",
+        read_only=True
+    )
+
+    reported_user_name = serializers.CharField(
+        source="reported_user.get_full_name",
+        read_only=True
+    )
+    reported_user_username = serializers.CharField(
+        source="reported_user.username",
+        read_only=True
+    )
+
+    reviewed_by_name = serializers.CharField(
+        source="reviewed_by.get_full_name",
+        read_only=True
+    )
+    reviewed_by_username = serializers.CharField(
+        source="reviewed_by.username",
+        read_only=True
+    )
+
+    class Meta:
+        model = ModerationReport
+        fields = [
+            "id",
+
+            # Reporter
+            "reporter",
+            "reporter_name",
+            "reporter_username",
+
+            # Reported User
+            "reported_user",
+            "reported_user_name",
+            "reported_user_username",
+
+            # Content Information
+            "content_type",
+            "content_id",
+            "content_excerpt",
+
+            # Report Details
+            "reason",
+            "details",
+            "platform",
+            "reported_at",
+
+            # Moderation
+            "status",
+            "reviewed_at",
+            "reviewed_by",
+            "reviewed_by_name",
+            "reviewed_by_username",
+
+            # Audit
+            "created_at",
+        ]
+
+        read_only_fields = [
+            "id",
+            "created_at",
+            "reviewed_at",
+            "reviewed_by",
+            "reviewed_by_name",
+            "reviewed_by_username",
+            "reporter_name",
+            "reporter_username",
+            "reported_user_name",
+            "reported_user_username",
+        ]
+
+    def validate_reason(self, value):
+        """
+        Ensure the reason is one of the supported report reasons.
+        """
+        allowed_reasons = {
+            "spam",
+            "harassment",
+            "hate_speech",
+            "violence",
+            "nudity",
+            "misinformation",
+            "copyright",
+            "scam",
+            "impersonation",
+            "other",
+        }
+
+        if value.lower() not in allowed_reasons:
+            raise serializers.ValidationError(
+                f"Reason must be one of: {', '.join(sorted(allowed_reasons))}"
+            )
+
+        return value.lower()
+
+    def validate_content_type(self, value):
+        """
+        Normalize the content type.
+        """
+        return value.lower().strip()
+
+    def validate_platform(self, value):
+        """
+        Normalize the platform.
+        """
+        return value.lower().strip() if value else value
+
+    def validate(self, attrs):
+        """
+        Cross-field validation.
+        """
+        content_type = attrs.get("content_type")
+        content_id = attrs.get("content_id")
+
+        # Most content types should include a content_id.
+        if content_type != "user" and not content_id:
+            raise serializers.ValidationError({
+                "content_id": "This field is required for the selected content type."
+            })
+
+        return attrs

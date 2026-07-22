@@ -56,6 +56,8 @@ from .views import (
     AdminEconomicCalendarView,
     AdminPerformanceAnalyticsView,
     AdminPerformanceGraphsView,
+    UserBlockCreateView,
+    ModerationReportListView
 )
 
 app_name = "MontadaAdmin"
@@ -170,5 +172,11 @@ urlpatterns = [
 
     path("analytics/performance/", AdminPerformanceAnalyticsView.as_view(), name="admin_performance_analytics"),
     path("analytics/performance/graphs/", AdminPerformanceGraphsView.as_view(), name="admin_performance_graphs"),
+
+
+    # moderation 
+    path("moderation/blocks/", UserBlockCreateView.as_view(), name="block_create"),
+    path('moderation/list/', ModerationReportListView.as_view(), name='moderation_list')
+
 ]
 
