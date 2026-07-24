@@ -99,11 +99,12 @@ except ImportError:
     TradingSignalSerializer = None
 
 try:
-    from News.models import NewsCategory, NewsArticle, LiveNews
+    from News.models import NewsCategory, NewsArticle, LiveNews, NewsArticleComment
 except ImportError:
     NewsCategory = None
     NewsArticle = None
     LiveNews = None
+    NewsArticleComment = None
 
 try:
     from News.serializers import NewsArticleCreateSerializer, LiveNewsSerializer
@@ -4075,6 +4076,35 @@ class UserBlockCreateView(APIView):
         )
 
 
+class ContentBlockView(APIView):
+    permission_classes = [IsAuthenticated, IsAdminUser]
+    def post(self, request):
+        try:
+            content_id = request.data.get('content_id')
+            content_type = request.data.get('content_type')
+            report_id = request.date.get('report_id')
+            if content_type == 'comment':
+                comment = NewsArticleComment.objects.filter(id=content_id).first()
+                if not comment:
+                    return Response({'message':'Invalid Comment id'}, status=status.HTTP_400_BAD_REQUEST)
+                comment.is_deleted = True
+                comment.save()
+                ModerationReport.objects.filter(id=report_id).update(status="Content removed")
+                return Response({'message':'Comment have been successfully removed'})
+            elif content_type == 'news':
+                news =  NewsArticle.objects.filter(id = content_id).first()
+                if not news:
+                    return Response({'message':'Invalid article id'}, status=status.HTTP_400_BAD_REQUEST)
+                news.is_deleted = True
+                news.save()
+                ModerationReport.objects.filter(id=report_id).update(status="Content removed")
+                return Response({'message':'Article have been successfully removed'})
+
+        except Exception as e:
+            print(f"Excepiton on the content block is {str(e)}")
+            return Response({'message':'Something error occured on the content blocking'}, status=status.HTTP_400_BAD_REQUEST)
+    
+
 class ModerationReportListView(generics.ListAPIView):
     permission_classes = [IsAuthenticated, IsAdminUser]
     serializer_class = ModerationReportSerializer
@@ -4125,4 +4155,27 @@ class ModerationReportListView(generics.ListAPIView):
 
  
     
+class ModerationChangeStatusView(APIView):
+    permission_classes = [IsAuthenticated, IsAdminUser]
 
+    def put(self, request):
+        try:
+            report_status = self.request.data.get('status',None)
+            report_id = self.request.data.get('report_id',None)
+            if not report_id:
+                return Response({'message':'No proper report id provided'}, status=status.HTTP_400_BAD_REQUEST)
+
+            if not report_status:
+                return Response({'message','No status provided!'}, status=status.HTTP_400_BAD_REQUEST)
+
+            moderation_report = ModerationReport.objects.filter(id = report_id).first()
+            if not moderation_report:
+                return Response({'message':'Invalid report id'}, status=status.HTTP_400_BAD_REQUEST)
+
+            moderation_report.status = report_status
+            moderation_report.save()
+
+            return Response({'message':'Status of the moderation have successfully updated'})
+
+        except Exception as e:
+            return Response({'message':'Something went wrong!'}, status=status.HTTP_400_BAD_REQUEST)

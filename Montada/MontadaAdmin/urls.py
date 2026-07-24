@@ -57,7 +57,9 @@ from .views import (
     AdminPerformanceAnalyticsView,
     AdminPerformanceGraphsView,
     UserBlockCreateView,
-    ModerationReportListView
+    ModerationReportListView,
+    ModerationChangeStatusView,
+    ContentBlockView
 )
 
 app_name = "MontadaAdmin"
@@ -176,7 +178,9 @@ urlpatterns = [
 
     # moderation 
     path("moderation/blocks/", UserBlockCreateView.as_view(), name="block_create"),
-    path('moderation/list/', ModerationReportListView.as_view(), name='moderation_list')
+    path("moderation/content_block", ContentBlockView.as_view(), name='content_block'),
+    path('moderation/list/', ModerationReportListView.as_view(), name='moderation_list'),
+    path('modereation/change_status', ModerationChangeStatusView.as_view(), name='change_status_moderation')
 
 ]
 
