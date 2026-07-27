@@ -4082,7 +4082,7 @@ class ContentBlockView(APIView):
         try:
             content_id = request.data.get('content_id')
             content_type = request.data.get('content_type')
-            report_id = request.date.get('report_id')
+            report_id = request.data.get('report_id')
             if content_type == 'comment':
                 comment = NewsArticleComment.objects.filter(id=content_id).first()
                 if not comment:
@@ -4091,7 +4091,7 @@ class ContentBlockView(APIView):
                 comment.save()
                 ModerationReport.objects.filter(id=report_id).update(status="Content removed")
                 return Response({'message':'Comment have been successfully removed'})
-            elif content_type == 'news':
+            elif content_type in  ['news','post']:
                 news =  NewsArticle.objects.filter(id = content_id).first()
                 if not news:
                     return Response({'message':'Invalid article id'}, status=status.HTTP_400_BAD_REQUEST)
@@ -4102,7 +4102,7 @@ class ContentBlockView(APIView):
 
         except Exception as e:
             print(f"Excepiton on the content block is {str(e)}")
-            return Response({'message':'Something error occured on the content blocking'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'message':str(e)}, status=status.HTTP_400_BAD_REQUEST)
     
 
 class ModerationReportListView(generics.ListAPIView):
