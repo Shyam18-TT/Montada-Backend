@@ -180,7 +180,7 @@ urlpatterns = [
     path("moderation/blocks/", UserBlockCreateView.as_view(), name="block_create"),
     path("moderation/content-block", ContentBlockView.as_view(), name='content_block'),
     path('moderation/list/', ModerationReportListView.as_view(), name='moderation_list'),
-    path('modereation/change_status', ModerationChangeStatusView.as_view(), name='change_status_moderation')
+    path('moderation/change-status', ModerationChangeStatusView.as_view(), name='change_status_moderation')
 
 ]
 
