@@ -9,7 +9,12 @@ User = get_user_model()
 
 
 class ModerationReportSerializer(serializers.ModelSerializer):
-    reported_user_id = serializers.CharField(write_only=True, max_length=64)
+    reported_user_id = serializers.CharField(
+    write_only=True,
+    max_length=64,
+    required=False,
+    allow_blank=True,
+    )
 
     class Meta:
         model = ModerationReport
@@ -47,32 +52,50 @@ class ModerationReportSerializer(serializers.ModelSerializer):
 
     def validate_reported_user_id(self, value):
         value = str(value or "").strip()
+
+        # Skip validation if the field is omitted
         if not value:
-            raise serializers.ValidationError("reported_user_id is required.")
+            return value
+
         try:
             if not User.objects.filter(pk=value).exists():
                 raise serializers.ValidationError("Reported user not found.")
-        except (User.DoesNotExist, DjangoValidationError, TypeError, ValueError):
+        except (DjangoValidationError, TypeError, ValueError):
             raise serializers.ValidationError("Reported user ID is invalid.")
+
         return value
 
     def create(self, validated_data):
-        reported_user_id = validated_data.pop("reported_user_id")
-        try:
-            reported_user = User.objects.get(pk=reported_user_id)
-        except (User.DoesNotExist, DjangoValidationError, TypeError, ValueError):
-            # The ID is validated above; retain a safe error if the record is
-            # removed between validation and creation.
-            raise serializers.ValidationError(
-                {"reported_user_id": "Reported user not found."}
-            )
+        reported_user = None
+
+        reported_user_id = validated_data.pop("reported_user_id", None)
+
+        if reported_user_id:
+            try:
+                reported_user = User.objects.get(pk=reported_user_id)
+            except (User.DoesNotExist, DjangoValidationError, TypeError, ValueError):
+                raise serializers.ValidationError({
+                    "reported_user_id": "Reported user not found."
+                })
+
         return ModerationReport.objects.create(
             reporter=self.context["request"].user,
             reported_user=reported_user,
             **validated_data,
         )
 
+    def validate(self, attrs):
+        content_type = attrs.get("content_type")
+        reported_user_id = attrs.get("reported_user_id")
 
+        if content_type == "user":
+            if not reported_user_id:
+                raise serializers.ValidationError({
+                    "reported_user_id": "This field is required when content_type is 'user'."
+                })
+
+        return attrs
+    
 class UserBlockSerializer(serializers.ModelSerializer):
     blocked_user_id = serializers.CharField(write_only=True, max_length=64)
 
