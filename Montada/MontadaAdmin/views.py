@@ -4044,6 +4044,7 @@ class UserBlockCreateView(APIView):
         serializer = UserBlockSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         blocked_user_id = serializer.validated_data["blocked_user_id"]
+        is_to_unblock = request.data.get('unblock',None)
         try:
             blocked_user = User.objects.get(pk=blocked_user_id)
         except (User.DoesNotExist, DjangoValidationError, TypeError, ValueError):
@@ -4057,23 +4058,48 @@ class UserBlockCreateView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        block, created = UserBlock.objects.get_or_create(
-            blocker=request.user,
-            blocked=blocked_user,
-        )
-        if created:
-            ModerationReport.objects.create(
-                reporter=request.user,
-                reported_user=blocked_user,
-                content_type="user",
-                reason="blocked_by_user",
-                reported_at=timezone.now(),
-                platform=str(request.data.get("platform") or "")[:16],
+        if not is_to_unblock:
+            block, created = UserBlock.objects.get_or_create(
+                blocker=request.user,
+                blocked=blocked_user,
             )
-        return Response(
-            UserBlockSerializer(block).data,
-            status=status.HTTP_200_OK,
-        )
+            if created:
+                ModerationReport.objects.create(
+                    reporter=request.user,
+                    reported_user=blocked_user,
+                    content_type="user",
+                    reason="blocked_by_user",
+                    reported_at=timezone.now(),
+                    platform=str(request.data.get("platform") or "")[:16],
+                )
+
+            else:
+                return Response({"message":"User is already in block"})
+
+            return Response(
+                UserBlockSerializer(block).data,
+                status=status.HTTP_200_OK,
+            )
+
+        else:
+            block = UserBlock.objects.filter(
+                    blocker=request.user,
+                    blocked=blocked_user,
+                    ).first()
+
+            if not block:
+                return Response(
+                    {"message": "User is not blocked."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            block.delete()
+
+            return Response(
+                {"message": "User has been unblocked successfully."},
+                status=status.HTTP_200_OK,
+            )
+
 
 
 class ContentBlockView(APIView):
@@ -4179,3 +4205,51 @@ class ModerationChangeStatusView(APIView):
 
         except Exception as e:
             return Response({'message':'Something went wrong!'}, status=status.HTTP_400_BAD_REQUEST)
+
+
+
+
+
+class BannedUsersListView(generics.ListAPIView):
+    permission_classes = [IsAuthenticated, IsAdminUser]
+    serializer_class = UserBlockSerializer
+
+    class _Pagination(PageNumberPagination):
+            page_size = 10
+            page_size_query_param = "page_size"
+            max_page_size = 200
+    
+    pagination_class = _Pagination
+
+    def get_queryset(self):
+        qs = (
+            UserBlock.objects
+            .order_by("-created_at")
+        )
+        search = (self.request.query_params.get("search") or "").strip()
+        if search:
+            qs = qs.filter(
+                Q(blocker__username__icontains=search) |
+                Q(blocked__username__icontains=search) 
+            )
+        from_date = self.request.query_params.get("from_date")
+        to_date = self.request.query_params.get("to_date")
+
+        if from_date:
+            try:
+                from_dt = datetime.strptime(from_date, "%Y-%m-%d")
+                qs = qs.filter(created_at__gte=from_dt)
+            except ValueError:
+                pass
+
+        if to_date:
+            try:
+                # Include the entire to_date
+                to_dt = datetime.strptime(to_date, "%Y-%m-%d") + timedelta(days=1)
+                qs = qs.filter(created_at__lt=to_dt)
+            except ValueError:
+                pass
+
+        return qs
+
+

@@ -681,14 +681,28 @@ except ImportError:
 
 
 
+class BlockedUserSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = (
+            "id",
+            "username",
+            "first_name",
+            "last_name",
+            "email",
+        )
+   
+
 
 class UserBlockSerializer(serializers.ModelSerializer):
     blocked_user_id = serializers.CharField(write_only=True, max_length=64)
+    blocked =  BlockedUserSerializer(read_only=True)
+    blocker =  BlockedUserSerializer(read_only=True)
 
     class Meta:
         model = UserBlock
-        fields = ("id", "blocked_user_id", "blocked", "created_at")
-        read_only_fields = ("id", "blocked", "created_at")
+        fields = ("id", "blocked_user_id", "blocked","blocker", "created_at")
+        read_only_fields = ("id", "blocked","blocker", "created_at")
 
     def validate_blocked_user_id(self, value):
         value = str(value or "").strip()
