@@ -4121,16 +4121,14 @@ class ContentBlockView(APIView):
                     return Response({'message':'Invalid Comment id'}, status=status.HTTP_400_BAD_REQUEST)
                 comment.is_deleted = True
                 comment.save()
-                ModerationReport.objects.filter(id=report_id).update(status="Content removed")
-                return Response({'message':'Comment have been successfully removed'})
+                
             elif content_type in  ['news_article','post']:
                 news =  NewsArticle.objects.filter(id = content_id).first()
                 if not news:
                     return Response({'message':'Invalid article id'}, status=status.HTTP_400_BAD_REQUEST)
                 news.is_deleted = True
                 news.save()
-                ModerationReport.objects.filter(id=report_id).update(status="Content removed")
-                return Response({'message':'Article have been successfully removed'})
+             
 
             elif content_type in ['chat_message']:
                 chat_message = ChatMessage.objects.filter(id = content_id).first()
@@ -4138,7 +4136,9 @@ class ContentBlockView(APIView):
                     return Response({'message':'Invalid chat id'}, status=status.HTTP_400_BAD_REQUEST)
                 chat_message.is_deleted = True
                 chat_message.save()
-                return Response({'message':'Chat message have been deleted successfully!'})
+
+            ModerationReport.objects.filter(id=report_id).update(status="Content removed")
+            return Response({'message':'Content has been removed successfully!'})
 
         except Exception as e:
             print(f"Excepiton on the content block is {str(e)}")
