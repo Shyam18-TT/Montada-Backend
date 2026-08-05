@@ -107,6 +107,11 @@ except ImportError:
     NewsArticleComment = None
 
 try:
+    from chat.models import ChatMessage
+except ImportError:
+    ChatMessage = None
+
+try:
     from News.serializers import NewsArticleCreateSerializer, LiveNewsSerializer
 except ImportError:
     NewsArticleCreateSerializer = None
@@ -145,6 +150,7 @@ from .serializers import (
     UserBlockSerializer,
     ModerationReportSerializer
 )
+from .serializers import _build_media_url
 
 try:
     from MontadaAdmin.models import EconomicCalendarGlobalReminderSettings
@@ -4131,6 +4137,95 @@ class ContentBlockView(APIView):
             return Response({'message':str(e)}, status=status.HTTP_400_BAD_REQUEST)
     
 
+def _get_moderation_content_data(reports):
+    """
+    Batch-fetch the reported content for a list of ModerationReport rows.
+    Returns {report.id: content_data_dict_or_None}, keyed by content_type:
+      news_article -> News.NewsArticle, news_comment -> News.NewsArticleComment,
+      chat_message -> chat.ChatMessage, user -> Mainapp.User (content_id, or
+      reported_user as a fallback if content_id wasn't set).
+    """
+    article_ids, comment_ids, message_ids, user_ids = [], [], [], []
+    for r in reports:
+        if r.content_type == "news_article" and r.content_id:
+            article_ids.append(r.content_id)
+        elif r.content_type == "news_comment" and r.content_id:
+            comment_ids.append(r.content_id)
+        elif r.content_type == "chat_message" and r.content_id:
+            message_ids.append(r.content_id)
+        elif r.content_type == "user":
+            uid = r.content_id or (str(r.reported_user_id) if r.reported_user_id else None)
+            if uid:
+                user_ids.append(uid)
+
+    articles = {}
+    if article_ids and NewsArticle is not None:
+        for a in NewsArticle.objects.filter(id__in=article_ids):
+            articles[str(a.id)] = {
+                "id": str(a.id),
+                "title": a.title,
+                "content": a.content,
+                "featured_image": _build_media_url(a.featured_image),
+                "status": a.status,
+                "is_deleted": a.is_deleted,
+                "author_id": str(a.author_id) if a.author_id else None,
+                "created_at": a.created_at.isoformat() if a.created_at else None,
+            }
+
+    comments = {}
+    if comment_ids and NewsArticleComment is not None:
+        for c in NewsArticleComment.objects.select_related("user").filter(id__in=comment_ids):
+            comments[str(c.id)] = {
+                "id": str(c.id),
+                "content": c.content,
+                "is_deleted": c.is_deleted,
+                "article_id": str(c.article_id) if c.article_id else None,
+                "user_id": str(c.user_id) if c.user_id else None,
+                "username": c.user.username if c.user_id else None,
+                "created_at": c.created_at.isoformat() if c.created_at else None,
+            }
+
+    messages = {}
+    if message_ids and ChatMessage is not None:
+        for m in ChatMessage.objects.select_related("sender").filter(id__in=message_ids):
+            messages[str(m.id)] = {
+                "id": str(m.id),
+                "content": m.content,
+                "is_deleted": m.is_deleted,
+                "conversation_id": str(m.conversation_id) if m.conversation_id else None,
+                "sender_id": str(m.sender_id) if m.sender_id else None,
+                "sender_username": m.sender.username if m.sender_id else None,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+            }
+
+    users = {}
+    if user_ids:
+        for u in User.objects.filter(id__in=user_ids):
+            users[str(u.id)] = {
+                "id": str(u.id),
+                "username": u.username,
+                "email": u.email,
+                "user_type": getattr(u, "user_type", None),
+                "profile_picture": _build_media_url(getattr(u, "profile_picture", None)),
+                "is_verified": getattr(u, "is_verified", None),
+            }
+
+    data_by_report_id = {}
+    for r in reports:
+        if r.content_type == "news_article":
+            data_by_report_id[r.id] = articles.get(r.content_id)
+        elif r.content_type == "news_comment":
+            data_by_report_id[r.id] = comments.get(r.content_id)
+        elif r.content_type == "chat_message":
+            data_by_report_id[r.id] = messages.get(r.content_id)
+        elif r.content_type == "user":
+            uid = r.content_id or (str(r.reported_user_id) if r.reported_user_id else None)
+            data_by_report_id[r.id] = users.get(uid)
+        else:
+            data_by_report_id[r.id] = None
+    return data_by_report_id
+
+
 class ModerationReportListView(generics.ListAPIView):
     permission_classes = [IsAuthenticated, IsAdminUser]
     serializer_class = ModerationReportSerializer
@@ -4139,8 +4234,20 @@ class ModerationReportListView(generics.ListAPIView):
             page_size = 50
             page_size_query_param = "page_size"
             max_page_size = 200
-    
+
     pagination_class = _Pagination
+
+    def list(self, request, *args, **kwargs):
+        qs = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(qs)
+        items = page if page is not None else qs
+        data = self.get_serializer(items, many=True).data
+        content_data_by_id = _get_moderation_content_data(items)
+        for entry, report in zip(data, items):
+            entry["content_data"] = content_data_by_id.get(report.id)
+        if page is not None:
+            return self.get_paginated_response(data)
+        return Response(data)
 
     def get_queryset(self):
         qs = (
@@ -4177,10 +4284,7 @@ class ModerationReportListView(generics.ListAPIView):
 
         return qs
 
-        return qs
 
- 
-    
 class ModerationChangeStatusView(APIView):
     permission_classes = [IsAuthenticated, IsAdminUser]
 
