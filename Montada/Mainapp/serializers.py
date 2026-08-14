@@ -38,7 +38,7 @@ def _apply_news_language_preferences(attrs, *, instance=None):
     for field in provided_fields:
         current_preferences[field] = bool(attrs[field])
 
-    if sum(1 for field in NEWS_LANGUAGE_PREFERENCE_FIELDS if current_preferences[field]) != 1:
+    if sum(1 for field in NEWS_LANGUAGE_PREFERENCE_FIELDS if current_preferences[field]) < 1:
         raise serializers.ValidationError(
             {'news_language_preferences': 'Choose any news notification languages.'}
         )
