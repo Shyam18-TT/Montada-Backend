@@ -5,12 +5,12 @@ from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.mail import send_mail
 from django.utils import timezone
-from rest_framework import permissions, status
+from rest_framework import generics, permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import ModerationReport, UserBlock
-from .serializers import ModerationReportSerializer, UserBlockSerializer
+from .serializers import BlockedUserSerializer, ModerationReportSerializer, UserBlockSerializer
 
 
 logger = logging.getLogger(__name__)
@@ -96,8 +96,38 @@ class UserBlockCreateView(APIView):
             blocker=request.user,
             blocked=blocked_user,
         )
-        
+
         return Response(
             UserBlockSerializer(block).data,
             status=status.HTTP_200_OK,
         )
+
+
+class BlockedUserListView(generics.ListAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = BlockedUserSerializer
+
+    def get_queryset(self):
+        return (
+            UserBlock.objects.filter(blocker=self.request.user)
+            .select_related("blocked")
+            .order_by("-created_at")
+        )
+
+
+class UserUnblockView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def delete(self, request, blocked_user_id):
+        deleted, _ = UserBlock.objects.filter(
+            blocker=request.user,
+            blocked_id=blocked_user_id,
+        ).delete()
+
+        if not deleted:
+            return Response(
+                {"error": "Block not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        return Response(status=status.HTTP_204_NO_CONTENT)

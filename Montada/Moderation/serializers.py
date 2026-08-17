@@ -109,3 +109,22 @@ class UserBlockSerializer(serializers.ModelSerializer):
         if not value:
             raise serializers.ValidationError("blocked_user_id is required.")
         return value
+
+
+class BlockedUserSerializer(serializers.ModelSerializer):
+    id = serializers.UUIDField(source="blocked.id", read_only=True)
+    username = serializers.CharField(source="blocked.username", read_only=True)
+    name = serializers.CharField(source="blocked.name", read_only=True)
+    profile_picture = serializers.ImageField(source="blocked.profile_picture", read_only=True)
+    user_type = serializers.CharField(source="blocked.user_type", read_only=True)
+
+    class Meta:
+        model = UserBlock
+        fields = (
+            "id",
+            "username",
+            "name",
+            "profile_picture",
+            "user_type",
+            "created_at",
+        )
