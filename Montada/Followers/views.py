@@ -14,6 +14,13 @@ from django.conf import settings as django_settings
 from .models import AnalystReview, Follow, Mute
 
 try:
+    from Moderation.models import UserBlock, users_are_blocked
+except ImportError:
+    UserBlock = None
+    def users_are_blocked(user_a, user_b):
+        return False
+
+try:
     from Signals.models import TradingSignal
 except ImportError:
     TradingSignal = None
@@ -73,7 +80,7 @@ class FollowRequestView(APIView):
 
         if Follow.objects.filter(
             follower=request.user, followed=target, status=Follow.Status.BLOCKED
-        ).exists():
+        ).exists() or users_are_blocked(request.user, target):
             return Response(
                 {"error": "You cannot follow this user."},
                 status=status.HTTP_403_FORBIDDEN,
@@ -687,6 +694,14 @@ class AnalystsListView(APIView):
                 | Q(email__icontains=search)
                 | Q(username__icontains=search)
             )
+        if UserBlock is not None:
+            blocked_ids = set(
+                UserBlock.objects.filter(blocker=request.user).values_list("blocked_id", flat=True)
+            ) | set(
+                UserBlock.objects.filter(blocked=request.user).values_list("blocker_id", flat=True)
+            )
+            if blocked_ids:
+                qs = qs.exclude(id__in=blocked_ids)
         analysts = list(qs[:200])
         include_status = request.query_params.get("include_status", "").lower() in ("1", "true", "yes")
         data = UserMinimalSerializer(analysts, many=True).data
@@ -822,6 +837,12 @@ class FollowStatusView(APIView):
             elif follow_received.status == Follow.Status.BLOCKED:
                 is_blocked_by_me = True
 
+        if UserBlock is not None:
+            if UserBlock.objects.filter(blocker=request.user, blocked=target).exists():
+                is_blocked_by_me = True
+            if UserBlock.objects.filter(blocker=target, blocked=request.user).exists():
+                is_blocked_by_them = True
+
         is_muted = Mute.objects.filter(muter=request.user, muted=target).exists()
 
         return Response({
@@ -880,6 +901,12 @@ class AnalystPublicProfileView(APIView):
         analyst = get_object_or_404(
             User, id=analyst_id, user_type="analyst", is_active=True
         )
+
+        if users_are_blocked(request.user, analyst):
+            return Response(
+                {"error": "This profile is unavailable."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         if TradingSignal is None:
             return Response(
@@ -1190,6 +1217,12 @@ class AnalystReviewSubmitView(APIView):
             return Response(
                 {"error": "You cannot review yourself.", "code": "cannot_review_self"},
                 status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if users_are_blocked(request.user, analyst):
+            return Response(
+                {"error": "You cannot review this analyst.", "code": "blocked"},
+                status=status.HTTP_403_FORBIDDEN,
             )
 
         title = (data.get("title") or "").strip() or None

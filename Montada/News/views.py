@@ -33,6 +33,12 @@ try:
 except ImportError:
     IsAnalystPermission = permissions.BasePermission  # no-op fallback
 
+try:
+    from Moderation.models import users_are_blocked
+except ImportError:
+    def users_are_blocked(user_a, user_b):
+        return False
+
 
 class AnalystNewsArticleCreateView(generics.CreateAPIView):
     """
@@ -240,6 +246,11 @@ class ArticleLikeView(APIView):
                 {"error": "Article not found or not available for likes."},
                 status=status.HTTP_404_NOT_FOUND,
             )
+        if article.author_id and users_are_blocked(request.user, article.author):
+            return Response(
+                {"error": "You cannot interact with this article."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         _, created = NewsArticleLike.objects.get_or_create(user=request.user, article=article)
         return Response(
             {"message": "Liked." if created else "Already liked.", "liked": True},
@@ -294,6 +305,11 @@ class ArticleCommentListCreateView(APIView):
             return Response(
                 {"error": "Article not found or not available for comments."},
                 status=status.HTTP_404_NOT_FOUND,
+            )
+        if article.author_id and users_are_blocked(request.user, article.author):
+            return Response(
+                {"error": "You cannot interact with this article."},
+                status=status.HTTP_403_FORBIDDEN,
             )
         content = (request.data.get("content") or "").strip()
         if not content:
