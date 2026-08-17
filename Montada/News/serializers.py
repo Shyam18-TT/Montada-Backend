@@ -1,4 +1,5 @@
 from django.conf import settings
+from django.utils import timezone
 from rest_framework import serializers
 from .models import NewsArticle, NewsCategory, Tag, NewsArticleLike, NewsArticleComment, LiveNews, EconomicCalendarEvent, EconomicCalendarReminder, EconomicCalendarEventNotification
 
@@ -140,6 +141,12 @@ class NewsArticleCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Status must be draft, published, or archived.")
         return value
 
+    def create(self, validated_data):
+        if validated_data.get("status") == "published":
+            validated_data["published_at"] = timezone.now()
+
+        return super().create(validated_data)
+
     def to_representation(self, instance):
         data = super().to_representation(instance)
         if data.get("featured_image"):
@@ -236,7 +243,6 @@ class EconomicCalendarReminderCreateSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         """Create reminder and calculate reminder_time based on event and reminder_type."""
         from datetime import timedelta
-        from django.utils import timezone
 
         event = validated_data["event"]
         reminder_type = validated_data["reminder_type"]
