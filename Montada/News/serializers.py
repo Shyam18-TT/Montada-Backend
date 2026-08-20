@@ -1,4 +1,5 @@
 from django.conf import settings
+from django.contrib.auth import get_user_model
 from django.utils import timezone
 from rest_framework import serializers
 from .models import NewsArticle, NewsCategory, Tag, NewsArticleLike, NewsArticleComment, LiveNews, EconomicCalendarEvent, EconomicCalendarReminder, EconomicCalendarEventNotification
@@ -32,14 +33,30 @@ class TagSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class NewsArticleAuthorSerializer(serializers.ModelSerializer):
+    """Minimal author details for news article responses."""
+
+    class Meta:
+        model = get_user_model()
+        fields = ("id", "name", "username", "email", "user_type", "profile_picture")
+        read_only_fields = fields
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if data.get("profile_picture"):
+            data["profile_picture"] = _build_media_url(instance.profile_picture)
+        return data
+
+
 class NewsArticleListSerializer(serializers.ModelSerializer):
-    """Read-only news article for list API. Includes category_name, tags, like_count, comment_count, current_user_liked."""
+    """Read-only news article for list API. Includes category_name, tags, like_count, comment_count, current_user_liked, author details."""
 
     category_name = serializers.SerializerMethodField()
     tags = TagSerializer(many=True, read_only=True)
     like_count = serializers.SerializerMethodField()
     comment_count = serializers.SerializerMethodField()
     current_user_liked = serializers.SerializerMethodField()
+    author_details = NewsArticleAuthorSerializer(source="author", read_only=True)
 
     class Meta:
         model = NewsArticle
@@ -59,6 +76,7 @@ class NewsArticleListSerializer(serializers.ModelSerializer):
             "like_count",
             "comment_count",
             "current_user_liked",
+            "author_details",
             "created_at",
             "updated_at",
         )
