@@ -166,7 +166,6 @@ class Command(BaseCommand):
             is_active=True,
             is_sent=False,
             reminder_time__lte=now,
-            event__importance=EconomicCalendarEvent.Importance.HIGH,
         ).select_related('user', 'event')
 
         if verbose:
