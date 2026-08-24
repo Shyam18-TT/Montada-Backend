@@ -160,11 +160,13 @@ class Command(BaseCommand):
         """
         count = 0
 
-        # Find active reminders where reminder_time <= now and not yet sent
+        # Find active reminders where reminder_time <= now and not yet sent.
+        # Only high-importance events should trigger reminder notifications.
         pending_reminders = EconomicCalendarReminder.objects.filter(
             is_active=True,
             is_sent=False,
             reminder_time__lte=now,
+            event__importance=EconomicCalendarEvent.Importance.HIGH,
         ).select_related('user', 'event')
 
         if verbose:
@@ -319,6 +321,7 @@ class Command(BaseCommand):
         upcoming_events = EconomicCalendarEvent.objects.filter(
             release_date__gte=release_start,
             release_date__lte=release_end,
+            importance=EconomicCalendarEvent.Importance.HIGH,
         ).exclude(Exists(already_sent))
 
         if verbose:
@@ -469,6 +472,7 @@ class Command(BaseCommand):
         recent_events = EconomicCalendarEvent.objects.filter(
             release_date__gte=event_window_start,
             release_date__lte=event_window_end,
+            importance=EconomicCalendarEvent.Importance.HIGH,
         )
 
         if verbose:
