@@ -169,6 +169,51 @@ class AdminUserProfileSerializer(serializers.ModelSerializer):
         read_only_fields = fields
 
 
+class AdminUserUpdateSerializer(serializers.ModelSerializer):
+    """Editable user profile fields for admin edit. Admin only."""
+
+    class Meta:
+        model = User
+        fields = (
+            "id",
+            "username",
+            "email",
+            "name",
+            "phone_number",
+            "profile_picture",
+            "date_of_birth",
+            "user_type",
+            "is_subscribed",
+            "admin_granted_in_app_access",
+            "admin_in_app_access_expires_at",
+            "is_verified",
+            "is_active",
+            "experience",
+            "company",
+            "contact_details",
+            "social_links",
+            "created_at",
+            "updated_at",
+        )
+        read_only_fields = ("id", "created_at", "updated_at")
+
+    def validate_email(self, value):
+        qs = User.objects.filter(email__iexact=value)
+        if self.instance:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError("A user with this email already exists.")
+        return value
+
+    def validate_username(self, value):
+        qs = User.objects.filter(username__iexact=value)
+        if self.instance:
+            qs = qs.exclude(pk=self.instance.pk)
+        if qs.exists():
+            raise serializers.ValidationError("A user with this username already exists.")
+        return value
+
+
 class AdminCreateAnalystSerializer(serializers.Serializer):
     """Create analyst from admin; requires email and password."""
     email = serializers.EmailField(required=True)

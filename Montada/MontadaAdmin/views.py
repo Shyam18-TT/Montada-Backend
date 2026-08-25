@@ -144,6 +144,7 @@ from .serializers import (
     AdminAssignAnalystPlanSubscriptionSerializer,
     AdminRemoveAnalystPlanSubscriptionSerializer,
     AdminUserProfileSerializer,
+    AdminUserUpdateSerializer,
     AdminInAppSubscriptionSettingsSerializer,
     AdminInAppFullAccessSerializer,
     AdminEconomicCalendarReminderSettingsSerializer,
@@ -285,16 +286,50 @@ class AdminSuspendUserView(APIView):
         )
 
 
-class AdminUserProfileView(generics.RetrieveAPIView):
+class AdminUserProfileView(generics.RetrieveUpdateDestroyAPIView):
     """
-    GET: View profile details of a user by id. Admin only.
-    URL: user_id in path (UUID).
+    GET   : View profile details of a user by id.
+    PUT   : Full update of user profile fields.
+    PATCH : Partial update of user profile fields.
+    DELETE: Soft-delete the user (sets is_soft_deleted=True, soft_deleted_at, is_active=False).
+    Admin only.  URL: user_id in path (UUID).
     """
     permission_classes = [IsAuthenticated, IsAdminUser]
-    serializer_class = AdminUserProfileSerializer
-    queryset = User.objects.all()
+    queryset = User.objects.filter(is_soft_deleted=False)
     lookup_url_kwarg = "user_id"
     lookup_field = "id"
+
+    def get_serializer_class(self):
+        if self.request.method in ("PUT", "PATCH"):
+            return AdminUserUpdateSerializer
+        return AdminUserProfileSerializer
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.get("partial", False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(
+            {"message": "User updated successfully.", "user": serializer.data},
+            status=status.HTTP_200_OK,
+        )
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        if instance.is_superuser:
+            return Response(
+                {"error": "Cannot delete a superuser account."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        instance.is_soft_deleted = True
+        instance.soft_deleted_at = timezone.now()
+        instance.is_active = False
+        instance.save(update_fields=["is_soft_deleted", "soft_deleted_at", "is_active"])
+        return Response(
+            {"message": "User deleted successfully."},
+            status=status.HTTP_200_OK,
+        )
 
 
 class AdminCreateAnalystView(APIView):
@@ -1591,6 +1626,62 @@ class AdminCreateSignalView(generics.CreateAPIView):
                 "signal": serializer.data,
             },
             status=status.HTTP_201_CREATED,
+        )
+
+
+class AdminSignalDetailView(generics.RetrieveUpdateDestroyAPIView):
+    """
+    GET   : Retrieve a single trading signal by id.
+    PUT   : Full update of signal details.
+    PATCH : Partial update of signal details.
+    DELETE: Soft-delete the signal (sets deleted_at, keeps the DB row).
+    Admin only.  URL: signals/<id>/
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+    serializer_class = AdminCreateSignalSerializer
+    lookup_url_kwarg = "pk"
+    lookup_field = "pk"
+
+    def get_queryset(self):
+        if TradingSignal is None:
+            return User.objects.none()
+        return TradingSignal.active.select_related("analyst", "asset_class", "instrument", "timeframe")
+
+    def retrieve(self, request, *args, **kwargs):
+        if TradingSignal is None or AdminCreateSignalSerializer is None:
+            return Response(
+                {"error": "Signals app is not available."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        return super().retrieve(request, *args, **kwargs)
+
+    def update(self, request, *args, **kwargs):
+        if TradingSignal is None or AdminCreateSignalSerializer is None:
+            return Response(
+                {"error": "Signals app is not available."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        partial = kwargs.get("partial", False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(
+            {"message": "Signal updated successfully.", "signal": serializer.data},
+            status=status.HTTP_200_OK,
+        )
+
+    def destroy(self, request, *args, **kwargs):
+        if TradingSignal is None:
+            return Response(
+                {"error": "Signals app is not available."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        instance = self.get_object()
+        instance.soft_delete()
+        return Response(
+            {"message": "Signal deleted successfully."},
+            status=status.HTTP_200_OK,
         )
 
 
