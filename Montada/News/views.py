@@ -1125,9 +1125,9 @@ class ForexCategoryNewsView(APIView):
 
 
 class LiveNewsListView(generics.ListAPIView):
-    permission_classes = [permissions.IsAuthenticated]
     serializer_class = LiveNewsSerializer
     pagination_class = LiveNewsPagination
+    permission_classes = [permissions.AllowAny]
 
     def _get_default_live_news_languages(self):
         user = getattr(self.request, "user", None)
