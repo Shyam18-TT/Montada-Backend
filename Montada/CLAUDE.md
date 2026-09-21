@@ -276,7 +276,7 @@ These override hardcoded defaults in `settings.py`:
 | `BENZINGA_NEWS_DEFAULT_PAGE_SIZE` | `50` | News page size |
 | `EODHD_API_TOKEN` | (hardcoded) | EODHD API key |
 | `EODHD_NEWS_URL` | (hardcoded) | EODHD endpoint |
-| `MT5_MANAGER_SERVER` | `207.97.203.117:443` | MT5 Manager server |
+| `MT5_MANAGER_SERVER` | `23.83.116.76:443` | MT5 Manager server |
 | `MT5_MANAGER_LOGIN` | `5022` | MT5 Manager login |
 | `MT5_MANAGER_PASSWORD` | (hardcoded) | MT5 Manager password |
 | `WEB_CONCURRENCY` | `2` | PM2 worker count |
