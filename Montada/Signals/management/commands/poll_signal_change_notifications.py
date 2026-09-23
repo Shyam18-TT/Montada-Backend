@@ -32,6 +32,21 @@ _EXCLUDED_STOCK_SYMBOLS = frozenset({
     "WFC", "WMT", "XOM", "YUM", "ZM",
 })
 
+# Symbols where the live-quote feed uses a different name than Instrument.symbol in the DB
+# (e.g. DB has "GOLD" but the feed key is "XAUUSD"). Mirrors SYMBOL_ALIASES_DB in
+# run_price_alerts.py so signal matching stays consistent between the two commands.
+_SYMBOL_ALIASES = {
+    "GOLDUSD": ["GOLD", "XAUUSD"],
+    "SILVERUSD": ["SILVER", "XAGUSD"],
+    "XAUUSD": ["GOLD"],
+    "XAGUSD": ["SILVER"],
+    "S&P500": ["US500", "SP500"],
+    "SP500": ["US500"],
+    "DOWJONES": ["US30", "DOW"],
+    "NIFTY50": ["NIFTY", "NIFTY50"],
+    "DOGEUSD": ["DOGE", "DOGUSD"],
+}
+
 DEFAULT_PRICE_URL = "https://trustcapital.com/api/get-MT5-price"
 DEFAULT_THRESHOLD_PERCENT = Decimal("0.5")
 DEFAULT_US_EU_SHARE_THRESHOLD_PERCENT = Decimal("1.0")
@@ -45,6 +60,17 @@ LOCK_CACHE_KEY_PREFIX = "signals:change-notifications:lock"
 
 def _normalize_symbol(symbol):
     return str(symbol or "").replace("/", "").replace(" ", "").upper()
+
+
+def _symbol_alias_candidates(symbol):
+    """All symbols equivalent to `symbol` per _SYMBOL_ALIASES, including itself."""
+    candidates = {symbol}
+    candidates.update(_SYMBOL_ALIASES.get(symbol, []))
+    for key, aliases in _SYMBOL_ALIASES.items():
+        if symbol == key or symbol in aliases:
+            candidates.add(key)
+            candidates.update(aliases)
+    return candidates
 
 
 def _parse_decimal(value):
@@ -317,10 +343,13 @@ class Command(BaseCommand):
 
         signals_by_symbol = self._load_open_signals_by_symbol(quotes_by_symbol.keys())
         if not signals_by_symbol:
+            # No open signal matched any fetched quote symbol (e.g. all quotes are for
+            # symbols nobody currently has an open signal on). Threshold notifications
+            # are not gated on having a matching signal, so keep polling instead of
+            # aborting the whole cycle.
             self.stdout.write(
                 "WARNING: No open signals matched %d fetched quote symbols." % len(quotes_by_symbol)
             )
-            return
 
         notification_count = 0
         self._notification_batches_this_poll = 0
@@ -395,8 +424,16 @@ class Command(BaseCommand):
         for signal in signals:
             instrument = getattr(signal, "instrument", None)
             symbol = _normalize_symbol(getattr(instrument, "symbol", ""))
-            if symbol in normalized_symbols:
-                result.setdefault(symbol, []).append(signal)
+            matched_symbol = symbol if symbol in normalized_symbols else next(
+                (
+                    candidate
+                    for candidate in _symbol_alias_candidates(symbol)
+                    if candidate in normalized_symbols
+                ),
+                None,
+            )
+            if matched_symbol:
+                result.setdefault(matched_symbol, []).append(signal)
             else:
                 # Track symbols with open signals that weren't in the quote response
                 unmatched_symbols.setdefault(symbol, []).append(signal)
