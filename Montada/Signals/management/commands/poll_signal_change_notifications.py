@@ -9,6 +9,7 @@ from urllib.request import Request, urlopen
 from django.core.cache import cache
 from django.core.management.base import BaseCommand
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,8 @@ DEFAULT_STATE_TTL_SECONDS = 60 * 60 * 24 * 7
 DEFAULT_LOCK_TTL_SECONDS = 60
 DEFAULT_MAX_NOTIFICATION_BATCHES_PER_POLL = 200
 DEFAULT_NOTIFICATION_COOLDOWN_SECONDS = 300
+# Market snapshot prices older than this fall back to the polled quote's bid.
+MARKET_SNAPSHOT_MAX_AGE_SECONDS = 300
 STATE_CACHE_KEY_PREFIX = "signals:change-notifications:state"
 LOCK_CACHE_KEY_PREFIX = "signals:change-notifications:lock"
 
@@ -91,6 +94,18 @@ def _format_percent(value):
 
 def _level_key(value):
     return _format_percent(abs(value))
+
+
+def _format_price(value, digits=None):
+    price = _parse_decimal(value)
+    if price is None:
+        return ""
+    try:
+        if digits is not None:
+            return format(price, ".%df" % max(0, int(digits)))
+    except (TypeError, ValueError):
+        pass
+    return format(price.normalize(), "f")
 
 
 def _extract_live_quotes(payload):
@@ -341,6 +356,8 @@ class Command(BaseCommand):
             self.stdout.write("No matching live quotes found.")
             return
 
+        self._market_prices = self._load_market_prices()
+
         signals_by_symbol = self._load_open_signals_by_symbol(quotes_by_symbol.keys())
         if not signals_by_symbol:
             # No open signal matched any fetched quote symbol (e.g. all quotes are for
@@ -374,6 +391,46 @@ class Command(BaseCommand):
             "Poll complete: %d matching symbol(s), %d notification batch(es) sent."
             % (len(signals_by_symbol), notification_count)
         )
+
+    def _load_market_prices(self):
+        """Latest ticks written by run_market_data_stream, keyed by normalized symbol."""
+        try:
+            from Signals.market_stream import load_market_snapshot
+
+            ticks = load_market_snapshot()
+        except Exception:
+            logger.exception("Could not load market snapshot; using polled quote prices.")
+            return {}
+
+        now = timezone.now()
+        prices = {}
+        for tick in ticks:
+            if not isinstance(tick, dict) or tick.get("bid") is None:
+                continue
+            symbol = _normalize_symbol(tick.get("symbol"))
+            if not symbol:
+                continue
+            try:
+                received_at = parse_datetime(str(tick.get("received_at") or ""))
+            except ValueError:
+                received_at = None
+            if received_at is None or timezone.is_naive(received_at):
+                continue
+            if (now - received_at).total_seconds() > MARKET_SNAPSHOT_MAX_AGE_SECONDS:
+                continue
+            prices[symbol] = tick
+        return prices
+
+    def _get_current_price(self, symbol, quote):
+        market_prices = getattr(self, "_market_prices", None) or {}
+        candidates = [symbol] + sorted(_symbol_alias_candidates(symbol) - {symbol})
+        for candidate in candidates:
+            tick = market_prices.get(candidate)
+            if tick:
+                price = _format_price(tick.get("bid"), tick.get("digits"))
+                if price:
+                    return price
+        return _format_price(quote.get("bid"))
 
     def _print_open_signals_by_symbol(self):
         """Print all open signals grouped by normalized symbol for debugging."""
@@ -768,11 +825,14 @@ class Command(BaseCommand):
         crossed_label = _format_percent(crossed_percentage)
         signed_crossed_label = _format_percent(signed_crossed_percentage)
         current_label = _format_percent(current_percentage)
+        current_price = self._get_current_price(symbol, quote)
         title = "%s %s %s%%" % (symbol, direction, crossed_label)
         message = (
             "%s passed %s%% (%s). Current change: %s%%."
             % (symbol, signed_crossed_label, direction, current_label)
         )
+        if current_price:
+            message += " Current price: %s." % current_price
         notification_type = "SUCCESS" if direction == "up" else "WARNING"
 
         # Check for recent duplicates to prevent re-sends if cache failed
@@ -821,6 +881,7 @@ class Command(BaseCommand):
             "crossed_percentage": str(crossed_percentage),
             "signed_crossed_percentage": str(signed_crossed_percentage),
             "current_percentage": str(current_percentage),
+            "current_price": current_price,
             "signal_ids": ",".join(str(signal_id) for signal_id in signal_ids),
             "bid": str(quote.get("bid") or ""),
             "ask": str(quote.get("ask") or ""),
