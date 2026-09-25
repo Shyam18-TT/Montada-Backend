@@ -15,23 +15,8 @@ from django.utils.dateparse import parse_datetime
 logger = logging.getLogger(__name__)
 
 # Symbols that must never trigger change notifications, normalized via _normalize_symbol.
-_EXCLUDED_STOCK_SYMBOLS = frozenset({
-    "AAL", "AAPL", "ABNB", "AD.AVIATION", "AD.INSURANC", "AD.NATL.TAK",
-    "AD.SHIP", "ADBE", "ADCB", "ADIB", "ADSGN", "AIG", "ALVG", "AMZN", "AXP", "AGTHIA.GRP",
-    "ALPHA.DHABI", "APEX", "BA", "BABA", "BAC", "BAYGN", "BK", "BKNG",
-    "BMRN", "BMWG", "BMY", "CAT", "CBD", "CBKG", "CME", "COST", "CSCO",
-    "CHIMERA", "DAL", "DBKGN", "DELL", "DEWA", "DIB", "DIS", "DU",
-    "EBAY", "EMAAR.DEVEL", "EMAAR.PROPT", "FAB.BANK", "FDX", "GE", "GHITHA.HOLD", "GM",
-    "GOOG", "GPRO", "GS", "GT", "GULFNAV", "HD", "HLT",
-    "HOG", "HPQ", "IBM", "IHC", "INTC", "JNJ", "JPM", "KMI", "KO",
-    "LHAG", "MA", "MCD", "MCO", "MMM", "MO", "MODON", "MRK", "MRVL", "MS",
-    "MSFT", "NBD.BANK", "NFLX", "NKE", "NMDC", "NVDA", "ORCL",
-    "PEP", "PFE", "PM", "PYPL", "PALMS.SPORT", "PARKIN", "PURE.HEALTH",
-    "QCOM", "RACE", "RAK.BANK", "ROKU", "RPH", "SAN", "SBUX", "SHOP",
-    "SIEGN", "SPOT", "SALIK", "TEF", "TMUS", "TSLA", "TAALEEM",
-    "TECOM.GROUP", "UA", "UAL", "UBER", "UPS", "VALE", "VOWG", "VZ",
-    "WFC", "WMT", "XOM", "YUM", "ZM",
-})
+# Empty: all US, EU and UAE stocks alert, using the share threshold below.
+_EXCLUDED_STOCK_SYMBOLS = frozenset()
 
 # Symbols where the live-quote feed uses a different name than Instrument.symbol in the DB
 # (e.g. DB has "GOLD" but the feed key is "XAUUSD"). Mirrors SYMBOL_ALIASES_DB in
@@ -50,7 +35,13 @@ _SYMBOL_ALIASES = {
 
 DEFAULT_PRICE_URL = "https://trustcapital.com/api/get-MT5-price"
 DEFAULT_THRESHOLD_PERCENT = Decimal("0.5")
-DEFAULT_US_EU_SHARE_THRESHOLD_PERCENT = Decimal("1.0")
+# UAE, US and EU stocks first alert at 2%, then every 0.5% after (2, 2.5, 3, ...).
+# Other instruments alert every DEFAULT_THRESHOLD_PERCENT (0.5, 1, 1.5, ...).
+DEFAULT_US_EU_SHARE_THRESHOLD_PERCENT = Decimal("2.0")
+DEFAULT_SHARE_STEP_PERCENT = Decimal("0.5")
+_SHARE_ASSET_CLASS_NAMES = frozenset({
+    "share", "shares", "stock", "stocks", "equity", "equities", "mena shares", "menashares",
+})
 DEFAULT_STATE_TTL_SECONDS = 60 * 60 * 24 * 7
 DEFAULT_LOCK_TTL_SECONDS = 60
 DEFAULT_MAX_NOTIFICATION_BATCHES_PER_POLL = 200
@@ -90,6 +81,17 @@ def _format_percent(value):
     if normalized == normalized.to_integral():
         return str(normalized.to_integral())
     return format(normalized, "f").rstrip("0").rstrip(".")
+
+
+def _step_count_for(abs_percentage, start, step):
+    """Number of levels crossed, where levels are start, start+step, start+2*step, ..."""
+    if abs_percentage < start:
+        return 0
+    return int(((abs_percentage - start) / step).to_integral_value(rounding=ROUND_FLOOR)) + 1
+
+
+def _step_percentage(step_count, start, step):
+    return start + step * Decimal(int(step_count) - 1)
 
 
 def _level_key(value):
@@ -232,6 +234,7 @@ class Command(BaseCommand):
         self.debug_symbols = bool(options.get("debug_symbols"))
         self.threshold = _parse_decimal(options.get("threshold")) or DEFAULT_THRESHOLD_PERCENT
         self.share_threshold = DEFAULT_US_EU_SHARE_THRESHOLD_PERCENT
+        self.share_step = DEFAULT_SHARE_STEP_PERCENT
         if self.threshold <= 0:
             self.stderr.write(self.style.ERROR("--threshold must be greater than 0."))
             return
@@ -277,12 +280,13 @@ class Command(BaseCommand):
 
         self.stdout.write(
             self.style.SUCCESS(
-                "Polling %s every %ss; default-threshold=%s%%; share-threshold=%s%%; reset=%s%%."
+                "Polling %s every %ss; default-threshold=%s%%; share-threshold=%s%% then every %s%%; reset=%s%%."
                 % (
                     self.url,
                     self.interval,
                     _format_percent(self.threshold),
                     _format_percent(self.share_threshold),
+                    _format_percent(self.share_step),
                     _format_percent(self.reset_threshold),
                 )
             )
@@ -357,6 +361,7 @@ class Command(BaseCommand):
             return
 
         self._market_prices = self._load_market_prices()
+        self._share_symbols = self._load_share_symbols()
 
         signals_by_symbol = self._load_open_signals_by_symbol(quotes_by_symbol.keys())
         if not signals_by_symbol:
@@ -691,20 +696,44 @@ class Command(BaseCommand):
         finally:
             self._release_symbol_lock(symbol, lock_token)
 
-    def _get_notification_threshold(self, signals=None):
+    def _load_share_symbols(self):
+        """Normalized symbols of all stock instruments, so shares use the share threshold
+        even when nobody has an open signal on them."""
+        from Signals.utils import MARKET_DATA_SYMBOLS_BY_CATEGORY
+
+        share_symbols = {
+            _normalize_symbol(symbol)
+            for category in ("shares", "menashares")
+            for symbol in MARKET_DATA_SYMBOLS_BY_CATEGORY.get(category, [])
+        }
+        try:
+            from Signals.models import Instrument
+
+            for symbol, asset_class_name in Instrument.objects.values_list("symbol", "asset_class__name"):
+                if str(asset_class_name or "").strip().lower() in _SHARE_ASSET_CLASS_NAMES:
+                    share_symbols.add(_normalize_symbol(symbol))
+        except Exception:
+            logger.exception("Could not load share instruments; using Signals.utils stock list only.")
+        return share_symbols
+
+    def _get_notification_threshold(self, symbol, signals=None):
+        share_symbols = getattr(self, "_share_symbols", None) or set()
+        if _symbol_alias_candidates(symbol) & share_symbols:
+            return self.share_threshold
         if signals:
             for signal in signals:
                 instrument = getattr(signal, "instrument", None)
                 asset_class = getattr(instrument, "asset_class", None)
                 asset_class_name = str(getattr(asset_class, "name", "") or "").strip().lower()
-                if asset_class_name in {"share", "shares", "stock", "stocks", "equity", "equities"}:
+                if asset_class_name in _SHARE_ASSET_CLASS_NAMES:
                     return self.share_threshold
         return self.threshold
 
     def _maybe_notify_symbol_locked(self, symbol, direction, change_percentage, quote, signals):
         previous = self._get_symbol_state(symbol)
         abs_percentage = abs(change_percentage)
-        effective_threshold = self._get_notification_threshold(signals)
+        effective_threshold = self._get_notification_threshold(symbol, signals)
+        effective_step = self.share_step if effective_threshold == self.share_threshold else effective_threshold
 
         if abs_percentage <= self.reset_threshold:
             if previous:
@@ -716,7 +745,7 @@ class Command(BaseCommand):
                     )
             return 0
 
-        step_count = int((abs_percentage / effective_threshold).to_integral_value(rounding=ROUND_FLOOR))
+        step_count = _step_count_for(abs_percentage, effective_threshold, effective_step)
         if step_count <= 0:
             return 0
 
@@ -735,7 +764,7 @@ class Command(BaseCommand):
                     % (
                         symbol,
                         direction,
-                        _format_percent(effective_threshold * Decimal(previous_step_count)),
+                        _format_percent(_step_percentage(previous_step_count, effective_threshold, effective_step)),
                     )
                 )
             return 0
@@ -751,7 +780,7 @@ class Command(BaseCommand):
                     symbol,
                 )
                 break
-            crossed_percentage = effective_threshold * Decimal(crossed_step_count)
+            crossed_percentage = _step_percentage(crossed_step_count, effective_threshold, effective_step)
             crossed_level_key = _level_key(crossed_percentage)
             if crossed_level_key in notified_levels.get(direction, set()):
                 highest_notified_step_count = crossed_step_count
