@@ -348,8 +348,11 @@ class UserNotification(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+        # Match the notification list query (user + is_deleted [+ is_read], newest first) so
+        # SQL Server can seek straight to the page instead of sorting every row for the user.
         indexes = [
-            models.Index(fields=["user", "is_read"]),
+            models.Index(fields=["user", "is_deleted", "is_read", "-created_at"], name="notif_user_del_read_created"),
+            models.Index(fields=["user", "is_deleted", "-created_at"], name="notif_user_del_created"),
         ]
 
     def __str__(self):
