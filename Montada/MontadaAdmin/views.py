@@ -3331,13 +3331,15 @@ class AdminFCMBroadcastView(APIView):
         token_strings = get_push_tokens_for_users(recipient_list)
         device_tokens_found = len(token_strings)
 
-        # ── Send FCM push ────────────────────────────────────────────────────
+        # ── Queue FCM push ───────────────────────────────────────────────────
+        # Sent on a background worker so a broadcast to many devices does not block the
+        # admin request. fcm_success / fcm_failure stay 0; results go to the server log.
         fcm_success = 0
         fcm_failure = 0
         if token_strings:
             try:
-                from firebase import send_push_to_tokens
-                fcm_result = send_push_to_tokens(
+                from firebase import send_push_to_tokens_in_background
+                send_push_to_tokens_in_background(
                     tokens=token_strings,
                     title=title,
                     body=message,
@@ -3347,23 +3349,10 @@ class AdminFCMBroadcastView(APIView):
                         "redirect_url": redirect_url or "",
                     },
                 )
-                fcm_success = fcm_result.get("success_count", 0)
-                fcm_failure = fcm_result.get("failure_count", 0)
-                if fcm_failure:
-                    logger.warning(
-                        "Admin broadcast FCM partial failure. segment=%s category=%s "
-                        "recipients=%s tokens=%s success=%s failure=%s",
-                        segment,
-                        category,
-                        recipient_count,
-                        device_tokens_found,
-                        fcm_success,
-                        fcm_failure,
-                    )
             except Exception:
                 # FCM failure is non-fatal — DB notifications already saved
                 logger.exception(
-                    "Admin broadcast FCM send failed. segment=%s category=%s "
+                    "Admin broadcast FCM queue failed. segment=%s category=%s "
                     "recipients=%s tokens=%s",
                     segment,
                     category,
@@ -3374,7 +3363,7 @@ class AdminFCMBroadcastView(APIView):
 
         return Response(
             {
-                "message": "Notification saved and push sent." if device_tokens_found else "Notification saved. No device tokens registered for recipients.",
+                "message": "Notification saved and push queued." if device_tokens_found else "Notification saved. No device tokens registered for recipients.",
                 "segment": segment,
                 "category": category,
                 "title": title,

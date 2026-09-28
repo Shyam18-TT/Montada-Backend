@@ -24,6 +24,7 @@ send_push_to_users(
 )
 """
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -310,4 +311,77 @@ def send_push_to_users(
         body=body,
         data=data,
         image_url=image_url,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Background sending (keeps FCM network calls out of the API request)
+# ---------------------------------------------------------------------------
+
+_PUSH_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="fcm-push")
+
+
+def _push_async_enabled() -> bool:
+    try:
+        from django.conf import settings
+
+        return bool(getattr(settings, "FCM_PUSH_ASYNC", True))
+    except Exception:
+        return True
+
+
+def _run_push_job(func, label, kwargs):
+    from django.db import connections
+
+    try:
+        result = func(**kwargs)
+        logger.info(
+            "FCM background %s done: success=%s failure=%s",
+            label,
+            result.get("success_count", 0),
+            result.get("failure_count", 0),
+        )
+    except Exception:
+        logger.exception("FCM background %s failed.", label)
+    finally:
+        # This worker thread opened its own DB connection (token lookup); release it.
+        connections.close_all()
+
+
+def _schedule_push(func, label, **kwargs):
+    if not _push_async_enabled():
+        return func(**kwargs)
+
+    def submit():
+        _PUSH_EXECUTOR.submit(_run_push_job, func, label, kwargs)
+
+    try:
+        from django.db import transaction
+
+        # Send only after the request's DB work is committed (runs now if not in a transaction).
+        transaction.on_commit(submit)
+    except Exception:
+        submit()
+    return None
+
+
+def send_push_to_users_in_background(users, title, body, data=None, image_url=None) -> None:
+    """Queue send_push_to_users() on a worker thread and return immediately."""
+    users = list(users or [])  # evaluate querysets in the caller's thread
+    if not users:
+        return None
+    return _schedule_push(
+        send_push_to_users, "send_push_to_users",
+        users=users, title=title, body=body, data=data, image_url=image_url,
+    )
+
+
+def send_push_to_tokens_in_background(tokens, title, body, data=None, image_url=None) -> None:
+    """Queue send_push_to_tokens() on a worker thread and return immediately."""
+    tokens = list(tokens or [])
+    if not tokens:
+        return None
+    return _schedule_push(
+        send_push_to_tokens, "send_push_to_tokens",
+        tokens=tokens, title=title, body=body, data=data, image_url=image_url,
     )

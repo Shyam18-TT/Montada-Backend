@@ -360,6 +360,51 @@ class FirebasePushPayloadTests(SimpleTestCase):
         self.assertEqual(message_kwargs["data"]["type"], "signal_change_threshold")
 
 
+class FirebaseBackgroundPushTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email="bg-push@example.com", username="bg-push@example.com", password="Testpass123!",
+        )
+
+    def test_push_is_queued_after_commit_and_request_does_not_wait(self):
+        import firebase
+
+        with patch.object(firebase._PUSH_EXECUTOR, "submit") as submit, \
+                patch("firebase.send_push_to_users") as send:
+            with self.captureOnCommitCallbacks(execute=False) as callbacks:
+                result = firebase.send_push_to_users_in_background(
+                    User.objects.filter(id=self.user.id), "t", "b", data={"type": "x"},
+                )
+            self.assertIsNone(result)
+            submit.assert_not_called()  # nothing sent before the transaction commits
+            for callback in callbacks:
+                callback()
+        submit.assert_called_once()
+        func, label, kwargs = submit.call_args.args[1:]
+        self.assertIs(func, send)
+        self.assertEqual(kwargs["users"], [self.user])  # queryset evaluated in the caller
+        send.assert_not_called()  # the actual FCM call happens on the worker
+
+    def test_sync_mode_setting_sends_immediately(self):
+        import firebase
+
+        with self.settings(FCM_PUSH_ASYNC=False), patch(
+            "firebase.send_push_to_tokens", return_value={"success_count": 1, "failure_count": 0}
+        ) as send:
+            result = firebase.send_push_to_tokens_in_background(["tok"], "t", "b")
+        send.assert_called_once()
+        self.assertEqual(result["success_count"], 1)
+
+    def test_worker_job_logs_errors_and_releases_db_connection(self):
+        import firebase
+
+        failing = Mock(side_effect=RuntimeError("fcm down"))
+        with patch("django.db.connections.close_all") as close_all, \
+                self.assertLogs("firebase", level="ERROR"):
+            firebase._run_push_job(failing, "send_push_to_tokens", {"tokens": ["tok"]})
+        close_all.assert_called_once()
+
+
 class SignalFollowerNotificationTests(TestCase):
     def setUp(self):
         self.analyst = User.objects.create_user(

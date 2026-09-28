@@ -137,16 +137,17 @@ def _send_push_notifications(users, *, title, body, data):
     if not users:
         return
     try:
-        from firebase import send_push_to_users
+        from firebase import send_push_to_users_in_background
 
-        send_push_to_users(
+        # Queued on a worker thread so the API response does not wait on FCM.
+        send_push_to_users_in_background(
             users=users,
             title=title,
             body=body,
             data=data,
         )
     except Exception:
-        logger.exception("Failed to send push notifications.")
+        logger.exception("Failed to queue push notifications.")
 
 
 def _get_signal_notification_recipients(analyst):
@@ -1084,21 +1085,21 @@ class SignalPushNotificationView(generics.GenericAPIView):
         except Exception as exc:
             tokens_error = str(exc)
 
-        # ── Send via Firebase (non-fatal) ────────────────────────────────────
+        # ── Queue Firebase send (non-fatal) ──────────────────────────────────
+        # The push runs on a background worker so this request does not wait on FCM.
+        # success_count / failure_count stay 0 here; delivery results go to the server log.
         fcm_success = 0
         fcm_failure = 0
         fcm_error = None
         if token_strings:
             try:
-                from firebase import send_push_to_tokens
-                result = send_push_to_tokens(
+                from firebase import send_push_to_tokens_in_background
+                send_push_to_tokens_in_background(
                     tokens=token_strings,
                     title=title,
                     body=body,
                     data=data_payload,
                 )
-                fcm_success = result.get("success_count", 0)
-                fcm_failure = result.get("failure_count", 0)
             except Exception as exc:
                 fcm_error = str(exc)
                 fcm_failure = device_tokens_found
@@ -1107,13 +1108,13 @@ class SignalPushNotificationView(generics.GenericAPIView):
         if db_error and tokens_error:
             msg = "Both DB save and token lookup failed."
         elif db_error:
-            msg = "DB save failed; push attempted."
+            msg = "DB save failed; push queued."
         elif device_tokens_found == 0:
             msg = "Notification saved. No device tokens registered for recipients."
         elif fcm_error:
-            msg = "Notification saved. FCM push failed."
+            msg = "Notification saved. FCM push could not be queued."
         else:
-            msg = "Notification saved and push sent."
+            msg = "Notification saved and push queued."
 
         response_data = {
             "message": msg,
