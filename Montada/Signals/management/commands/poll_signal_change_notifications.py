@@ -431,15 +431,22 @@ class Command(BaseCommand):
         return prices
 
     def _get_current_price(self, symbol, quote):
+        """
+        Price shown in the notification. It comes from the same quote as change_percentage,
+        so "down 7.37%, trading at X" is one consistent snapshot. The MT5 stream snapshot is
+        used only for the symbol's decimal digits, or as the price if the quote has no bid.
+        """
         market_prices = getattr(self, "_market_prices", None) or {}
         candidates = [symbol] + sorted(_symbol_alias_candidates(symbol) - {symbol})
-        for candidate in candidates:
-            tick = market_prices.get(candidate)
-            if tick:
-                price = _format_price(tick.get("bid"), tick.get("digits"))
-                if price:
-                    return price
-        return _format_price(quote.get("bid"))
+        tick = next((market_prices[c] for c in candidates if market_prices.get(c)), None)
+        digits = tick.get("digits") if tick else None
+
+        price = _format_price(quote.get("bid"), digits)
+        if price:
+            return price
+        if tick:
+            return _format_price(tick.get("bid"), digits)
+        return ""
 
     def _print_open_signals_by_symbol(self):
         """Print all open signals grouped by normalized symbol for debugging."""
@@ -776,20 +783,17 @@ class Command(BaseCommand):
         sent_count = 0
         highest_notified_step_count = previous_step_count
         notification_history = self._serialize_notification_history(previous)
+        now_ts = int(time.time())
+
+        # Levels crossed since the last notification that have not been notified yet.
+        pending_levels = []
         for crossed_step_count in self._crossed_step_counts(previous_step_count, step_count):
-            if self._notification_batches_this_poll >= self.max_notification_batches:
-                logger.warning(
-                    "Signal change notification batch limit reached (%s). Last processed symbol=%s.",
-                    self.max_notification_batches,
-                    symbol,
-                )
-                break
             crossed_percentage = _step_percentage(crossed_step_count, effective_threshold, effective_step)
             crossed_level_key = _level_key(crossed_percentage)
             if crossed_level_key in notified_levels.get(direction, set()):
                 highest_notified_step_count = crossed_step_count
                 continue
-            if self._is_level_notification_in_cooldown(direction, crossed_level_key, previous, int(time.time())):
+            if self._is_level_notification_in_cooldown(direction, crossed_level_key, previous, now_ts):
                 if self.verbose:
                     self.stdout.write(
                         "Skip %s: %s %s%% already notified within %ss."
@@ -802,21 +806,36 @@ class Command(BaseCommand):
                     )
                 highest_notified_step_count = crossed_step_count
                 continue
-            signed_crossed_percentage = crossed_percentage if direction == "up" else -crossed_percentage
-            if self._notify_all_users(
-                symbol=symbol,
-                direction=direction,
-                signed_crossed_percentage=signed_crossed_percentage,
-                crossed_percentage=crossed_percentage,
-                current_percentage=change_percentage,
-                quote=quote,
-                signal_ids=[signal.id for signal in signals],
-            ):
-                sent_count += 1
-                self._notification_batches_this_poll += 1
-                highest_notified_step_count = crossed_step_count
-                notified_levels.setdefault(direction, set()).add(crossed_level_key)
-                notification_history.setdefault(direction, {})[crossed_level_key] = int(time.time())
+            pending_levels.append((crossed_step_count, crossed_percentage, crossed_level_key))
+
+        # A move that jumps several levels at once (e.g. -0.3% -> -7.37%) sends ONE
+        # notification for the highest level reached; the lower levels are marked as covered
+        # instead of each producing its own push with the same price.
+        if pending_levels:
+            if self._notification_batches_this_poll >= self.max_notification_batches:
+                logger.warning(
+                    "Signal change notification batch limit reached (%s). Last processed symbol=%s.",
+                    self.max_notification_batches,
+                    symbol,
+                )
+            else:
+                top_step_count, top_percentage, _ = pending_levels[-1]
+                signed_top_percentage = top_percentage if direction == "up" else -top_percentage
+                if self._notify_all_users(
+                    symbol=symbol,
+                    direction=direction,
+                    signed_crossed_percentage=signed_top_percentage,
+                    crossed_percentage=top_percentage,
+                    current_percentage=change_percentage,
+                    quote=quote,
+                    signal_ids=[signal.id for signal in signals],
+                ):
+                    sent_count = 1
+                    self._notification_batches_this_poll += 1
+                    highest_notified_step_count = top_step_count
+                    for _, _, level_key in pending_levels:
+                        notified_levels.setdefault(direction, set()).add(level_key)
+                        notification_history.setdefault(direction, {})[level_key] = now_ts
 
         state_step_count = highest_notified_step_count if sent_count else step_count
         self._set_symbol_state(
@@ -856,16 +875,11 @@ class Command(BaseCommand):
             return False
 
         crossed_label = _format_percent(crossed_percentage)
-        signed_crossed_label = _format_percent(signed_crossed_percentage)
-        current_label = _format_percent(current_percentage)
         current_price = self._get_current_price(symbol, quote)
         title = "%s %s %s%%" % (symbol, direction, crossed_label)
-        message = (
-            "%s passed %s%% (%s). Current change: %s%%."
-            % (symbol, signed_crossed_label, direction, current_label)
-        )
-        if current_price:
-            message += " Current price: %s." % current_price
+        # e.g. "BCHUSD is down 7.37%, trading at 308.615."
+        message = "%s is %s %s%%" % (symbol, direction, _format_percent(abs(current_percentage)))
+        message += ", trading at %s." % current_price if current_price else "."
         notification_type = "SUCCESS" if direction == "up" else "WARNING"
 
         # Check for recent duplicates to prevent re-sends if cache failed

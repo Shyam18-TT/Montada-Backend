@@ -198,6 +198,49 @@ class SignalChangeNotificationThresholdTests(TestCase):
         self.assertEqual(push.call_args.kwargs["title"], "EURUSD up 0.5%")
         self.assertEqual(push.call_args.kwargs["data"]["type"], "signal_change_threshold")
 
+    def test_poll_jump_across_many_levels_sends_single_notification(self):
+        from Mainapp.models import UserNotification
+
+        User.objects.create_user(
+            email="jump@example.com", username="jump@example.com",
+            password="Testpass123!", user_type="trader",
+        )
+        command = self._make_poll_command()
+        push = Mock(return_value={"success_count": 1, "failure_count": 0, "failed_tokens": [], "errors": []})
+
+        def poll(change, bid):
+            quotes = {"BCHUSD": {"change_percentage": change, "dir": "down", "bid": bid, "ask": bid}}
+            with patch(
+                "Signals.management.commands.poll_signal_change_notifications._fetch_live_quotes",
+                return_value=quotes,
+            ), patch("firebase.send_push_to_users", push):
+                command._run_poll()
+
+        poll("-7.37", "308.615")  # crosses 0.5% ... 7% in one move
+        push.assert_called_once()
+        self.assertEqual(push.call_args.kwargs["title"], "BCHUSD down 7%")
+        self.assertEqual(push.call_args.kwargs["body"], "BCHUSD is down 7.37%, trading at 308.615.")
+        self.assertEqual(UserNotification.objects.count(), 1)
+
+        poll("-7.45", "308.1")  # still below the next level: nothing new
+        self.assertEqual(push.call_count, 1)
+
+        poll("-8.1", "305.9")  # next level only
+        self.assertEqual(push.call_count, 2)
+        self.assertEqual(push.call_args.kwargs["title"], "BCHUSD down 8%")
+        self.assertEqual(push.call_args.kwargs["body"], "BCHUSD is down 8.1%, trading at 305.9.")
+
+    def test_current_price_comes_from_same_quote_as_change(self):
+        command = self._make_poll_command()
+        command._market_prices = {"BCHUSD": {"bid": 311.2, "digits": 3}}
+        # Quote price wins (same source as change_percentage); snapshot supplies the digits.
+        self.assertEqual(command._get_current_price("BCHUSD", {"bid": "308.6150000"}), "308.615")
+        # No bid in the quote: fall back to the fresh stream price.
+        self.assertEqual(command._get_current_price("BCHUSD", {}), "311.200")
+        command._market_prices = {}
+        self.assertEqual(command._get_current_price("BCHUSD", {"bid": "308.6150000"}), "308.615")
+        self.assertEqual(command._get_current_price("BCHUSD", {}), "")
+
     def test_poll_push_payload_stays_under_fcm_limit_with_many_signals(self):
         User.objects.create_user(
             email="payload@example.com", username="payload@example.com",
