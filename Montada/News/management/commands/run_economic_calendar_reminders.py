@@ -27,12 +27,12 @@ import time
 from datetime import timedelta
 from django.core.management.base import BaseCommand
 from django.utils import timezone
-from django.db import transaction
 from django.db.models import Exists, OuterRef
 from django.contrib.auth import get_user_model
 
 from News.models import EconomicCalendarEvent, EconomicCalendarReminder, EconomicCalendarEventNotification
 from Mainapp.models import UserNotification
+from Mainapp.notifications import bulk_create_user_notifications
 from firebase import send_push_to_users
 
 try:
@@ -438,14 +438,15 @@ class Command(BaseCommand):
             "minutes_before": str(minutes_before),
         }
 
-        with transaction.atomic():
-            UserNotification.objects.bulk_create(notifications_to_create)
-            send_push_to_users(
-                users=users,
-                title=title,
-                body=body,
-                data=data_payload,
-            )
+        # Short committed chunks; the FCM call runs outside any transaction so the
+        # notification rows are not left locked while the push goes out.
+        bulk_create_user_notifications(notifications_to_create)
+        send_push_to_users(
+            users=users,
+            title=title,
+            body=body,
+            data=data_payload,
+        )
 
         logger.info(
             f"Sent global advance reminder ({minutes_before} min) to {len(users)} users "
@@ -632,16 +633,17 @@ class Command(BaseCommand):
             for user in users
         ]
 
-        with transaction.atomic():
-            UserNotification.objects.bulk_create(notifications_to_create)
+        # Short committed chunks; the FCM call runs outside any transaction so the
+        # notification rows are not left locked while the push goes out.
+        bulk_create_user_notifications(notifications_to_create)
 
-            # Send FCM push to all users
-            send_push_to_users(
-                users=users,
-                title=title,
-                body=body,
-                data=data_payload,
-            )
+        # Send FCM push to all users
+        send_push_to_users(
+            users=users,
+            title=title,
+            body=body,
+            data=data_payload,
+        )
         
         # Mark as sent AFTER successful delivery (in separate transaction)
         if mark_sent:

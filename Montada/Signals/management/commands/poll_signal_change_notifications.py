@@ -861,6 +861,7 @@ class Command(BaseCommand):
     ):
         from django.contrib.auth import get_user_model
         from Mainapp.models import UserNotification
+        from Mainapp.notifications import bulk_create_user_notifications
 
         User = get_user_model()
         users = list(User.objects.filter(is_active=True).distinct())
@@ -909,7 +910,7 @@ class Command(BaseCommand):
                     category="TRADING_SIGNAL",
                 )
             )
-        UserNotification.objects.bulk_create(notifications, batch_size=1000)
+        bulk_create_user_notifications(notifications)
 
         try:
             from Dashboard.realtime import broadcast_notifications

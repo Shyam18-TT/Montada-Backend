@@ -3294,6 +3294,7 @@ class AdminFCMBroadcastView(APIView):
         notification_type = _PUSH_CATEGORY_MAP.get(category, "INFO")
         try:
             from Mainapp.models import UserNotification
+            from Mainapp.notifications import bulk_create_user_notifications
             created_notifications = [
                 UserNotification(
                     user=user,
@@ -3305,7 +3306,7 @@ class AdminFCMBroadcastView(APIView):
                 )
                 for user in recipient_list
             ]
-            UserNotification.objects.bulk_create(created_notifications)
+            bulk_create_user_notifications(created_notifications)
             broadcast_notifications(
                 UserNotification.objects.filter(
                     id__in=[notification.id for notification in created_notifications]

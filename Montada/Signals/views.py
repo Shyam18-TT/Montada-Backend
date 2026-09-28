@@ -109,6 +109,7 @@ def _create_and_broadcast_notifications(users, *, title, body, notification_type
         return
     try:
         from Mainapp.models import UserNotification
+        from Mainapp.notifications import bulk_create_user_notifications
 
         created_notifications = [
             UserNotification(
@@ -121,7 +122,7 @@ def _create_and_broadcast_notifications(users, *, title, body, notification_type
             )
             for user in users
         ]
-        UserNotification.objects.bulk_create(created_notifications)
+        bulk_create_user_notifications(created_notifications)
         broadcast_notifications(
             UserNotification.objects.filter(
                 id__in=[notification.id for notification in created_notifications]
@@ -1051,6 +1052,7 @@ class SignalPushNotificationView(generics.GenericAPIView):
         db_error = None
         try:
             from Mainapp.models import UserNotification
+            from Mainapp.notifications import bulk_create_user_notifications
             created_notifications = [
                 UserNotification(
                     user=recipient,
@@ -1061,7 +1063,7 @@ class SignalPushNotificationView(generics.GenericAPIView):
                 )
                 for recipient in recipient_list
             ]
-            UserNotification.objects.bulk_create(created_notifications)
+            bulk_create_user_notifications(created_notifications)
             broadcast_notifications(
                 UserNotification.objects.filter(
                     id__in=[notification.id for notification in created_notifications]

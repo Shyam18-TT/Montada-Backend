@@ -181,7 +181,10 @@ def _flush_news_notification_batch(
         )
         for user in users
     ]
-    user_notification_model.objects.bulk_create(created_notifications)
+    # Insert in short committed chunks so recipients' notification lists are not
+    # blocked for the duration of one large insert.
+    for start in range(0, len(created_notifications), 500):
+        user_notification_model.objects.bulk_create(created_notifications[start:start + 500])
     broadcast_notifications(
         user_notification_model.objects.filter(
             id__in=[notification.id for notification in created_notifications]
