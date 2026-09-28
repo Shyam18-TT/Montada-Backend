@@ -2466,79 +2466,11 @@ def _admin_row_val(row, *keys):
     return None
 
 
-def _admin_enrich_market_row(row, default_round_digits=4):
-    """
-    Add extra fields to DB row to match Dashboard GetMarketDataFromMT5: dir, bid, ask, digits,
-    flag, ask_today, bid_today, change, change_percentage.
-    dir from AskDir (0=down, else up); change = ask_current - ask_today;
-    change_symbol = "+" if change >= 0 else ""; percentage_symbol = "" if change >= 0 else "-".
-    """
-    symbol_val = _admin_row_val(row, 'Symbol', 'symbol')
-    symbol = (symbol_val or '').strip() if symbol_val is not None else ''
-    ask_last_val = _admin_row_val(row, 'AskLast')
-    bid_last_val = _admin_row_val(row, 'BidLast')
-    ask_dir_val = _admin_row_val(row, 'AskDir')
-    ask_today_val = _admin_row_val(row, 'AskOpen', 'Open', 'ask_open')
-    if ask_today_val is None:
-        ask_today_val = _admin_row_val(row, 'AskLow')
-    if ask_today_val is None:
-        ask_today_val = ask_last_val
-    bid_today_val = _admin_row_val(row, 'BidOpen', 'bid_open')
-    if bid_today_val is None:
-        bid_today_val = _admin_row_val(row, 'BidLow')
-    if bid_today_val is None:
-        bid_today_val = bid_last_val
+def _admin_enrich_market_row(row, default_round_digits=4, open_prices=None):
+    """Same live-quote fields and website-matching change as Dashboard GetMarketDataFromMT5."""
+    from Dashboard.views import _enrich_market_row
 
-    digits_val = _admin_row_val(row, 'Digits')
-    try:
-        round_digits = int(digits_val) if digits_val is not None else default_round_digits
-    except (TypeError, ValueError):
-        round_digits = default_round_digits
-
-    try:
-        bid_last = float(bid_last_val) if bid_last_val is not None else None
-        ask_last = float(ask_last_val) if ask_last_val is not None else None
-        ask_today = float(ask_today_val) if ask_today_val is not None else None
-        bid_today = float(bid_today_val) if bid_today_val is not None else None
-    except (TypeError, ValueError):
-        bid_last = ask_last = ask_today = bid_today = None
-
-    bid = round(bid_last, round_digits) if bid_last is not None else None
-    ask = round(ask_last, round_digits) if ask_last is not None else None
-    ask_today_rounded = round(ask_today, round_digits) if ask_today is not None else None
-
-    row['bid'] = bid
-    row['ask'] = ask
-    row['digits'] = round_digits
-    row['flag'] = f"{symbol[0:2]}|{symbol[3:5]}" if len(symbol) >= 6 else ""
-
-    row['ask_today'] = ask_today_rounded
-    row['bid_today'] = round(bid_today, round_digits) if bid_today is not None else None
-
-    try:
-        ask_dir = ask_dir_val if ask_dir_val is None else int(float(ask_dir_val))
-    except (TypeError, ValueError):
-        ask_dir = None
-    if ask_dir is not None:
-        row['dir'] = 'down' if ask_dir == 0 else 'up'
-    else:
-        row['dir'] = 'up'
-
-    if ask is None or ask_today_rounded is None:
-        row['change'] = '0'
-        row['change_percentage'] = '0'
-        return row
-
-    ask_current = ask
-    change = ask_current - ask_today_rounded
-    change_absolute = abs(change)
-    change_percentage = (change_absolute / ask_today_rounded) * 100 if ask_today_rounded else 0
-
-    change_symbol = "+" if change >= 0 else ""
-    percentage_symbol = "" if change >= 0 else "-"
-    row['change'] = f"{change_symbol}{round(change, 4)}"
-    row['change_percentage'] = f"{percentage_symbol}{round(change_percentage, 2)}"
-    return row
+    return _enrich_market_row(row, default_round_digits=default_round_digits, open_prices=open_prices)
 
 
 class AdminGetMarketDataFromMT5(APIView):
@@ -2586,11 +2518,14 @@ class AdminGetMarketDataFromMT5(APIView):
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
 
+        from Signals.market_stream import get_trustcapital_open_prices_cached
+
+        open_prices = get_trustcapital_open_prices_cached()
         arr_symbols = {}
         for row in rows:
             row_dict = dict(zip(columns, row))
             item = {k: _admin_serialize_market_value(v) for k, v in row_dict.items()}
-            _admin_enrich_market_row(item, default_round_digits=4)
+            _admin_enrich_market_row(item, default_round_digits=4, open_prices=open_prices)
             symbol = _admin_row_val(item, 'Symbol', 'symbol') or ''
             symbol = symbol.strip() if isinstance(symbol, str) else str(symbol)
             if not symbol:

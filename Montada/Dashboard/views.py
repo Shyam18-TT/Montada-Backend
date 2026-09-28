@@ -507,29 +507,21 @@ def _row_val(row, *keys):
     return None
 
 
-def _enrich_market_row(row, default_round_digits=4):
+def _enrich_market_row(row, default_round_digits=4, open_prices=None):
     """
-    Add extra fields to DB row to match get_live_quotes_mt5 logic: dir, bid, ask, digits,
+    Add the website's GetLiveQuotesMT5 fields to an mt5_prices row: dir, bid, ask, digits,
     flag, ask_today, bid_today, change, change_percentage.
-    dir from AskDir (0=down, else up); change = ask_current - ask_today;
-    change_symbol = "+" if change >= 0 else ""; percentage_symbol = "" if change >= 0 else "-".
+
+    ask_today / bid_today are the website's reference prices (open_prices, from its price
+    API) and the change is bid vs bid_today, computed exactly like the PHP code.
     """
-    # mt5_prices columns: Symbol, AskLast, BidLast, AskDir, AskHigh, AskLow, BidHigh, BidLow, ...
+    from Signals.market_stream import calculate_daily_change, php_round
+
     symbol_val = _row_val(row, 'Symbol', 'symbol')
     symbol = (symbol_val or '').strip() if symbol_val is not None else ''
     ask_last_val = _row_val(row, 'AskLast')
     bid_last_val = _row_val(row, 'BidLast')
     ask_dir_val = _row_val(row, 'AskDir')
-    ask_today_val = _row_val(row, 'AskOpen', 'Open', 'ask_open')
-    if ask_today_val is None:
-        ask_today_val = _row_val(row, 'AskLow')
-    if ask_today_val is None:
-        ask_today_val = ask_last_val
-    bid_today_val = _row_val(row, 'BidOpen', 'bid_open')
-    if bid_today_val is None:
-        bid_today_val = _row_val(row, 'BidLow')
-    if bid_today_val is None:
-        bid_today_val = bid_last_val
 
     digits_val = _row_val(row, 'Digits')
     try:
@@ -540,50 +532,32 @@ def _enrich_market_row(row, default_round_digits=4):
     try:
         bid_last = float(bid_last_val) if bid_last_val is not None else None
         ask_last = float(ask_last_val) if ask_last_val is not None else None
-        ask_today = float(ask_today_val) if ask_today_val is not None else None
-        bid_today = float(bid_today_val) if bid_today_val is not None else None
     except (TypeError, ValueError):
-        bid_last = ask_last = ask_today = bid_today = None
+        bid_last = ask_last = None
 
-    # Rounded bid/ask: bid = round(bid_last, digits), ask = round(ask_last, digits)
-    bid = round(bid_last, round_digits) if bid_last is not None else None
-    ask = round(ask_last, round_digits) if ask_last is not None else None
-    ask_today_rounded = round(ask_today, round_digits) if ask_today is not None else None
-
-    # Extra fields from get_live_quotes_mt5: bid, ask, digits, flag
-    row['bid'] = bid
-    row['ask'] = ask
+    row['bid'] = php_round(bid_last, round_digits) if bid_last is not None else None
+    row['ask'] = php_round(ask_last, round_digits) if ask_last is not None else None
     row['digits'] = round_digits
     row['flag'] = f"{symbol[0:2]}|{symbol[3:5]}" if len(symbol) >= 6 else ""
-
-    row['ask_today'] = ask_today_rounded
-    row['bid_today'] = round(bid_today, round_digits) if bid_today is not None else None
 
     # dir from AskDir: "down" if ask_dir == 0 else "up"
     try:
         ask_dir = ask_dir_val if ask_dir_val is None else int(float(ask_dir_val))
     except (TypeError, ValueError):
         ask_dir = None
-    if ask_dir is not None:
-        row['dir'] = 'down' if ask_dir == 0 else 'up'
-    else:
-        row['dir'] = 'up'
+    row['dir'] = ('down' if ask_dir == 0 else 'up') if ask_dir is not None else 'up'
 
-    if ask is None or ask_today_rounded is None:
+    today = (open_prices or {}).get(symbol.upper()) or {}
+    row['ask_today'] = today.get('ask_today')
+    row['bid_today'] = today.get('bid_today')
+
+    daily = calculate_daily_change(bid_last, today.get('bid_today'), round_digits)
+    if daily is None:
         row['change'] = '0'
         row['change_percentage'] = '0'
         return row
-
-    # Daily change: change = ask_current - ask_today; change_percentage = (|change|/ask_today)*100
-    ask_current = ask
-    change = ask_current - ask_today_rounded
-    change_absolute = abs(change)
-    change_percentage = (change_absolute / ask_today_rounded) * 100 if ask_today_rounded else 0
-
-    change_symbol = "+" if change >= 0 else ""
-    percentage_symbol = "" if change >= 0 else "-"
-    row['change'] = f"{change_symbol}{round(change, 4)}"
-    row['change_percentage'] = f"{percentage_symbol}{round(change_percentage, 2)}"
+    row['change'] = daily['change_text']
+    row['change_percentage'] = daily['change_percentage_text']
     return row
 
 
@@ -638,11 +612,14 @@ class GetMarketDataFromMT5(APIView):
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
 
+        from Signals.market_stream import get_trustcapital_open_prices_cached
+
+        open_prices = get_trustcapital_open_prices_cached()
         arr_symbols = {}
         for row in rows:
             row_dict = dict(zip(columns, row))
             item = {k: _serialize_value(v) for k, v in row_dict.items()}
-            _enrich_market_row(item, default_round_digits=4)
+            _enrich_market_row(item, default_round_digits=4, open_prices=open_prices)
             symbol = _row_val(item, 'Symbol', 'symbol') or ''
             symbol = symbol.strip() if isinstance(symbol, str) else str(symbol)
             if not symbol:

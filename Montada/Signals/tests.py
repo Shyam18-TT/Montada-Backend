@@ -302,6 +302,69 @@ class MarketStreamTests(SimpleTestCase):
         )
         self.assertIn("received_at", payload)
 
+    # (symbol, bid, bid_today, digits, change, change_percentage) exactly as returned by the
+    # website's PHP GetLiveQuotesMT5 (trustcapital.com/api/get-MT5-price) on 2026-09-28.
+    WEBSITE_CHANGE_SAMPLES = [
+        ("EURUSD", 1.13721, 1.13903, "5", "-0.0018", "-0.16"),
+        ("USDCAD", 1.41649, 1.41387, "5", "+0.0026", "0.19"),
+        ("AUDUSD", 0.7022, 0.70234, "5", "-0.0001", "-0.02"),
+        ("NZDUSD", 0.56668, 0.56614, "5", "+0.0005", "0.1"),
+        ("CADCHF", 0.58747, 0.58571, "5", "+0.0018", "0.3"),
+        ("XLMUSD", 0.22782, 0.21581, "5", "+0.012", "5.57"),
+        ("DOGUSD", 0.09413, 0.0968, "5", "-0.0027", "-2.76"),
+        ("BMWG", 57.45, 57.45, "2", "+0", "0"),
+        ("BCHUSD", 313.12, 333.18, "3", "-20.06", "-6.02"),
+        ("USDJPY", 157.063, 157.26, "3", "-0.197", "-0.13"),
+        ("BTCUSD", 83281.57, 84517.41, "2", "-1235.84", "-1.46"),
+    ]
+
+    def test_daily_change_matches_website_php_exactly(self):
+        from Signals.market_stream import calculate_daily_change
+
+        for symbol, bid, bid_today, digits, change, change_percentage in self.WEBSITE_CHANGE_SAMPLES:
+            result = calculate_daily_change(bid, bid_today, digits)
+            self.assertEqual(result["change_text"], change, symbol)
+            self.assertEqual(result["change_percentage_text"], change_percentage, symbol)
+
+    def test_daily_change_uses_php_half_up_rounding(self):
+        from Signals.market_stream import php_round
+
+        self.assertEqual(php_round(0.285, 2), 0.29)  # Python round() gives 0.28
+        self.assertEqual(php_round(-0.125, 2), -0.13)
+        self.assertEqual(php_round(1.00005, 4), 1.0001)
+
+    def test_tick_without_todays_price_has_no_change(self):
+        payload = build_market_tick_payload("EURUSD", bid=1.1005, ask=1.1010, digits=5)
+        for key in ("change", "change_percentage", "daily_change", "daily_change_percentage"):
+            self.assertNotIn(key, payload)
+
+    def test_stream_tick_uses_website_reference_price_for_mixed_case_symbol(self):
+        from Signals.management.commands.run_market_data_stream import Command as StreamCommand
+
+        command = StreamCommand()
+        command._latest_ticks = {}
+        command._symbol_digits = {"ADNOC.Gas": 3}
+        # fetch_trustcapital_open_prices keys are uppercased.
+        command._open_prices = {"ADNOC.GAS": {"bid_today": 3.2, "ask_today": 3.21}}
+        payload = command._build_tick("ADNOC.Gas", 3.264, 3.27)
+        self.assertEqual(payload["bid_open"], 3.2)
+        self.assertEqual(payload["change_percentage"], "2")
+        self.assertEqual(payload["change"], "+0.064")
+
+        # No reference price: no invented 0% change.
+        command._open_prices = {}
+        self.assertNotIn("change_percentage", command._build_tick("ADNOC.Gas", 3.264, 3.27))
+
+    def test_live_quote_endpoint_row_uses_bid_vs_website_bid_today(self):
+        from Dashboard.views import _enrich_market_row
+
+        row = {"Symbol": "BCHUSD", "BidLast": 313.12, "AskLast": 313.5, "AskDir": 0, "Digits": 3,
+               "AskLow": 300.0, "BidLow": 299.9}
+        _enrich_market_row(row, open_prices={"BCHUSD": {"bid_today": 333.18, "ask_today": 333.6}})
+        self.assertEqual(row["bid_today"], 333.18)
+        self.assertEqual(row["change"], "-20.06")
+        self.assertEqual(row["change_percentage"], "-6.02")  # not measured from the day's low
+
     @patch("Signals.market_stream.urlopen")
     def test_fetch_trustcapital_open_prices(self, mock_urlopen):
         class FakeResponse:

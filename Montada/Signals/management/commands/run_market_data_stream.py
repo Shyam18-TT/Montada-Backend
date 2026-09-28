@@ -62,6 +62,22 @@ def _is_allowed_symbol(symbol_info):
     return any(path.startswith(prefix) for prefix in ALLOWED_PATH_PREFIXES)
 
 
+def _extract_symbol_digits(symbol_info):
+    for attr in ("Digits", "digits"):
+        value = getattr(symbol_info, attr, None)
+        if value is not None:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+# How often today's reference prices (bid_today / ask_today) are re-read from the website's
+# price API, so the day rollover is picked up without restarting the stream.
+OPEN_PRICES_REFRESH_SECONDS = 60
+
+
 class Command(BaseCommand):
     help = "Stream MT5 Manager ticks and broadcast them over the market data websocket."
 
@@ -117,6 +133,10 @@ class Command(BaseCommand):
         self._pending_ticks = {}
         self._pending_ticks_lock = threading.Lock()
         self._latest_ticks = {}
+        # Website reference prices keyed by UPPERCASE symbol: {"bid_today": .., "ask_today": ..}
+        self._open_prices = {}
+        # MT5 symbol digits keyed by symbol name (PHP rounds with mt5 Digits).
+        self._symbol_digits = {}
         self._stop_dispatcher = threading.Event()
         self._last_broadcast_error_at = 0.0
         self._dispatcher_thread = threading.Thread(
@@ -155,6 +175,10 @@ class Command(BaseCommand):
                     for symbol_name in (_extract_symbol_name(item) for item in filtered_symbols)
                     if symbol_name
                 ]
+                for item in filtered_symbols:
+                    digits = _extract_symbol_digits(item)
+                    if digits is not None:
+                        self._symbol_digits[_extract_symbol_name(item)] = digits
                 self.stdout.write(
                     self.style.SUCCESS(
                         f"Loaded {len(raw_symbols)} symbol(s) from MT5 Manager; "
@@ -191,28 +215,17 @@ class Command(BaseCommand):
 
         if selected_symbols:
             try:
-                trustcapital_open_prices = fetch_trustcapital_open_prices(selected_symbols)
+                self._refresh_open_prices(selected_symbols)
                 initial_snapshot = load_market_snapshot_from_db(selected_symbols)
-                self._latest_ticks = {
-                    tick["symbol"]: tick
-                    for tick in initial_snapshot
-                    if tick.get("symbol")
-                }
-
-                for symbol, open_price in trustcapital_open_prices.items():
-                    latest = self._latest_ticks.get(symbol) or {}
-                    # If snapshot has digits, round the open prices to match PHP/MT5 behaviour
-                    digits = latest.get("digits")
-                    if latest.get("ask_open") is None and open_price.get("ask_today") is not None:
-                        latest["ask_open"] = (
-                            round(open_price["ask_today"], int(digits)) if digits is not None else open_price["ask_today"]
-                        )
-                    if latest.get("bid_open") is None and open_price.get("bid_today") is not None:
-                        latest["bid_open"] = (
-                            round(open_price["bid_today"], int(digits)) if digits is not None else open_price["bid_today"]
-                        )
-                    if symbol not in self._latest_ticks:
-                        self._latest_ticks[symbol] = latest
+                self._latest_ticks = {}
+                for tick in initial_snapshot:
+                    symbol = tick.get("symbol")
+                    if not symbol:
+                        continue
+                    if symbol not in self._symbol_digits and tick.get("digits") is not None:
+                        self._symbol_digits[symbol] = tick["digits"]
+                    # Rebuild with the website's reference prices so the change matches it.
+                    self._latest_ticks[symbol] = self._build_tick(symbol, tick.get("bid"), tick.get("ask"))
 
                 save_market_snapshot(self._latest_ticks.values())
                 self.stdout.write(
@@ -234,6 +247,12 @@ class Command(BaseCommand):
 
         self.stdout.write(self.style.SUCCESS("Market data websocket broadcasting is live."))
         self._dispatcher_thread.start()
+        threading.Thread(
+            target=self._open_prices_refresh_loop,
+            args=(selected_symbols,),
+            name="signals-market-open-prices",
+            daemon=True,
+        ).start()
 
         try:
             while True:
@@ -251,33 +270,55 @@ class Command(BaseCommand):
             manager.Disconnect()
             self.stdout.write(self.style.SUCCESS("Disconnected from MT5 Manager."))
 
+    def _refresh_open_prices(self, symbols):
+        """Reload bid_today / ask_today from the website's price API (keeps old values on failure)."""
+        open_prices = fetch_trustcapital_open_prices(symbols)
+        if open_prices:
+            self._open_prices = open_prices
+        else:
+            logger.warning("Could not refresh today's reference prices; keeping %d previous.", len(self._open_prices))
+        missing = [symbol for symbol in symbols if symbol.upper() not in self._open_prices]
+        if missing:
+            logger.warning(
+                "No bid_today from the price API for %d symbol(s); their change is not sent: %s",
+                len(missing),
+                ", ".join(missing[:20]),
+            )
+
+    def _open_prices_refresh_loop(self, symbols):
+        while not self._stop_dispatcher.wait(timeout=OPEN_PRICES_REFRESH_SECONDS):
+            try:
+                self._refresh_open_prices(symbols)
+            except Exception:
+                logger.exception("Refreshing today's reference prices failed.")
+
+    def _build_tick(self, symbol, bid, ask, tick_digits=None):
+        open_price = self._open_prices.get(str(symbol or "").strip().upper()) or {}
+        latest = self._latest_ticks.get(symbol) or {}
+        digits = self._symbol_digits.get(symbol)
+        if digits is None:
+            digits = tick_digits if tick_digits is not None else latest.get("digits")
+        return build_market_tick_payload(
+            symbol=symbol,
+            bid=bid,
+            ask=ask,
+            ask_open=open_price.get("ask_today"),
+            bid_open=open_price.get("bid_today"),
+            digits=digits,
+        )
+
     def _build_tick_sink(self):
         class TickSink:
             def OnTick(self, symbol, tick):  # noqa: N802 - MT5Manager callback naming
                 try:
-                    latest = self_outer._latest_ticks.get(symbol, {})
-                    ask = getattr(tick, "ask", None)
-                    bid = getattr(tick, "bid", None)
-                    ask_open = latest.get("ask_open") if latest else None
-                    bid_open = latest.get("bid_open") if latest else None
-                    # Determine digits: prefer tick attribute, then latest snapshot
-                    digits = (
-                        getattr(tick, "Digits", None)
-                        or getattr(tick, "digits", None)
-                        or latest.get("digits")
-                        or None
-                    )
-                    if ask_open is None and ask is not None:
-                        ask_open = ask
-                    if bid_open is None and bid is not None:
-                        bid_open = bid
-                    payload = build_market_tick_payload(
-                        symbol=symbol,
-                        bid=bid,
-                        ask=ask,
-                        ask_open=ask_open,
-                        bid_open=bid_open,
-                        digits=digits,
+                    tick_digits = getattr(tick, "Digits", None)
+                    if tick_digits is None:
+                        tick_digits = getattr(tick, "digits", None)
+                    payload = self_outer._build_tick(
+                        symbol,
+                        getattr(tick, "bid", None),
+                        getattr(tick, "ask", None),
+                        tick_digits=tick_digits,
                     )
                     with self_outer._pending_ticks_lock:
                         self_outer._pending_ticks[payload["symbol"]] = payload

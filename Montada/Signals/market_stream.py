@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timezone
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from urllib.error import HTTPError, URLError
@@ -78,22 +79,84 @@ def fetch_trustcapital_open_prices(symbols=None, url=DEFAULT_TRUSTCAPITAL_PRICE_
     return open_prices
 
 
-def calculate_daily_change(bid, bid_open):
+TRUSTCAPITAL_OPEN_PRICES_CACHE_KEY = "market:trustcapital-open-prices"
+TRUSTCAPITAL_OPEN_PRICES_CACHE_SECONDS = 60
+
+
+def get_trustcapital_open_prices_cached(timeout=15):
+    """
+    bid_today / ask_today for every symbol, as published by the website's price API
+    (the same reference prices the website's change_percentage uses). Cached briefly so
+    API requests do not each call the website; failures are not cached.
+    """
+    from django.core.cache import cache
+
     try:
-        bid_value = float(bid) if bid is not None else None
-        bid_open_value = float(bid_open) if bid_open is not None else None
-    except (TypeError, ValueError):
-        return None, None
+        cached = cache.get(TRUSTCAPITAL_OPEN_PRICES_CACHE_KEY)
+    except Exception:
+        cached = None
+    if cached:
+        return cached
 
-    if bid_value is None or bid_open_value is None:
-        return None, None
+    open_prices = fetch_trustcapital_open_prices(timeout=timeout)
+    if open_prices:
+        try:
+            cache.set(TRUSTCAPITAL_OPEN_PRICES_CACHE_KEY, open_prices, TRUSTCAPITAL_OPEN_PRICES_CACHE_SECONDS)
+        except Exception:
+            pass
+    return open_prices
 
-    # Match PHP logic used by the price API:
-    # change = bid_current - bid_today (rounded to 4 decimals)
-    # change_percentage = (abs(change) / bid_today) * 100 (rounded to 2 decimals)
-    change = round(bid_value - bid_open_value, 4)
-    change_percentage = round((abs(change) / bid_open_value) * 100, 2) if bid_open_value else 0.0
-    return change, change_percentage
+
+def php_round(value, precision):
+    """
+    PHP round(): half away from zero, applied to the float's shortest decimal form
+    (PHP pre-rounds, so round(0.285, 2) == 0.29, where Python's round() gives 0.28).
+    """
+    rounded = Decimal(repr(float(value))).quantize(Decimal(1).scaleb(-int(precision)), rounding=ROUND_HALF_UP)
+    return float(rounded)
+
+
+def _php_float_to_string(value):
+    """PHP's float-to-string conversion (precision=14): 2.0 -> "2", 7.3 -> "7.3", -0.0 -> "-0"."""
+    return "%.14G" % value
+
+
+def calculate_daily_change(bid, bid_today, digits):
+    """
+    Exact port of the website's PHP GetLiveQuotesMT5 daily change:
+
+        $bid_today   = round(today bid, digits);  $bid_current = round(BidLast, digits);
+        $change      = $bid_current - $bid_today;
+        $change_percentage = (abs($change) / $bid_today) * 100;
+        change            = ("+" if change >= 0 else "") . round($change, 4)
+        change_percentage = ("" if change >= 0 else "-") . round($change_percentage, 2)
+
+    Returns None when there is no reference (today) price, like PHP, which then omits the
+    change fields instead of inventing one.
+    """
+    if bid is None or bid_today is None:
+        return None
+    try:
+        round_digits = int(digits)
+        bid_current = php_round(bid, round_digits)
+        bid_today_rounded = php_round(bid_today, round_digits)
+    except (TypeError, ValueError, ArithmeticError):
+        return None
+    if not bid_today_rounded:
+        return None
+
+    change = bid_current - bid_today_rounded
+    change_percentage = (abs(change) / bid_today_rounded) * 100
+    change_rounded = php_round(change, 4)
+    change_percentage_rounded = php_round(change_percentage, 2)
+    change_symbol = "+" if change >= 0 else ""
+    percentage_symbol = "" if change >= 0 else "-"
+    return {
+        "change": change_rounded,
+        "change_percentage": change_percentage_rounded,
+        "change_text": change_symbol + _php_float_to_string(change_rounded),
+        "change_percentage_text": percentage_symbol + _php_float_to_string(change_percentage_rounded),
+    }
 
 
 def build_market_tick_payload(symbol, bid=None, ask=None, ask_open=None, bid_open=None, digits=None):
@@ -109,73 +172,21 @@ def build_market_tick_payload(symbol, bid=None, ask=None, ask_open=None, bid_ope
         "digits": round_digits,
     }
 
-    # Keep raw bid/ask values in the payload (preserve existing behaviour/tests),
-    # but compute rounded copies for change calculations to match PHP logic.
-    if bid is not None:
+    # Raw bid/ask and today's reference prices (preserve existing payload shape).
+    for key, value in (("bid", bid), ("ask", ask), ("ask_open", ask_open), ("bid_open", bid_open)):
         try:
-            bid_val = float(bid)
-            payload["bid"] = bid_val
-            bid_rounded = round(bid_val, round_digits)
+            payload[key] = float(value) if value is not None else None
         except (TypeError, ValueError):
-            payload["bid"] = None
-            bid_rounded = None
-    else:
-        payload["bid"] = None
-        bid_rounded = None
+            payload[key] = None
 
-    if ask is not None:
-        try:
-            ask_val = float(ask)
-            payload["ask"] = ask_val
-            ask_rounded = round(ask_val, round_digits)
-        except (TypeError, ValueError):
-            payload["ask"] = None
-            ask_rounded = None
-    else:
-        payload["ask"] = None
-        ask_rounded = None
-
-    # Round and include open values as well
-    if ask_open is not None:
-        try:
-            ask_open_val = float(ask_open)
-            payload["ask_open"] = ask_open_val
-            ask_open_rounded = round(ask_open_val, round_digits)
-        except (TypeError, ValueError):
-            payload["ask_open"] = None
-            ask_open_rounded = None
-    else:
-        payload["ask_open"] = None
-        ask_open_rounded = None
-
-    if bid_open is not None:
-        try:
-            bid_open_val = float(bid_open)
-            payload["bid_open"] = bid_open_val
-            bid_open_rounded = round(bid_open_val, round_digits)
-        except (TypeError, ValueError):
-            payload["bid_open"] = None
-            bid_open_rounded = None
-    else:
-        payload["bid_open"] = None
-        bid_open_rounded = None
-
-    # Calculate daily change using rounded values (bid_rounded and bid_open_rounded)
-    daily_change, daily_change_percentage = calculate_daily_change(bid_rounded, bid_open_rounded)
-    if daily_change is not None:
-        payload["daily_change"] = daily_change
-    if daily_change_percentage is not None:
-        payload["daily_change_percentage"] = daily_change_percentage
-
-    # Also include string-formatted values matching the PHP API behavior:
-    # - "change": signed number with "+" prefix for non-negative values (negative numbers keep their "-" sign)
-    # - "change_percentage": percentage as absolute value prefixed with "-" when negative (no "+" for positive)
-    if daily_change is not None:
-        change_symbol = "+" if daily_change >= 0 else ""
-        payload["change"] = f"{change_symbol}{round(daily_change, 4)}"
-    if daily_change_percentage is not None:
-        percentage_symbol = "" if daily_change >= 0 else "-"
-        payload["change_percentage"] = f"{percentage_symbol}{round(daily_change_percentage, 2)}"
+    # Daily change exactly as the website computes it (bid vs today's bid). bid_open here is
+    # the website's bid_today. Without it the change fields are omitted, as in PHP.
+    daily = calculate_daily_change(bid, bid_open, round_digits)
+    if daily is not None:
+        payload["daily_change"] = daily["change"]
+        payload["daily_change_percentage"] = daily["change_percentage"]
+        payload["change"] = daily["change_text"]
+        payload["change_percentage"] = daily["change_percentage_text"]
 
     return payload
 
