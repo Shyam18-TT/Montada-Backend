@@ -754,3 +754,27 @@ class LiveNewsBroadcastTests(TestCase):
         self.assertEqual(args[1]["event"], "created")
         self.assertEqual(args[1]["item"]["id"], str(instance.id))
         self.assertFalse(kwargs)
+
+
+class SkippedLiveNewsTitleTests(TestCase):
+    def test_eco_data_placeholder_items_are_not_saved(self):
+        for title in ("Eco Data 9/28/26", "Eco Data 09/28/2026", "ECO DATA - 28.09.2026", "  Eco  Data 9/28/26 "):
+            payload = {
+                "guid": "eco-data-%s" % title.strip(),
+                "link": "https://www.fxstreet.com/news/eco-data-%s" % abs(hash(title)),
+                "title": title,
+                "description": "Eco data",
+                "pubDate": "Mon, 28 Sep 2026 06:00:00 Z",
+            }
+            instance, created, changed = save_live_news_payload(payload, broadcast=False)
+            self.assertIsNone(instance, title)
+            self.assertFalse(created)
+            self.assertFalse(changed)
+        self.assertEqual(LiveNews.objects.count(), 0)
+
+    def test_real_headlines_mentioning_eco_data_are_not_skipped(self):
+        from News.live_news_service import is_skipped_live_news_title
+
+        self.assertFalse(is_skipped_live_news_title("Eco Data: US CPI beats expectations"))
+        self.assertFalse(is_skipped_live_news_title("EUR/USD rises after eco data 9/28/26 release"))
+        self.assertTrue(is_skipped_live_news_title("Eco Data 9/28/26"))
