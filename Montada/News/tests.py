@@ -756,25 +756,50 @@ class LiveNewsBroadcastTests(TestCase):
         self.assertFalse(kwargs)
 
 
-class SkippedLiveNewsTitleTests(TestCase):
-    def test_eco_data_placeholder_items_are_not_saved(self):
-        for title in ("Eco Data 9/28/26", "Eco Data 09/28/2026", "ECO DATA - 28.09.2026", "  Eco  Data 9/28/26 "):
-            payload = {
-                "guid": "eco-data-%s" % title.strip(),
-                "link": "https://www.fxstreet.com/news/eco-data-%s" % abs(hash(title)),
-                "title": title,
-                "description": "Eco data",
-                "pubDate": "Mon, 28 Sep 2026 06:00:00 Z",
-            }
-            instance, created, changed = save_live_news_payload(payload, broadcast=False)
-            self.assertIsNone(instance, title)
-            self.assertFalse(created)
-            self.assertFalse(changed)
-        self.assertEqual(LiveNews.objects.count(), 0)
+class FetchEconomicCalendarSkipTests(TestCase):
+    def _tradays_response(self, events):
+        import json
+        from unittest.mock import Mock
 
-    def test_real_headlines_mentioning_eco_data_are_not_skipped(self):
-        from News.live_news_service import is_skipped_live_news_title
+        response = Mock()
+        response.text = "<script>Calendar.Data = %s;</script>" % json.dumps(events)
+        response.raise_for_status = Mock()
+        return response
 
-        self.assertFalse(is_skipped_live_news_title("Eco Data: US CPI beats expectations"))
-        self.assertFalse(is_skipped_live_news_title("EUR/USD rises after eco data 9/28/26 release"))
-        self.assertTrue(is_skipped_live_news_title("Eco Data 9/28/26"))
+    def test_eco_data_placeholder_events_are_skipped_and_old_rows_removed(self):
+        from datetime import datetime, timedelta, timezone as dt_timezone
+        from io import StringIO
+
+        from django.core.management import call_command
+        from News.models import EconomicCalendarEvent
+
+        release = datetime.now(tz=dt_timezone.utc) + timedelta(hours=2)
+        release_ms = int(release.timestamp() * 1000)
+        # Saved by an earlier run, before the filter existed.
+        EconomicCalendarEvent.objects.create(
+            provider_id=900, event_name="Eco Data 9/28/26", importance="low", release_date=release,
+        )
+        events = [
+            {"Id": 900, "EventName": "Eco Data 9/28/26", "Importance": "low", "ReleaseDate": release_ms},
+            {"Id": 901, "EventName": "ECO DATA - 28.09.2026", "Importance": "medium", "ReleaseDate": release_ms},
+            {"Id": 902, "EventName": "Nonfarm Payrolls", "Importance": "high", "ReleaseDate": release_ms,
+             "CurrencyCode": "USD", "CountryName": "United States"},
+        ]
+        with patch(
+            "News.management.commands.fetch_economic_calendar.requests.get",
+            return_value=self._tradays_response(events),
+        ):
+            call_command("fetch_economic_calendar", stdout=StringIO(), stderr=StringIO())
+
+        self.assertEqual(
+            list(EconomicCalendarEvent.objects.values_list("event_name", flat=True)),
+            ["Nonfarm Payrolls"],
+        )
+
+    def test_only_date_placeholders_are_skipped(self):
+        from News.management.commands.fetch_economic_calendar import is_skipped_event_name
+
+        self.assertTrue(is_skipped_event_name("Eco Data 9/28/26"))
+        self.assertTrue(is_skipped_event_name("  Eco  Data 09/28/2026 "))
+        self.assertFalse(is_skipped_event_name("Eco Data: US CPI beats expectations"))
+        self.assertFalse(is_skipped_event_name("Nonfarm Payrolls"))

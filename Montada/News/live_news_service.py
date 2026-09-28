@@ -560,22 +560,8 @@ def fetch_rss_article_details(url, *, timeout=15):
     }
 
 
-# Placeholder feed items that carry no real news and must never be stored,
-# e.g. the daily "Eco Data 9/28/26" / "Eco Data - 28/09/2026" economic-data posts.
-_SKIPPED_LIVE_NEWS_TITLE_PATTERNS = (
-    re.compile(r"^eco\s*data\s*[-–:]?\s*\d{1,2}[/.\-]\d{1,2}[/.\-]\d{2,4}$", re.I),
-)
-
-
-def is_skipped_live_news_title(title):
-    normalized_title = " ".join(str(title or "").split())
-    return any(pattern.match(normalized_title) for pattern in _SKIPPED_LIVE_NEWS_TITLE_PATTERNS)
-
-
 def normalize_rss_payload(payload):
     if not isinstance(payload, dict):
-        return None
-    if is_skipped_live_news_title(payload.get("title")):
         return None
 
     provider_slug = str(payload.get("_provider_slug") or payload.get("provider") or "rss").strip().lower().replace(" ", "_")

@@ -398,6 +398,7 @@ Montada Team
             }, status=status.HTTP_200_OK)
         except Exception as e:
             # Log the error in production
+            print(f"Exception on forget password is {str(e)}")
             return Response({
                 'error': 'Failed to send email. Please try again later.'
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

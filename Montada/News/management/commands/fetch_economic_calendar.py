@@ -10,6 +10,17 @@ from News.models import EconomicCalendarEvent
 
 logger = logging.getLogger(__name__)
 
+# Placeholder events from the provider that carry no real data and must not be stored,
+# e.g. "Eco Data 9/28/26" / "Eco Data - 28.09.2026".
+SKIPPED_EVENT_NAME_PATTERNS = (
+    re.compile(r"^eco\s*data\s*[-–:]?\s*\d{1,2}[/.\-]\d{1,2}[/.\-]\d{2,4}$", re.I),
+)
+
+
+def is_skipped_event_name(event_name):
+    normalized_name = " ".join(str(event_name or "").split())
+    return any(pattern.match(normalized_name) for pattern in SKIPPED_EVENT_NAME_PATTERNS)
+
 
 class Command(BaseCommand):
     help = 'Fetches economic calendar data from Tradays (20-day window from today) and saves/updates in the database.'
@@ -99,7 +110,8 @@ class Command(BaseCommand):
         # --- 3. Filter to a 20-day window from today ---
         filtered_events = []
         skipped_count = 0
-        
+        placeholder_provider_ids = []
+
         for ev in all_events:
             ts = ev.get('ReleaseDate')
             if not ts:
@@ -107,6 +119,11 @@ class Command(BaseCommand):
             
             release_dt = datetime.fromtimestamp(ts / 1000.0, tz=timezone.utc)
             if not (window_start <= release_dt <= window_end):
+                continue
+
+            if is_skipped_event_name(ev.get('EventName')):
+                if ev.get('Id'):
+                    placeholder_provider_ids.append(ev.get('Id'))
                 continue
             
             # Validate importance level
@@ -123,6 +140,16 @@ class Command(BaseCommand):
         self.stdout.write(f'Filtered to {len(filtered_events)} events within {self.DATE_WINDOW_DAYS}-day window.')
         if skipped_count > 0:
             self.stdout.write(self.style.WARNING(f'Skipped {skipped_count} events with invalid importance level.'))
+        if placeholder_provider_ids:
+            self.stdout.write(self.style.WARNING(
+                f'Skipped {len(placeholder_provider_ids)} placeholder "Eco Data <date>" event(s).'
+            ))
+            # Remove ones saved before this filter existed (their reminders cascade with them).
+            deleted_count, _ = EconomicCalendarEvent.objects.filter(
+                provider_id__in=placeholder_provider_ids
+            ).delete()
+            if deleted_count:
+                self.stdout.write(self.style.WARNING(f'Removed {deleted_count} previously saved placeholder row(s).'))
 
         # --- 4. Upsert each event into the database using bulk operations ---
         provider_ids = [ev.get('Id') for ev in filtered_events if ev.get('Id')]
