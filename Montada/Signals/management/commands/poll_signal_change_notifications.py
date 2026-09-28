@@ -11,6 +11,8 @@ from django.core.management.base import BaseCommand
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
+from Signals.management.commands.run_price_alerts import _describe_push_result
+
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +50,8 @@ DEFAULT_MAX_NOTIFICATION_BATCHES_PER_POLL = 200
 DEFAULT_NOTIFICATION_COOLDOWN_SECONDS = 300
 # Market snapshot prices older than this fall back to the polled quote's bid.
 MARKET_SNAPSHOT_MAX_AGE_SECONDS = 300
+# Max signal ids sent in the FCM data payload (keeps the payload well under FCM's 4KB limit).
+MAX_PUSH_SIGNAL_IDS = 20
 STATE_CACHE_KEY_PREFIX = "signals:change-notifications:state"
 LOCK_CACHE_KEY_PREFIX = "signals:change-notifications:lock"
 
@@ -911,27 +915,32 @@ class Command(BaseCommand):
             "signed_crossed_percentage": str(signed_crossed_percentage),
             "current_percentage": str(current_percentage),
             "current_price": current_price,
-            "signal_ids": ",".join(str(signal_id) for signal_id in signal_ids),
+            # FCM rejects data payloads over 4KB; a busy symbol's full UUID list exceeds that.
+            "signal_ids": ",".join(str(signal_id) for signal_id in signal_ids[:MAX_PUSH_SIGNAL_IDS]),
+            "signal_count": str(len(signal_ids)),
             "bid": str(quote.get("bid") or ""),
             "ask": str(quote.get("ask") or ""),
             "source": "montada-app",
         }
+        push_summary = "not sent"
         try:
             from firebase import send_push_to_users
 
-            send_push_to_users(
+            push_result = send_push_to_users(
                 users=users,
                 title=title,
                 body=message,
                 data=data,
             )
-        except Exception:
+            push_summary = _describe_push_result(push_result)
+        except Exception as exc:
             logger.exception("Failed to send signal change push notifications.")
+            push_summary = "FAILED: %s" % exc
 
         self.stdout.write(
             self.style.SUCCESS(
-                "Notified %d user(s): %s."
-                % (len(users), title)
+                "Notified %d user(s): %s. FCM push: %s."
+                % (len(users), title, push_summary)
             )
         )
         return True

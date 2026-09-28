@@ -24,6 +24,7 @@ send_push_to_users(
 )
 """
 import logging
+from pathlib import Path
 from typing import Iterable, Optional
 
 import firebase_admin
@@ -34,14 +35,26 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Safe initialisation (idempotent; won't crash if already initialised)
 # ---------------------------------------------------------------------------
-_CREDENTIAL_PATH = "credentials/montada-86ba6-firebase-adminsdk-fbsvc-8df57cd800.json"
+# Absolute path: a relative one only resolved when the process was started from Montada/,
+# so workers launched from any other directory silently never sent pushes.
+_CREDENTIAL_PATH = str(
+    Path(__file__).resolve().parent / "credentials" / "montada-86ba6-firebase-adminsdk-fbsvc-8df57cd800.json"
+)
 
-if not firebase_admin._apps:
+
+def _ensure_firebase_app() -> bool:
+    if firebase_admin._apps:
+        return True
     try:
         cred = credentials.Certificate(_CREDENTIAL_PATH)
         firebase_admin.initialize_app(cred)
+        return True
     except Exception as exc:
-        logger.error("Firebase Admin SDK init failed: %s", exc)
+        logger.error("Firebase Admin SDK init failed (%s): %s", _CREDENTIAL_PATH, exc)
+        return False
+
+
+_ensure_firebase_app()
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +195,13 @@ def send_push_to_tokens(
     tokens = _clean_tokens(tokens)
     if not tokens:
         return {"success_count": 0, "failure_count": 0, "failed_tokens": [], "errors": []}
+    if not _ensure_firebase_app():
+        return {
+            "success_count": 0,
+            "failure_count": len(tokens),
+            "failed_tokens": tokens,
+            "errors": ["Firebase Admin SDK not initialised"] * len(tokens),
+        }
 
     # Ensure data values are all strings (FCM requirement)
     clean_data = {str(k): str(v) for k, v in (data or {}).items()}

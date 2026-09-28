@@ -2,6 +2,7 @@ from unittest.mock import Mock, patch
 from decimal import Decimal
 import json
 import time
+import uuid
 
 from django.contrib.auth import get_user_model
 from django.test import SimpleTestCase, TestCase
@@ -146,6 +147,76 @@ class SignalChangeNotificationThresholdTests(TestCase):
 
         self.assertTrue(self.command._is_level_notification_in_cooldown("up", "1", previous_state, current_time))
         self.assertFalse(self.command._is_level_notification_in_cooldown("up", "1", previous_state, current_time + 600))
+
+    def _make_poll_command(self):
+        from django.core.cache import cache
+
+        cache.clear()
+        command = Command(stdout=Mock(), stderr=Mock())
+        command.url = "https://example.invalid/prices"
+        command.timeout = 1
+        command.verbose = False
+        command.threshold = Decimal("0.5")
+        command.share_threshold = Decimal("2.0")
+        command.share_step = Decimal("0.5")
+        command.reset_threshold = Decimal("0.3")
+        command.state_ttl = 3600
+        command.lock_ttl = 60
+        command.max_notification_batches = 200
+        command.max_users_per_notification = 0
+        command.reset_daily = True
+        command.notification_cooldown_seconds = 300
+        command.symbol_filter = set()
+        command.excluded_symbols = set()
+        command._fallback_state_by_symbol = {}
+        command._fallback_locks = set()
+        return command
+
+    def test_poll_sends_push_to_all_active_users_once_per_level(self):
+        users = [
+            User.objects.create_user(
+                email="poll%d@example.com" % i, username="poll%d@example.com" % i,
+                password="Testpass123!", user_type="trader",
+            )
+            for i in range(3)
+        ]
+        command = self._make_poll_command()
+        quotes = {"EURUSD": {"change_percentage": "0.62", "dir": "up", "bid": "1.1", "ask": "1.1001"}}
+        push = Mock(return_value={"success_count": 3, "failure_count": 0, "failed_tokens": [], "errors": []})
+        with patch(
+            "Signals.management.commands.poll_signal_change_notifications._fetch_live_quotes",
+            return_value=quotes,
+        ), patch("firebase.send_push_to_users", push):
+            command._run_poll()
+            command._run_poll()  # same level again: no duplicate push
+
+        push.assert_called_once()
+        self.assertEqual(
+            {user.id for user in push.call_args.kwargs["users"]},
+            {user.id for user in users},
+        )
+        self.assertEqual(push.call_args.kwargs["title"], "EURUSD up 0.5%")
+        self.assertEqual(push.call_args.kwargs["data"]["type"], "signal_change_threshold")
+
+    def test_poll_push_payload_stays_under_fcm_limit_with_many_signals(self):
+        User.objects.create_user(
+            email="payload@example.com", username="payload@example.com",
+            password="Testpass123!", user_type="trader",
+        )
+        command = self._make_poll_command()
+        signal_ids = [uuid.uuid4() for _ in range(300)]
+        push = Mock(return_value={"success_count": 1, "failure_count": 0, "failed_tokens": [], "errors": []})
+        with patch("firebase.send_push_to_users", push):
+            command._notify_all_users(
+                symbol="XAUUSD", direction="up",
+                signed_crossed_percentage=Decimal("0.5"), crossed_percentage=Decimal("0.5"),
+                current_percentage=Decimal("0.61"), quote={"bid": "2350.1", "ask": "2350.4"},
+                signal_ids=signal_ids,
+            )
+        data = push.call_args.kwargs["data"]
+        payload_bytes = len(json.dumps({k: str(v) for k, v in data.items()}).encode("utf-8"))
+        self.assertLess(payload_bytes, 4096)
+        self.assertEqual(data["signal_count"], "300")
 
 
 class MarketStreamTests(SimpleTestCase):
@@ -707,3 +778,21 @@ class PriceAlertLifecycleTests(TestCase):
         above.armed_at = below.armed_at = timezone.now()
         self.assertTrue(_check_user_alert_hit(above, 1.111))
         self.assertTrue(_check_user_alert_hit(below, 1.111))
+
+
+class FirebaseInitTests(SimpleTestCase):
+    def test_credential_path_is_absolute_and_exists(self):
+        import os
+        import firebase
+
+        self.assertTrue(os.path.isabs(firebase._CREDENTIAL_PATH))
+        self.assertTrue(os.path.exists(firebase._CREDENTIAL_PATH))
+
+    def test_push_result_summary(self):
+        from Signals.management.commands.run_price_alerts import _describe_push_result
+
+        self.assertIn("no device tokens", _describe_push_result({"success_count": 0, "failure_count": 0}))
+        self.assertEqual(
+            _describe_push_result({"success_count": 1, "failure_count": 1, "errors": ["Requested entity was not found."]}),
+            "success=1 failure=1 first_error=Requested entity was not found.",
+        )

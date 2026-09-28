@@ -60,6 +60,21 @@ ENTRY_WATCH_UP = "up"
 ENTRY_WATCH_DOWN = "down"
 
 
+def _describe_push_result(result):
+    """One-line summary of a send_push_to_users() result for the worker log."""
+    if not isinstance(result, dict):
+        return "no result"
+    sent = result.get("success_count", 0)
+    failed = result.get("failure_count", 0)
+    if not sent and not failed:
+        return "no device tokens registered for recipient(s)"
+    summary = "success=%s failure=%s" % (sent, failed)
+    errors = result.get("errors") or []
+    if errors:
+        summary += " first_error=%s" % errors[0]
+    return summary
+
+
 def _normalize_mt5_symbol(instrument_symbol):
     """Convert Instrument.symbol (e.g. EUR/USD) to MT5 format (e.g. EURUSD)."""
     if not instrument_symbol:
@@ -405,7 +420,7 @@ def _close_signal_and_notify(signal, hit_type, current_price):
     # FCM push to analyst (once)
     try:
         from firebase import send_push_to_users
-        send_push_to_users(
+        push_result = send_push_to_users(
             users=[analyst],
             title=title,
             body=message,
@@ -419,7 +434,7 @@ def _close_signal_and_notify(signal, hit_type, current_price):
         )
         signal.price_alert_fcm_sent = True
         signal.save(update_fields=["price_alert_fcm_sent"])
-        print("[CHECK] Step 4c: FCM push sent to analyst.")
+        print("[CHECK] Step 4c: FCM push to analyst: %s" % _describe_push_result(push_result))
     except Exception as e:
         logger.warning("FCM push to analyst failed: %s", e)
         print("[CHECK] Step 4c: FCM push FAILED: %s" % e)
@@ -482,14 +497,16 @@ def _trigger_user_price_alert(alert, current_price):
         fcm_data["reference_price"] = str(alert.reference_price)
     try:
         from firebase import send_push_to_users
-        send_push_to_users(
+        push_result = send_push_to_users(
             users=[alert.user],
             title=title,
             body=message,
             data=fcm_data,
         )
+        print("[CHECK] PriceAlert %s FCM push to user %s: %s" % (alert.id, alert.user_id, _describe_push_result(push_result)))
     except Exception as e:
         logger.warning("FCM push for user price alert failed: %s", e)
+        print("[CHECK] PriceAlert %s FCM push FAILED: %s" % (alert.id, e))
 
     logger.info("PriceAlert %s triggered for %s at %s – user %s notified", alert.id, symbol, current_price, alert.user_id)
 
