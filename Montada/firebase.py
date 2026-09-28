@@ -166,6 +166,38 @@ def _filter_users_who_blocked_source(users, data):
     return filtered_users
 
 
+# Custom notification sound bundled in the mobile app.
+# iOS plays a sound for background/closed-app pushes only when aps.sound is set; the value
+# must include the extension and must never be "default".
+IOS_PUSH_SOUND = "montada_push.wav"
+# Android: no extension. On Android 8+ the channel decides the sound, so the channel_id
+# must be one of the channels the app creates (an unknown id gets a channel with no sound).
+ANDROID_PUSH_SOUND = "montada_push"
+ANDROID_DEFAULT_CHANNEL_ID = "montada_notifications"
+_ANDROID_CHANNEL_BY_TYPE = {
+    "news_update": "montada_news",
+    "economic_reminder": "montada_economic_reminders",
+    "economic_global_reminder": "montada_economic_reminders",
+    "user_price_alert": "montada_price_alerts",
+    "signal_change_threshold": "montada_price_alerts",
+    "signal_published": "montada_trade_ideas",
+    "signal_closed": "montada_trade_ideas",
+    "signal_alert": "montada_trade_ideas",
+    "price_alert": "montada_trade_ideas",  # analyst's own signal hit TP/SL (signal closed)
+    "admin_broadcast": "montada_broadcasts",
+}
+
+
+def android_channel_for(data: Optional[dict]) -> str:
+    """Android notification channel for a push, based on its data payload."""
+    data = data or {}
+    push_type = str(data.get("type") or "").strip().lower()
+    if push_type == "economic_event":
+        importance = str(data.get("importance") or "").strip().lower()
+        return "montada_economic_high" if importance == "high" else "montada_economic"
+    return _ANDROID_CHANNEL_BY_TYPE.get(push_type, ANDROID_DEFAULT_CHANNEL_ID)
+
+
 def send_push_to_tokens(
     tokens: list[str],
     title: str,
@@ -219,12 +251,16 @@ def send_push_to_tokens(
             title=title,
             body=body,
             image=image_url or None,
+            channel_id=android_channel_for(data),
+            sound=ANDROID_PUSH_SOUND,
         ),
     )
     apns_config = messaging.APNSConfig(
+        headers={"apns-priority": "10", "apns-push-type": "alert"},
         payload=messaging.APNSPayload(
             aps=messaging.Aps(
                 alert=messaging.ApsAlert(title=title, body=body),
+                sound=IOS_PUSH_SOUND,
                 mutable_content=True,
             )
         ),

@@ -360,6 +360,58 @@ class FirebasePushPayloadTests(SimpleTestCase):
         self.assertEqual(message_kwargs["data"]["type"], "signal_change_threshold")
 
 
+class FirebasePushSoundTests(SimpleTestCase):
+    def _encoded_message(self, data):
+        """Send through send_push_to_tokens and return the FCM v1 JSON the SDK would post."""
+        from firebase_admin import _messaging_encoder, messaging
+
+        response = Mock(success_count=1, failure_count=0, responses=[Mock(success=True, exception=None)])
+        with patch("firebase.messaging.send_each_for_multicast", return_value=response) as send_each:
+            send_push_to_tokens(tokens=["device-token"], title="Title", body="Body", data=data)
+        multicast = send_each.call_args.args[0]
+        message = messaging.Message(
+            token=multicast.tokens[0],
+            notification=multicast.notification,
+            android=multicast.android,
+            apns=multicast.apns,
+            data=multicast.data,
+        )
+        return _messaging_encoder.MessageEncoder().default(message)
+
+    def test_payload_has_ios_and_android_sound_fields(self):
+        encoded = self._encoded_message({"type": "admin_broadcast"})
+
+        self.assertEqual(encoded["notification"], {"title": "Title", "body": "Body"})
+        self.assertEqual(encoded["apns"]["headers"], {"apns-priority": "10", "apns-push-type": "alert"})
+        self.assertEqual(encoded["apns"]["payload"]["aps"]["sound"], "montada_push.wav")
+        self.assertEqual(encoded["android"]["priority"], "high")
+        self.assertEqual(encoded["android"]["notification"]["sound"], "montada_push")
+        self.assertEqual(encoded["android"]["notification"]["channel_id"], "montada_broadcasts")
+
+    def test_android_channel_per_notification_type(self):
+        from firebase import android_channel_for
+
+        expected = {
+            "news_update": "montada_news",
+            "economic_reminder": "montada_economic_reminders",
+            "economic_global_reminder": "montada_economic_reminders",
+            "user_price_alert": "montada_price_alerts",
+            "signal_change_threshold": "montada_price_alerts",
+            "signal_published": "montada_trade_ideas",
+            "signal_closed": "montada_trade_ideas",
+            "signal_alert": "montada_trade_ideas",
+            "price_alert": "montada_trade_ideas",
+            "admin_broadcast": "montada_broadcasts",
+            "signal_applied": "montada_notifications",
+            "": "montada_notifications",
+        }
+        for push_type, channel in expected.items():
+            self.assertEqual(android_channel_for({"type": push_type}), channel, push_type)
+        self.assertEqual(android_channel_for({"type": "economic_event", "importance": "high"}), "montada_economic_high")
+        self.assertEqual(android_channel_for({"type": "economic_event", "importance": "medium"}), "montada_economic")
+        self.assertEqual(android_channel_for(None), "montada_notifications")
+
+
 class FirebaseBackgroundPushTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user(
