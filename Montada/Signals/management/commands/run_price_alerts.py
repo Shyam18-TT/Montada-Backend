@@ -53,6 +53,9 @@ _manager_shutdown = threading.Event()
 _manager_thread = None
 _manager_connected = False
 _manager_first_tick_logged = set()  # symbols we already printed "first tick" for
+_manager_last_tick_at = 0.0  # time.monotonic() of the last tick received from MT5 Manager
+# If no tick arrives for this long, the realtime loop falls back to mt5_prices (DB) polling.
+MANAGER_STALE_TICK_SECONDS = 60
 ENTRY_WATCH_UP = "up"
 ENTRY_WATCH_DOWN = "down"
 
@@ -83,7 +86,7 @@ def _manager_tick_sink_class():
 
     class TickSink:
         def OnTick(self, symbol, tick):  # noqa: N802 - MT5Manager callback name
-            global _manager_first_tick_logged
+            global _manager_first_tick_logged, _manager_last_tick_at
             try:
                 bid = getattr(tick, "bid", None)
                 ask = getattr(tick, "ask", None)
@@ -91,6 +94,7 @@ def _manager_tick_sink_class():
                     with _manager_cache_lock:
                         _manager_tick_cache[symbol] = {"bid": float(bid) if bid is not None else None, "ask": float(ask) if ask is not None else None}
                         _manager_pending_symbols.add(symbol)
+                        _manager_last_tick_at = time.monotonic()
                         if symbol not in _manager_first_tick_logged:
                             _manager_first_tick_logged.add(symbol)
                             print("[CHECK] MT5 Manager: first tick received for %s (bid=%s)" % (symbol, bid))
@@ -308,7 +312,7 @@ def _ensure_signal_entry_state(signal, bid, ask=None):
 
     try:
         price = Decimal(str(current_price))
-        entry = signal.entry_price
+        entry = Decimal(str(signal.entry_price))
     except Exception:
         return False, None, False
 
@@ -498,9 +502,9 @@ def _get_alert_activation_price(alert, current_price):
     arm immediately on the first observed market price by storing that observed price.
     """
     if getattr(alert, "reference_price", None) is not None:
-        return alert.reference_price
+        return Decimal(str(alert.reference_price))
     if getattr(alert, "activation_price", None) is not None:
-        return alert.activation_price
+        return Decimal(str(alert.activation_price))
     if current_price is None:
         return None
     try:
@@ -544,6 +548,18 @@ def _ensure_user_alert_activation_state(alert, bid):
         logger.info("PriceAlert %s armed immediately at %s", alert.id, current_price)
         return True, current_price, True
 
+    # Price is already between the activation level and the target (e.g. reference 100,
+    # target 105, market 100.02): it has passed the activation level on the way to the
+    # target, so arm now. Otherwise we would wait for a pull-back to the exact reference
+    # that may never happen, and the alert would never fire.
+    target = alert.get_effective_target_price()
+    if target is not None and min(activation_price, target) <= current_price <= max(activation_price, target):
+        alert.armed_at = timezone.now()
+        update_fields.extend(["armed_at", "updated_at"])
+        alert.save(update_fields=list(dict.fromkeys(update_fields)))
+        logger.info("PriceAlert %s armed at %s (between activation %s and target %s)", alert.id, current_price, activation_price, target)
+        return True, current_price, True
+
     if watch_direction not in {ENTRY_WATCH_UP, ENTRY_WATCH_DOWN}:
         alert.activation_watch_direction = (
             ENTRY_WATCH_UP if current_price < activation_price else ENTRY_WATCH_DOWN
@@ -577,16 +593,22 @@ def _ensure_user_alert_activation_state(alert, bid):
 
 def _check_user_alert_hit(alert, bid):
     """Return True if an armed alert meets its target condition."""
-    if bid is None:
+    if bid is None or not getattr(alert, "armed_at", None):
         return False
     target = alert.get_effective_target_price()
     if target is None:
         return False
+    # MT5 prices arrive as floats; float vs Decimal compares exactly, so 1.111 (float) is
+    # < Decimal("1.111") and an alert set at the exact level would never fire.
+    try:
+        price = Decimal(str(bid))
+    except Exception:
+        return False
     cond = (alert.condition or "above").lower()
     if cond == "above":
-        return bid >= target
+        return price >= target
     if cond == "below":
-        return bid <= target
+        return price <= target
     return False
 
 
@@ -662,12 +684,10 @@ class Command(BaseCommand):
                     with _manager_cache_lock:
                         _manager_tick_cache.clear()
                         _manager_pending_symbols.clear()
-                    _manager_thread = threading.Thread(
-                        target=_manager_thread_func,
-                        args=(server.strip(), login, password, self.stdout, self.style.SUCCESS, self.style.WARNING),
-                        daemon=True,
+                    self._manager_thread_args = (
+                        server.strip(), login, password, self.stdout, self.style.SUCCESS, self.style.WARNING,
                     )
-                    _manager_thread.start()
+                    self._start_manager_thread()
                     # Give manager time to connect and receive first ticks
                     time.sleep(3)
                     self._use_mt5_manager = True
@@ -745,6 +765,40 @@ class Command(BaseCommand):
             except Exception:
                 pass
 
+    def _start_manager_thread(self):
+        global _manager_thread
+        _manager_thread = threading.Thread(
+            target=_manager_thread_func,
+            args=self._manager_thread_args,
+            daemon=True,
+        )
+        _manager_thread.start()
+
+    def _check_manager_health(self):
+        """
+        Restart the MT5 Manager thread if it died (connect failure / disconnect) and,
+        while no fresh ticks are arriving, run a DB (mt5_prices) check so alerts still fire.
+        """
+        if _manager_shutdown.is_set():
+            return
+        if _manager_thread is None or not _manager_thread.is_alive():
+            self.stdout.write(self.style.WARNING("[CHECK] MT5 Manager thread not running; reconnecting..."))
+            self._start_manager_thread()
+
+        with _manager_cache_lock:
+            connected = _manager_connected
+            last_tick_at = _manager_last_tick_at
+            has_symbols = bool(_manager_required_symbols)
+        stale = not last_tick_at or (time.monotonic() - last_tick_at) > MANAGER_STALE_TICK_SECONDS
+        if has_symbols and (not connected or stale):
+            self.stdout.write(
+                self.style.WARNING(
+                    "[CHECK] MT5 Manager connected=%s, no ticks for >%ss. Checking with mt5_prices DB fallback."
+                    % (connected, MANAGER_STALE_TICK_SECONDS)
+                )
+            )
+            self._run_check(force_db=True)
+
     def _run_realtime_manager_loop(self, *, interval, run_once):
         self.stdout.write(
             self.style.SUCCESS(
@@ -762,6 +816,7 @@ class Command(BaseCommand):
                 if now_monotonic - self._last_watch_refresh >= interval:
                     self._refresh_realtime_watchlists()
                     self._last_watch_refresh = now_monotonic
+                    self._check_manager_health()
 
                 processed_count = self._process_pending_manager_ticks()
                 if run_once and (processed_count or self._last_watch_refresh):
@@ -907,15 +962,16 @@ class Command(BaseCommand):
 
         return processed_count
 
-    def _run_check(self):
+    def _run_check(self, force_db=False):
         from django.utils import timezone as tz
 
         from Signals.models import TradingSignal, PriceAlert
 
         now = tz.now().strftime("%Y-%m-%d %H:%M:%S")
-        if getattr(self, "_use_mt5_manager", False):
+        use_manager = getattr(self, "_use_mt5_manager", False) and not force_db
+        if use_manager:
             price_source = "MT5 Manager"
-        elif getattr(self, "_use_mt5_lib", False):
+        elif getattr(self, "_use_mt5_lib", False) and not force_db:
             price_source = "MT5"
         else:
             price_source = "DB (mt5_prices)"
@@ -966,13 +1022,13 @@ class Command(BaseCommand):
 
         symbol_list = sorted(mt5_symbols)
         self.stdout.write("[CHECK] Step 2: Getting current prices for symbols: %s" % symbol_list)
-        if getattr(self, "_use_mt5_manager", False):
+        if use_manager:
             with _manager_cache_lock:
                 _manager_required_symbols.update(symbol_list)
                 for s in symbol_list:
                     _manager_required_symbols.update(SYMBOL_ALIASES_DB.get(s, []))
             prices = _get_prices_from_mt5_manager(symbol_list)
-        elif getattr(self, "_use_mt5_lib", False):
+        elif getattr(self, "_use_mt5_lib", False) and not force_db:
             prices = _get_prices_from_mt5_lib(symbol_list)
         else:
             # DB may use different names (e.g. GOLD not GOLDUSD); try aliases
@@ -991,7 +1047,7 @@ class Command(BaseCommand):
                             break
 
         # If MT5 Manager returned 0 prices, try DB (mt5_prices) as fallback so alerts still work
-        if not prices and getattr(self, "_use_mt5_manager", False):
+        if not prices and use_manager:
             expanded = set(symbol_list)
             for s in symbol_list:
                 expanded.update(SYMBOL_ALIASES_DB.get(s, []))

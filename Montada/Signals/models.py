@@ -420,10 +420,11 @@ class PriceAlert(models.Model):
         if self.target_price is not None:
             return self.target_price
         if self.target_percentage is not None and self.reference_price is not None:
-            pct = self.target_percentage / Decimal("100")
+            pct = Decimal(str(self.target_percentage)) / Decimal("100")
+            reference = Decimal(str(self.reference_price))
             if (self.condition or "").lower() == "below":
-                return self.reference_price * (Decimal("1") - pct)
-            return self.reference_price * (Decimal("1") + pct)
+                return reference * (Decimal("1") - pct)
+            return reference * (Decimal("1") + pct)
         return None
 
     def __str__(self):

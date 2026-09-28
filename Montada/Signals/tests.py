@@ -16,6 +16,7 @@ from Signals.management.commands.run_price_alerts import (
     _ensure_signal_entry_state,
     _ensure_user_alert_activation_state,
     _check_user_alert_hit,
+    Command as PriceAlertCommand,
 )
 from Signals.management.commands.run_market_data_stream import _is_allowed_symbol
 from Signals.market_stream import (
@@ -564,3 +565,145 @@ class PriceAlertLifecycleTests(TestCase):
         self.assertIsNotNone(alert.armed_at)
         self.assertFalse(_check_user_alert_hit(alert, Decimal("1.11999")))
         self.assertTrue(_check_user_alert_hit(alert, Decimal("1.12000")))
+
+    def test_percentage_alert_arms_when_market_already_past_reference(self):
+        # Market moved slightly past the reference before the worker saw it: the alert must
+        # not wait for a pull-back to the exact reference price.
+        alert = PriceAlert.objects.create(
+            user=self.user,
+            instrument=self.instrument,
+            target_percentage="5.0000",
+            reference_price="100.00000",
+            condition=PriceAlert.Condition.ABOVE,
+        )
+        is_armed, _, armed_now = _ensure_user_alert_activation_state(alert, 100.02)
+        alert.refresh_from_db()
+        self.assertTrue(is_armed)
+        self.assertTrue(armed_now)
+        self.assertIsNotNone(alert.armed_at)
+        self.assertTrue(_check_user_alert_hit(alert, 105.0))
+
+    def test_stuck_percentage_below_alert_is_released(self):
+        # Alert saved by the old logic with watch direction "up" while market is between
+        # reference and target of a "below" alert.
+        alert = PriceAlert.objects.create(
+            user=self.user,
+            instrument=self.instrument,
+            target_percentage="5.0000",
+            reference_price="100.00000",
+            condition=PriceAlert.Condition.BELOW,
+            activation_price="100.00000",
+            activation_watch_direction=ENTRY_WATCH_UP,
+        )
+        is_armed, _, _ = _ensure_user_alert_activation_state(alert, 99.9)
+        self.assertTrue(is_armed)
+        self.assertTrue(_check_user_alert_hit(alert, 95.0))
+
+    def test_percentage_alert_already_past_target_still_waits(self):
+        alert = PriceAlert.objects.create(
+            user=self.user,
+            instrument=self.instrument,
+            target_percentage="5.0000",
+            reference_price="100.00000",
+            condition=PriceAlert.Condition.ABOVE,
+        )
+        is_armed, _, _ = _ensure_user_alert_activation_state(alert, 106.0)
+        alert.refresh_from_db()
+        self.assertFalse(is_armed)
+        self.assertEqual(alert.activation_watch_direction, ENTRY_WATCH_DOWN)
+
+    def _run_check_with_price(self, bid, push):
+        prices = {"EURUSD": {"bid": bid, "ask": bid + 0.0001}}
+        with patch(
+            "Signals.management.commands.run_price_alerts._get_prices_from_mt5_db",
+            return_value=prices,
+        ), patch("firebase.send_push_to_users", push):
+            cmd = PriceAlertCommand(stdout=Mock(), stderr=Mock())
+            cmd._verbose = False
+            cmd._use_mt5_lib = False
+            cmd._use_mt5_manager = False
+            cmd._run_check()
+
+    def test_run_check_triggers_alert_and_sends_push_once(self):
+        from Mainapp.models import UserNotification
+
+        alert = PriceAlert.objects.create(
+            user=self.user,
+            instrument=self.instrument,
+            target_price="1.12000",
+            condition=PriceAlert.Condition.ABOVE,
+        )
+        push = Mock()
+
+        self._run_check_with_price(1.10000, push)  # arms, below target
+        alert.refresh_from_db()
+        self.assertIsNotNone(alert.armed_at)
+        self.assertFalse(alert.is_triggered)
+        push.assert_not_called()
+
+        self._run_check_with_price(1.12005, push)  # crosses target
+        alert.refresh_from_db()
+        self.assertTrue(alert.is_triggered)
+        self.assertIsNotNone(alert.triggered_at)
+        push.assert_called_once()
+        self.assertEqual(push.call_args.kwargs["users"], [self.user])
+        self.assertEqual(push.call_args.kwargs["data"]["type"], "user_price_alert")
+        self.assertEqual(
+            UserNotification.objects.filter(user=self.user, category="PRICE_ALERT").count(), 1
+        )
+
+        self._run_check_with_price(1.13000, push)  # already triggered: no duplicate push
+        push.assert_called_once()
+
+    def test_run_check_percentage_alert_end_to_end(self):
+        alert = PriceAlert.objects.create(
+            user=self.user,
+            instrument=self.instrument,
+            target_percentage="1.0000",
+            reference_price="1.10000",
+            condition=PriceAlert.Condition.ABOVE,
+        )
+        push = Mock()
+        self._run_check_with_price(1.10020, push)  # just above reference
+        self._run_check_with_price(1.11100, push)  # target = 1.111
+        alert.refresh_from_db()
+        self.assertTrue(alert.is_triggered)
+        push.assert_called_once()
+
+    def test_manager_health_falls_back_to_db_when_no_ticks(self):
+        import Signals.management.commands.run_price_alerts as rpa
+
+        cmd = PriceAlertCommand(stdout=Mock(), stderr=Mock())
+        cmd._start_manager_thread = Mock()
+        cmd._run_check = Mock()
+        alive_thread = Mock(is_alive=Mock(return_value=True))
+        with patch.object(rpa, "_manager_thread", alive_thread),                 patch.object(rpa, "_manager_connected", True),                 patch.object(rpa, "_manager_last_tick_at", time.monotonic() - 3600),                 patch.object(rpa, "_manager_required_symbols", {"EURUSD"}):
+            cmd._check_manager_health()
+        cmd._start_manager_thread.assert_not_called()
+        cmd._run_check.assert_called_once_with(force_db=True)
+
+    def test_manager_health_restarts_dead_thread(self):
+        import Signals.management.commands.run_price_alerts as rpa
+
+        cmd = PriceAlertCommand(stdout=Mock(), stderr=Mock())
+        cmd._start_manager_thread = Mock()
+        cmd._run_check = Mock()
+        with patch.object(rpa, "_manager_thread", Mock(is_alive=Mock(return_value=False))),                 patch.object(rpa, "_manager_connected", True),                 patch.object(rpa, "_manager_last_tick_at", time.monotonic()),                 patch.object(rpa, "_manager_required_symbols", {"EURUSD"}):
+            cmd._check_manager_health()
+        cmd._start_manager_thread.assert_called_once()
+        cmd._run_check.assert_not_called()
+
+    def test_alert_fires_when_float_price_touches_exact_target(self):
+        above = PriceAlert.objects.create(
+            user=self.user, instrument=self.instrument,
+            target_percentage=Decimal("1"), reference_price=Decimal("1.10000"),
+            condition=PriceAlert.Condition.ABOVE,
+        )
+        below = PriceAlert.objects.create(
+            user=self.user, instrument=self.instrument,
+            target_price=Decimal("1.11100"), condition=PriceAlert.Condition.BELOW,
+        )
+        # float(1.111) is 1.11099999..., which is < Decimal("1.111")
+        above.armed_at = below.armed_at = timezone.now()
+        self.assertTrue(_check_user_alert_hit(above, 1.111))
+        self.assertTrue(_check_user_alert_hit(below, 1.111))
