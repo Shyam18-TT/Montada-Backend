@@ -261,7 +261,9 @@ def send_push_to_tokens(
             aps=messaging.Aps(
                 alert=messaging.ApsAlert(title=title, body=body),
                 sound=IOS_PUSH_SOUND,
-                mutable_content=True,
+                # Only image pushes need the Notification Service Extension; routing every
+                # push through it risks the extension replacing the content and dropping the sound.
+                mutable_content=True if image_url else None,
             )
         ),
         fcm_options=messaging.APNSFCMOptions(image=image_url) if image_url else None,

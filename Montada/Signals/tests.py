@@ -450,6 +450,7 @@ class FirebasePushSoundTests(SimpleTestCase):
         self.assertEqual(encoded["android"]["priority"], "high")
         self.assertEqual(encoded["android"]["notification"]["sound"], "montada_push")
         self.assertEqual(encoded["android"]["notification"]["channel_id"], "montada_broadcasts")
+        self.assertNotIn("mutable-content", encoded["apns"]["payload"]["aps"])  # no image
 
     def test_android_channel_per_notification_type(self):
         from firebase import android_channel_for
