@@ -44,7 +44,7 @@ Montada Team
         send_mail(
             subject,
             message,
-            settings.EMAIL_HOST_USER if hasattr(settings, 'EMAIL_HOST_USER') else 'noreply@montada.com',
+            settings.DEFAULT_FROM_EMAIL if hasattr(settings, 'DEFAULT_FROM_EMAIL') else 'noreply@montada.com',
             ['sumsubtestmail@gmail.com'],
             fail_silently=False,
         )

@@ -42,8 +42,7 @@ def notify_team_on_new_report(sender, instance, created, **kwargs):
             send_mail(
                 subject,
                 body,
-                getattr(settings, "DEFAULT_FROM_EMAIL", None)
-                or getattr(settings, "EMAIL_HOST_USER", None),
+                settings.DEFAULT_FROM_EMAIL if hasattr(settings, 'DEFAULT_FROM_EMAIL') else 'noreply@montada.com',
                 recipients,
                 fail_silently=True,
             )
