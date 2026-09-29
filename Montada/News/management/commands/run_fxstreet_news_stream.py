@@ -22,6 +22,7 @@ from News.live_news_service import (
     fetch_fxstreet_rss_items,
     save_live_news_payload,
 )
+from News.management.commands.fetch_economic_calendar import is_skipped_event_name
 
 
 logger = logging.getLogger(__name__)
@@ -417,6 +418,10 @@ class Command(BaseCommand):
             )
 
             for item in items:
+                # ActionForex posts a daily "Eco Data 9/29/26" calendar table as news; skip it.
+                if isinstance(item, dict) and is_skipped_event_name(item.get("title")):
+                    skipped_count += 1
+                    continue
                 try:
                     instance, created, changed = save_live_news_payload(
                         item,
