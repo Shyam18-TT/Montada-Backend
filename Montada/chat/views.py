@@ -45,6 +45,30 @@ def _user_can_access_conversation(user, conversation):
     ).exists()
 
 
+def _blocked_user_ids_for(user):
+    """
+    All user ids that `user` has blocked or is blocked by, in one query.
+
+    Used to filter a conversation list without a block-check query per
+    conversation (see ConversationListCreateView.get).
+    """
+    try:
+        from django.db.models import Q as _Q
+
+        from Moderation.models import UserBlock
+
+        pairs = UserBlock.objects.filter(
+            _Q(blocker_id=user.pk) | _Q(blocked_id=user.pk)
+        ).values_list("blocker_id", "blocked_id")
+        other_ids = set()
+        for blocker_id, blocked_id in pairs:
+            other_ids.add(blocked_id if blocker_id == user.pk else blocker_id)
+        return other_ids
+    except Exception:
+        logger.exception("Failed to load block relationships for user %s.", user.pk)
+        return set()
+
+
 def _conversation_blocked_for_user(user, conversation):
     other_participants = conversation.participants.exclude(pk=user.pk)
     for participant in other_participants:
@@ -148,14 +172,48 @@ class ConversationListCreateView(APIView):
     pagination_class = ConversationPagination
 
     def get(self, request):
+        from django.db.models import Count, IntegerField, OuterRef, Subquery
+        from django.db.models.functions import Coalesce
+
+        last_message_qs = ChatMessage.objects.filter(
+            conversation=OuterRef("pk"), is_deleted=False
+        ).order_by("-created_at")
+        unread_count_qs = (
+            ChatMessage.objects.filter(
+                conversation=OuterRef("pk"), is_deleted=False, read_at__isnull=True
+            )
+            .exclude(sender=request.user)
+            .values("conversation")
+            .annotate(cnt=Count("id"))
+            .values("cnt")
+        )
+
         convos = (
             Conversation.objects.filter(participants=request.user)
             .prefetch_related("participants", "participant_links")
+            .annotate(
+                # Correlated subqueries instead of per-conversation queries in the
+                # serializer — one query for last-message fields, one for unread
+                # count, both scoped to a single conversation row each, no N+1.
+                last_message_id=Subquery(last_message_qs.values("id")[:1]),
+                last_message_sender_id=Subquery(last_message_qs.values("sender_id")[:1]),
+                last_message_content=Subquery(last_message_qs.values("content")[:1]),
+                last_message_created_at=Subquery(last_message_qs.values("created_at")[:1]),
+                unread_count_annotated=Coalesce(
+                    Subquery(unread_count_qs, output_field=IntegerField()), 0
+                ),
+            )
             .order_by("-updated_at")
         )
+
+        # One query for every block relationship involving this user, instead of
+        # one block-check query per conversation per other participant.
+        blocked_ids = _blocked_user_ids_for(request.user)
         convos = [
             convo for convo in convos
-            if not _conversation_blocked_for_user(request.user, convo)
+            if not blocked_ids.intersection(
+                p.pk for p in convo.participants.all() if p.pk != request.user.pk
+            )
         ]
         paginator = self.pagination_class()
         page = paginator.paginate_queryset(convos, request)

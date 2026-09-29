@@ -377,6 +377,19 @@ class NewsCategoryListView(generics.ListAPIView):
     serializer_class = NewsCategorySerializer
     queryset = NewsCategory.objects.all().order_by("name")
 
+    # Reference data — same for every user, changes only when an admin adds/edits
+    # a category. Short TTL rather than write-time invalidation since there's no
+    # single save path to hook (admin, management command, etc).
+    def list(self, request, *args, **kwargs):
+        from django.core.cache import cache
+
+        cache_key = "montada:news_categories:v1"
+        data = cache.get(cache_key)
+        if data is None:
+            data = self.get_serializer(self.get_queryset(), many=True).data
+            cache.set(cache_key, data, 300)
+        return Response(data)
+
 
 # Allowed query params to forward to Marketaux API (see https://www.marketaux.com/documentation)
 MARKETAUX_ALLOWED_PARAMS = {
@@ -1224,6 +1237,25 @@ class TradaysEconomicCalendarView(generics.ListAPIView):
     serializer_class = EconomicCalendarEventSerializer
     pagination_class = EconomicCalendarPagination
 
+    # Content isn't user-specific — every caller with the same filters/page sees
+    # the same events. Both dashboards poll this on a 5-min timer, plus the
+    # calendar screen itself, so short-TTL cache-aside (keyed by the exact query
+    # string) cuts a lot of duplicate DB round-trips across concurrent users
+    # without needing per-request-cost savings (the query itself is already cheap).
+    _CACHE_TTL_SECONDS = 90
+
+    def list(self, request, *args, **kwargs):
+        from django.core.cache import cache
+
+        cache_key = f"montada:economic_calendar:{request.get_full_path()}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached)
+        response = super().list(request, *args, **kwargs)
+        if response.status_code == 200:
+            cache.set(cache_key, response.data, self._CACHE_TTL_SECONDS)
+        return response
+
     def get_queryset(self):
         from django.utils.dateparse import parse_datetime
         from django.utils import timezone as tz
@@ -1235,11 +1267,8 @@ class TradaysEconomicCalendarView(generics.ListAPIView):
         date_from = self.request.query_params.get("date_from")
         date_to = self.request.query_params.get("date_to")
 
-        print(date_from)
-
         if date_from:
             parsed = parse_datetime(date_from)
-            print(f"parsed = {parsed}")
             if parsed:
                 qs = qs.filter(release_date__gte=parsed)
 

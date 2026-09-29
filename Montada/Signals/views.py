@@ -376,6 +376,20 @@ class TimeframeListView(generics.ListAPIView):
     permission_classes = [permissions.IsAuthenticated]
     pagination_class = None  # Disable pagination
 
+    # Reference data hit on every create-signal screen open, same response for
+    # every user. Short TTL cache-aside — TTL alone is enough since this table
+    # changes rarely and staleness of a few minutes is harmless here.
+    def list(self, request, *args, **kwargs):
+        from django.core.cache import cache
+        from rest_framework.response import Response
+
+        cache_key = "montada:timeframes:v1"
+        data = cache.get(cache_key)
+        if data is None:
+            data = self.get_serializer(self.get_queryset(), many=True).data
+            cache.set(cache_key, data, 300)
+        return Response(data)
+
 
 class AssetClassWithInstrumentsView(generics.ListAPIView):
     """
@@ -386,7 +400,7 @@ class AssetClassWithInstrumentsView(generics.ListAPIView):
     serializer_class = AssetClassWithInstrumentsSerializer
     permission_classes = [permissions.IsAuthenticated]
     pagination_class = None  # Disable pagination for this view
-    
+
     def get_queryset(self):
         """
         Optimize query by prefetching instruments
@@ -394,6 +408,19 @@ class AssetClassWithInstrumentsView(generics.ListAPIView):
         return AssetClass.objects.filter(
             is_active=True
         ).prefetch_related('instruments').order_by('name')
+
+    # Same rationale as TimeframeListView above — semi-static reference data,
+    # identical response for every user.
+    def list(self, request, *args, **kwargs):
+        from django.core.cache import cache
+        from rest_framework.response import Response
+
+        cache_key = "montada:asset_classes_with_instruments:v1"
+        data = cache.get(cache_key)
+        if data is None:
+            data = self.get_serializer(self.get_queryset(), many=True).data
+            cache.set(cache_key, data, 300)
+        return Response(data)
 
 
 class AnalystSignalListView(generics.ListAPIView):

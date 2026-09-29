@@ -251,6 +251,16 @@ class TradingSignal(models.Model):
     objects = models.Manager()  # Default manager (includes all signals)
     active = ActiveSignalManager()  # Manager that excludes soft-deleted signals
 
+    class Meta:
+        # AnalystSignalListView / TraderSignalListView both filter on
+        # analyst (+ optional status) and order by -created_at; without a
+        # composite index Django only has the implicit single-column FK
+        # index on analyst, so MSSQL falls back to a scan/bookmark lookup
+        # for the filtered+ordered read instead of a covering seek.
+        indexes = [
+            models.Index(fields=["analyst", "status", "-created_at"], name="signal_analyst_status_created"),
+        ]
+
     # -------------------------
     # VALIDATION
     # -------------------------

@@ -73,6 +73,20 @@ class ConversationListSerializer(serializers.ModelSerializer):
         )
 
     def get_last_message(self, obj):
+        # Prefer the annotated fields the view attaches via a correlated
+        # subquery (no extra query here). Falls back to a live lookup so
+        # this serializer still works if used somewhere without them.
+        if hasattr(obj, "last_message_id"):
+            last_id = obj.last_message_id
+            if not last_id:
+                return None
+            content = obj.last_message_content or ""
+            return {
+                "id": str(last_id),
+                "sender_id": str(obj.last_message_sender_id) if obj.last_message_sender_id else None,
+                "content": content[:100] + ("..." if len(content) > 100 else ""),
+                "created_at": obj.last_message_created_at,
+            }
         last = obj.messages.filter(is_deleted=False).order_by("-created_at").first()
         if not last:
             return None
@@ -84,6 +98,8 @@ class ConversationListSerializer(serializers.ModelSerializer):
         }
 
     def get_unread_count(self, obj):
+        if hasattr(obj, "unread_count_annotated"):
+            return obj.unread_count_annotated or 0
         request = self.context.get("request")
         if not request or not request.user:
             return 0
