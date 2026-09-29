@@ -161,6 +161,11 @@ class NewsArticleListView(generics.ListAPIView):
         if category_id:
             qs = qs.filter(category_id=category_id)
 
+
+        analyst_id = self.request.query_params.get('analyst')
+        # if analyst_id:
+        #     qs = qs.filter(author=)
+
         # Annotate like_count, comment_count, current_user_liked for list
         qs = qs.annotate(
             like_count=Count("likes", distinct=True),
