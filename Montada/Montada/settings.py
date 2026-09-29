@@ -297,14 +297,22 @@ PUBLIC_MEDIA_BASE_URL = 'https://api.themontada.com'
 MARKETAUX_API_TOKEN = "vIWcnrrYFI0FBaNnAgD0DAeiQ2prDE7QakmniN9h"
 
 # Email configuration
-# Configure these settings with your email provider credentials
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
-EMAIL_HOST = 'smtp.gmail.com'  # Change to your SMTP server
-EMAIL_PORT = 587
-EMAIL_USE_TLS = True
-EMAIL_HOST_USER = 'noreplymontada@gmail.com'  # Your email address
-EMAIL_HOST_PASSWORD = 'curndnoiccqllysv'  # Your email password or app-specific password
+# EMAIL_HOST = 'smtp.gmail.com'  # Change to your SMTP server
+# EMAIL_PORT = 587
+# EMAIL_USE_TLS = True
+# EMAIL_HOST_USER = 'noreplymontada@gmail.com'  # Your email address
+# EMAIL_HOST_PASSWORD = 'curndnoiccqllysv'  # Your email password or app-specific password
 # DEFAULT_FROM_EMAIL = ''  # Default sender email address
+EMAIL_HOST = "smtp-relay.brevo.com"
+EMAIL_PORT = 465
+EMAIL_USE_SSL = True
+EMAIL_USE_TLS = False
+
+EMAIL_HOST_USER = "shanooj@trustlns.ae"
+EMAIL_HOST_PASSWORD = "W9r8UAC2EFfjxGLt"
+
+DEFAULT_FROM_EMAIL = "noreply@montada.com"
 
 # For Gmail, you may need to use an App Password instead of your regular password
 # For other providers, adjust EMAIL_HOST, EMAIL_PORT, EMAIL_USE_TLS/EMAIL_USE_SSL accordingly
