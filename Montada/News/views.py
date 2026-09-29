@@ -98,6 +98,7 @@ class NewsArticleListView(generics.ListAPIView):
 
     def get_queryset(self):
         user_type = getattr(self.request.user, "user_type", "trader")
+        print(user_type)
         qs = NewsArticle.objects.filter(is_deleted=False).select_related("author", "category").prefetch_related("tags").order_by("-created_at")
 
         if user_type == "trader":
@@ -115,6 +116,10 @@ class NewsArticleListView(generics.ListAPIView):
                 category_id = self.request.query_params.get("category")
                 if category_id:
                     qs = qs.filter(category_id=category_id)
+
+                analyst_id = self.request.query_params.get('analyst')
+                if analyst_id:
+                    qs = qs.filter(author_id=analyst_id)
 
                 qs = qs.annotate(
                     like_count=Count("likes", distinct=True),

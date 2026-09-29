@@ -58,7 +58,7 @@ class NewsArticle(models.Model):
     slug = models.SlugField(max_length=270, unique=True, blank=True, null=True)
 
     summary = models.TextField(blank=True, null=True)
-    content = models.TextField(default=ContentAccess.FREE)
+    content = models.TextField(blank=True, null=True)
 
     featured_image = models.ImageField(upload_to='news/', blank=True, null=True)
 
