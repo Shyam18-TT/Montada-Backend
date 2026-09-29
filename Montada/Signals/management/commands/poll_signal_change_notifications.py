@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import time
 import uuid
 from decimal import Decimal, InvalidOperation, ROUND_FLOOR
@@ -37,12 +38,20 @@ _SYMBOL_ALIASES = {
 
 DEFAULT_PRICE_URL = "https://trustcapital.com/api/get-MT5-price"
 DEFAULT_THRESHOLD_PERCENT = Decimal("0.5")
-# UAE, US and EU stocks first alert at 2%, then every 0.5% after (2, 2.5, 3, ...).
-# Other instruments alert every DEFAULT_THRESHOLD_PERCENT (0.5, 1, 1.5, ...).
-DEFAULT_US_EU_SHARE_THRESHOLD_PERCENT = Decimal("2.0")
+# UAE, US and EU stocks and crypto first alert at 5%, then every 0.5% after (5, 5.5, 6, ...).
+# Other instruments (forex, metals, indices, energy, ...) alert every
+# DEFAULT_THRESHOLD_PERCENT (0.5, 1, 1.5, ...).
+DEFAULT_US_EU_SHARE_THRESHOLD_PERCENT = Decimal("5.0")
 DEFAULT_SHARE_STEP_PERCENT = Decimal("0.5")
 _SHARE_ASSET_CLASS_NAMES = frozenset({
     "share", "shares", "stock", "stocks", "equity", "equities", "mena shares", "menashares",
+    "crypto", "cryptos", "cryptocurrency", "cryptocurrencies",
+})
+# Crypto symbols as named by the live-quote feed (normalized). Signals.utils has no crypto
+# category, so these are listed here to get the same 5% threshold as stocks.
+_CRYPTO_SYMBOLS = frozenset({
+    "ADAUSD", "BCHUSD", "BNBUSD", "BTCUSD", "DOGEUSD", "DOGUSD", "DOTUSD", "ETHUSD",
+    "LNKUSD", "LTCUSD", "SOLUSD", "XLMUSD", "XRPUSD",
 })
 DEFAULT_STATE_TTL_SECONDS = 60 * 60 * 24 * 7
 DEFAULT_LOCK_TTL_SECONDS = 60
@@ -56,8 +65,38 @@ STATE_CACHE_KEY_PREFIX = "signals:change-notifications:state"
 LOCK_CACHE_KEY_PREFIX = "signals:change-notifications:lock"
 
 
+# Dated futures contracts in the feed: base + "_" or "." + month code + 2-digit year.
+_FUTURES_CONTRACT_RE = re.compile(r"^(.+?)[._][FGHJKMNQUVXZ]\d{2}$")
+
+
 def _normalize_symbol(symbol):
     return str(symbol or "").replace("/", "").replace(" ", "").upper()
+
+
+def _futures_base_symbol(symbol):
+    """Base symbol of a dated futures contract (US100_Z26 / US100.Z26 -> US100), else None."""
+    match = _FUTURES_CONTRACT_RE.match(symbol)
+    return match.group(1) if match else None
+
+
+def _drop_duplicate_futures(symbols):
+    """
+    Symbols to skip because they duplicate another feed symbol: a futures contract whose
+    spot symbol is also in the feed, or extra spellings of the same contract
+    (GER40.Z26 and GER40_Z26). Futures-only markets (e.g. COCOA_Z26) keep one contract.
+    """
+    symbols = set(symbols)
+    skipped = set()
+    kept_base = set()
+    for symbol in sorted(symbols):
+        base = _futures_base_symbol(symbol)
+        if base is None:
+            continue
+        if base in symbols or base in kept_base:
+            skipped.add(symbol)
+        else:
+            kept_base.add(base)
+    return skipped
 
 
 def _symbol_alias_candidates(symbol):
@@ -353,7 +392,13 @@ class Command(BaseCommand):
                 continue
             quotes_by_symbol[symbol] = quote
 
+        duplicate_futures = _drop_duplicate_futures(quotes_by_symbol)
+        for symbol in duplicate_futures:
+            quotes_by_symbol.pop(symbol, None)
+
         if self.verbose:
+            if duplicate_futures:
+                self.stdout.write("Skipped duplicate futures: %s" % ", ".join(sorted(duplicate_futures)))
             if excluded_symbols:
                 self.stdout.write("Excluded symbols: %s" % ", ".join(sorted(excluded_symbols)))
             if filtered_symbols:
@@ -708,8 +753,8 @@ class Command(BaseCommand):
             self._release_symbol_lock(symbol, lock_token)
 
     def _load_share_symbols(self):
-        """Normalized symbols of all stock instruments, so shares use the share threshold
-        even when nobody has an open signal on them."""
+        """Normalized symbols of all stock and crypto instruments, so they use the share
+        threshold even when nobody has an open signal on them."""
         from Signals.utils import MARKET_DATA_SYMBOLS_BY_CATEGORY
 
         share_symbols = {
@@ -717,6 +762,7 @@ class Command(BaseCommand):
             for category in ("shares", "menashares")
             for symbol in MARKET_DATA_SYMBOLS_BY_CATEGORY.get(category, [])
         }
+        share_symbols.update(_CRYPTO_SYMBOLS)
         try:
             from Signals.models import Instrument
 

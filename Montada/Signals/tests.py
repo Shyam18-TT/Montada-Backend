@@ -41,25 +41,41 @@ class SignalChangeNotificationThresholdTests(TestCase):
     def setUp(self):
         self.command = Command()
         self.command.threshold = Decimal("0.5")
-        self.command.share_threshold = Decimal("2.0")
+        self.command.share_threshold = Decimal("5.0")
         self.command.share_step = Decimal("0.5")
 
-    def test_share_levels_start_at_two_percent_then_every_half_percent(self):
+    def test_share_levels_start_at_five_percent_then_every_half_percent(self):
         from Signals.management.commands.poll_signal_change_notifications import (
             _step_count_for,
             _step_percentage,
         )
 
-        start, step = Decimal("2.0"), Decimal("0.5")
-        self.assertEqual(_step_count_for(Decimal("1.9"), start, step), 0)
-        self.assertEqual(_step_count_for(Decimal("2.0"), start, step), 1)
-        self.assertEqual(_step_count_for(Decimal("3.2"), start, step), 3)
+        start, step = Decimal("5.0"), Decimal("0.5")
+        self.assertEqual(_step_count_for(Decimal("4.9"), start, step), 0)
+        self.assertEqual(_step_count_for(Decimal("5.0"), start, step), 1)
+        self.assertEqual(_step_count_for(Decimal("6.2"), start, step), 3)
         self.assertEqual(
             [_step_percentage(n, start, step) for n in (1, 2, 3)],
-            [Decimal("2.0"), Decimal("2.5"), Decimal("3.0")],
+            [Decimal("5.0"), Decimal("5.5"), Decimal("6.0")],
         )
 
-    def test_share_asset_class_uses_two_percent_threshold(self):
+    def test_duplicate_futures_contracts_are_skipped(self):
+        from Signals.management.commands.poll_signal_change_notifications import _drop_duplicate_futures
+
+        symbols = {
+            "US100", "US100_Z26", "US100.Z26", "GER40.Z26", "GER40_Z26",
+            "COCOA_Z26", "SUGAR_H27", "EMAAR.DEVEL", "NBD.BANK",
+        }
+        skipped = _drop_duplicate_futures(symbols)
+        self.assertEqual(skipped, {"US100_Z26", "US100.Z26", "GER40_Z26"})
+
+    def test_crypto_and_metals_thresholds(self):
+        self.command._share_symbols = {"BTCUSD", "ETHUSD"}
+        self.assertEqual(self.command._get_notification_threshold("BTCUSD", []), Decimal("5.0"))
+        self.assertEqual(self.command._get_notification_threshold("GOLD", []), Decimal("0.5"))
+        self.assertEqual(self.command._get_notification_threshold("SILVER", []), Decimal("0.5"))
+
+    def test_share_asset_class_uses_five_percent_threshold(self):
         asset_class = AssetClass.objects.create(name="Shares")
         instrument = Instrument.objects.create(asset_class=asset_class, symbol="AAPL")
         signal = TradingSignal.objects.create(
@@ -80,7 +96,7 @@ class SignalChangeNotificationThresholdTests(TestCase):
             status=TradingSignal.Status.OPEN,
         )
 
-        self.assertEqual(self.command._get_notification_threshold("AAPL", [signal]), Decimal("2.0"))
+        self.assertEqual(self.command._get_notification_threshold("AAPL", [signal]), Decimal("5.0"))
 
     def test_non_share_asset_class_keeps_half_percent_threshold(self):
         asset_class = AssetClass.objects.create(name="Forex")
@@ -105,7 +121,7 @@ class SignalChangeNotificationThresholdTests(TestCase):
 
         self.assertEqual(self.command._get_notification_threshold("EURUSD", [signal]), Decimal("0.5"))
 
-    def test_mena_share_asset_class_uses_two_percent_threshold(self):
+    def test_mena_share_asset_class_uses_five_percent_threshold(self):
         asset_class = AssetClass.objects.create(name="Mena Shares")
         instrument = Instrument.objects.create(asset_class=asset_class, symbol="DEWA")
         signal = TradingSignal.objects.create(
@@ -126,14 +142,14 @@ class SignalChangeNotificationThresholdTests(TestCase):
             status=TradingSignal.Status.OPEN,
         )
 
-        self.assertEqual(self.command._get_notification_threshold("DEWA", [signal]), Decimal("2.0"))
+        self.assertEqual(self.command._get_notification_threshold("DEWA", [signal]), Decimal("5.0"))
 
-    def test_share_without_open_signal_uses_two_percent_threshold(self):
+    def test_share_without_open_signal_uses_five_percent_threshold(self):
         asset_class = AssetClass.objects.create(name="Mena Shares")
         Instrument.objects.create(asset_class=asset_class, symbol="ADNOC.Gas")
         self.command._share_symbols = self.command._load_share_symbols()
 
-        self.assertEqual(self.command._get_notification_threshold("ADNOC.GAS", []), Decimal("2.0"))
+        self.assertEqual(self.command._get_notification_threshold("ADNOC.GAS", []), Decimal("5.0"))
         self.assertEqual(self.command._get_notification_threshold("EURUSD", []), Decimal("0.5"))
 
     def test_level_notification_does_not_repeat_within_cooldown_window(self):
@@ -157,7 +173,7 @@ class SignalChangeNotificationThresholdTests(TestCase):
         command.timeout = 1
         command.verbose = False
         command.threshold = Decimal("0.5")
-        command.share_threshold = Decimal("2.0")
+        command.share_threshold = Decimal("5.0")
         command.share_step = Decimal("0.5")
         command.reset_threshold = Decimal("0.3")
         command.state_ttl = 3600
