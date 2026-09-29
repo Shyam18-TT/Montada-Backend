@@ -173,10 +173,10 @@ class NewsArticleListView(generics.ListAPIView):
         return qs
 
 
-class AnalystNewsArticleDetailView(generics.RetrieveUpdateAPIView):
+class AnalystNewsArticleDetailView(generics.RetrieveUpdateDestroyAPIView):
     """
-    GET: Retrieve a news article. PUT/PATCH: Update the article.
-    Only the analyst who created the article (author) can retrieve or update it.
+    GET: Retrieve a news article. PUT/PATCH: Update the article. DELETE: Soft-delete the article.
+    Only the analyst who created the article (author) can retrieve, update or delete it.
     GET response includes like_count, comment_count.
     """
     permission_classes = [permissions.IsAuthenticated, IsAnalystPermission]
@@ -207,6 +207,15 @@ class AnalystNewsArticleDetailView(generics.RetrieveUpdateAPIView):
         serializer.save()
         return Response(
             {"message": "Article updated successfully.", "article": serializer.data},
+            status=status.HTTP_200_OK,
+        )
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        instance.is_deleted = True
+        instance.save(update_fields=["is_deleted", "updated_at"])
+        return Response(
+            {"message": "Article deleted successfully."},
             status=status.HTTP_200_OK,
         )
 
