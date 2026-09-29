@@ -163,8 +163,8 @@ class NewsArticleListView(generics.ListAPIView):
 
 
         analyst_id = self.request.query_params.get('analyst')
-        # if analyst_id:
-        #     qs = qs.filter(author=)
+        if analyst_id:
+            qs = qs.filter(author_id=analyst_id)
 
         # Annotate like_count, comment_count, current_user_liked for list
         qs = qs.annotate(

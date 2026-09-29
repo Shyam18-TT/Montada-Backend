@@ -606,6 +606,13 @@ class TraderSignalListView(generics.ListAPIView):
                 is_active=True,
             ).values_list("followed_id", flat=True)
         )
+
+        analyst = self.request.query_params.get("analyst", None)
+        if analyst:
+            following_analyst_ids = [analyst]
+            
+        if analyst in following_analyst_ids:
+            pass
         visible_analyst_ids = filter_visible_analyst_ids_for_signals(
             user, following_analyst_ids
         )
