@@ -65,6 +65,16 @@ _ensure_firebase_app()
 _FCM_MULTICAST_CHUNK = 500  # FCM limit per MulticastMessage
 
 
+def push_enabled() -> bool:
+    """Master switch: settings.FCM_PUSH_ENABLED (env FCM_PUSH_ENABLED). Defaults to on if unset."""
+    try:
+        from django.conf import settings
+
+        return bool(getattr(settings, "FCM_PUSH_ENABLED", True))
+    except Exception:
+        return True
+
+
 def _clean_tokens(tokens: Iterable[str]) -> list[str]:
     cleaned_tokens: list[str] = []
     seen_tokens: set[str] = set()
@@ -228,6 +238,9 @@ def send_push_to_tokens(
     tokens = _clean_tokens(tokens)
     if not tokens:
         return {"success_count": 0, "failure_count": 0, "failed_tokens": [], "errors": []}
+    if not push_enabled():
+        logger.info("FCM push disabled (FCM_PUSH_ENABLED=false) – skipped %d token(s).", len(tokens))
+        return {"success_count": 0, "failure_count": 0, "failed_tokens": [], "errors": []}
     if not _ensure_firebase_app():
         return {
             "success_count": 0,
@@ -337,6 +350,9 @@ def send_push_to_users(
     -------
     Same dict as send_push_to_tokens.
     """
+    if not push_enabled():
+        logger.info("FCM push disabled (FCM_PUSH_ENABLED=false) – skipping send to users.")
+        return {"success_count": 0, "failure_count": 0, "failed_tokens": [], "errors": []}
     users = _filter_users_who_blocked_source(users, data)
     tokens = get_push_tokens_for_users(users)
     if not tokens:

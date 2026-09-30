@@ -357,6 +357,11 @@ MARKET_NEWS_AND_DATA_FREE_ACCESS = os.environ.get(
     "MARKET_NEWS_AND_DATA_FREE_ACCESS", "true"
 ).lower() in ("1", "true", "yes", "on")
 
+# Master switch for Firebase (FCM) push notifications. When False, no push is sent to FCM
+# (in-app notifications and websockets are unaffected). Currently OFF.
+# Turn back on with env FCM_PUSH_ENABLED=true (or change the default) and restart the workers.
+FCM_PUSH_ENABLED = False
+
 # MT5 Manager API (for run_price_alerts --use-mt5-manager). Optional; can use env vars instead.
 MT5_MANAGER_SERVER   = os.environ.get("MT5_MANAGER_SERVER", "23.83.116.76:443")   # e.g. "192.168.1.100:443"
 MT5_MANAGER_LOGIN    = os.environ.get("MT5_MANAGER_LOGIN", "5022")    # e.g. 1002
