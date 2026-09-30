@@ -119,7 +119,47 @@ def _build_chat_notification_payload(conversation, message, recipient):
     }
 
 
+def _send_chat_push(conversation, message, recipients):
+    """Queue an FCM push to each recipient's devices for a new chat message."""
+    try:
+        from firebase import send_push_to_users_in_background
+
+        sender = getattr(message, "sender", None)
+        recipients = [
+            r for r in recipients
+            if not (sender and _users_are_blocked(sender, r))
+        ]
+        if not recipients:
+            return
+
+        sender_name = (
+            getattr(sender, "name", None)
+            or getattr(sender, "username", None)
+            or "New message"
+        )
+        content = (message.content or "").strip()
+        body = content if len(content) <= 140 else f"{content[:137]}..."
+        # sender_id lets firebase.py skip recipients who blocked the sender.
+        data = {
+            "type": "chat_message",
+            "conversation_id": str(conversation.id),
+            "message_id": str(message.id),
+            "sender_id": str(getattr(sender, "id", "")),
+            "sender_name": str(sender_name),
+        }
+        send_push_to_users_in_background(
+            users=recipients,
+            title=str(sender_name),
+            body=body,
+            data=data,
+        )
+    except Exception:
+        logger.exception("Chat push notification failed for conversation %s.", conversation.id)
+
+
 def _broadcast_chat_notification(conversation, message, recipients):
+    recipients = list(recipients)
+    _send_chat_push(conversation, message, recipients)
     try:
         from asgiref.sync import async_to_sync
         from channels.layers import get_channel_layer
