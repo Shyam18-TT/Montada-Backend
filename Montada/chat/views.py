@@ -246,7 +246,11 @@ class ConversationListCreateView(APIView):
                     Subquery(unread_count_qs, output_field=IntegerField()), 0
                 ),
             )
-            .order_by("-updated_at")
+            # Newest conversation first, by the time of its latest (non-deleted) message.
+            # Conversations with no messages yet fall back to their creation time.
+            # (updated_at is auto_now, so it is not a reliable "last sent" time.)
+            .annotate(sort_at=Coalesce("last_message_created_at", "created_at"))
+            .order_by("-sort_at", "-created_at")
         )
 
         # One query for every block relationship involving this user, instead of
