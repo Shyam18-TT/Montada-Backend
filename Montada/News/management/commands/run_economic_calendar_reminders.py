@@ -323,14 +323,22 @@ class Command(BaseCommand):
             importance=EconomicCalendarEvent.Importance.HIGH,
         ).exclude(Exists(already_sent))
 
+        # The feed holds one row per country/currency, so "GDP q/q" at 09:00 can exist many
+        # times. Users only need one notification per name + time.
+        sent_keys = self._already_notified_keys(
+            release_start, release_end, notification_type, sent_to_all_users=True,
+        )
+        event_groups = self._group_duplicate_events(upcoming_events)
+
         if verbose:
             self.stdout.write(
-                f"Found {upcoming_events.count()} events for global {minutes_before}-min advance reminders."
+                f"Found {len(event_groups)} distinct events for global {minutes_before}-min advance reminders."
             )
 
         count = 0
 
-        for event in upcoming_events:
+        for group in event_groups:
+            event = group[0]
             try:
                 if dry_run:
                     count += 1
@@ -341,11 +349,21 @@ class Command(BaseCommand):
                         )
                     continue
 
-                # Claim in DB before push so overlapping scheduler ticks cannot double-send.
-                if not EconomicCalendarEventNotification.claim_admin_advance_notification(event):
+                # Claim every row in DB before push so overlapping scheduler ticks cannot double-send.
+                claimed = [
+                    ev for ev in group
+                    if EconomicCalendarEventNotification.claim_admin_advance_notification(ev)
+                ]
+                if not claimed:
                     if verbose:
                         self.stdout.write(
                             f"  ⊘ Global advance reminder already sent for {event.event_name} ({event.id})"
+                        )
+                    continue
+                if self._event_key(event) in sent_keys:
+                    if verbose:
+                        self.stdout.write(
+                            f"  ⊘ Same-name event already notified for {event.event_name} — skipping duplicate"
                         )
                     continue
 
@@ -358,11 +376,11 @@ class Command(BaseCommand):
                     continue
 
                 try:
-                    self._send_global_advance_notification(event, users, minutes_before)
+                    self._send_global_advance_notification(event, users, minutes_before, events=group)
                 except Exception as send_err:
                     # Keep the claim row so the next scheduler tick cannot double-send.
                     EconomicCalendarEventNotification.objects.filter(
-                        event=event,
+                        event__in=group,
                         user=None,
                         notification_type=notification_type,
                         sent_to_all_users=True,
@@ -399,9 +417,45 @@ class Command(BaseCommand):
 
         return count
 
-    def _send_global_advance_notification(self, event, users, minutes_before):
+    @staticmethod
+    def _event_key(event):
+        return ((event.event_name or "").strip().lower(), event.release_date)
+
+    def _group_duplicate_events(self, events):
+        """Group events sharing the same name + release time; returns a list of lists."""
+        groups = {}
+        for event in events:
+            groups.setdefault(self._event_key(event), []).append(event)
+        return list(groups.values())
+
+    def _already_notified_keys(self, start, end, notification_type, sent_to_all_users):
+        """Name + time keys of events in [start, end] that already have a broadcast claim."""
+        rows = EconomicCalendarEventNotification.objects.filter(
+            user__isnull=True,
+            notification_type=notification_type,
+            sent_to_all_users=sent_to_all_users,
+            event__release_date__gte=start,
+            event__release_date__lte=end,
+        ).values_list("event__event_name", "event__release_date")
+        return {((name or "").strip().lower(), released) for name, released in rows}
+
+    @staticmethod
+    def _event_location_label(events):
+        """Country names for the group, falling back to currency codes when the feed has none."""
+        labels = []
+        for ev in events:
+            label = (ev.country_name or ev.currency_code or "").strip()
+            if label and label not in labels:
+                labels.append(label)
+        if not labels:
+            return "Unknown"
+        if len(labels) > 3:
+            return f"{', '.join(labels[:3])} +{len(labels) - 3} more"
+        return ", ".join(labels)
+
+    def _send_global_advance_notification(self, event, users, minutes_before, events=None):
         """FCM + in-app notification to all active users before an economic event."""
-        country = event.country_name or "Unknown"
+        country = self._event_location_label(events or [event])
         impact = event.get_importance_display()
         title = f"Upcoming: {event.event_name}"
         body = (
@@ -475,16 +529,24 @@ class Command(BaseCommand):
             importance=EconomicCalendarEvent.Importance.HIGH,
         )
 
-        if verbose:
-            self.stdout.write(f"Found {recent_events.count()} events occurring in the last 5 minutes.")
+        broadcast_type = EconomicCalendarEventNotification.NotificationType.BROADCAST
+        sent_keys = self._already_notified_keys(
+            event_window_start, event_window_end, broadcast_type, sent_to_all_users=True,
+        )
+        event_groups = self._group_duplicate_events(recent_events)
 
-        for event in recent_events:
+        if verbose:
+            self.stdout.write(f"Found {len(event_groups)} distinct events occurring in the last 5 minutes.")
+
+        for group in event_groups:
+            event = group[0]
             try:
-                # Check if we already sent a broadcast notification for this event
-                notification_already_sent = EconomicCalendarEventNotification.check_notification_sent(
-                    event=event,
-                    user=None,
-                    notification_type=EconomicCalendarEventNotification.NotificationType.BROADCAST
+                # Already notified for this name + time (any row of the group)?
+                notification_already_sent = self._event_key(event) in sent_keys or any(
+                    EconomicCalendarEventNotification.check_notification_sent(
+                        event=ev, user=None, notification_type=broadcast_type,
+                    )
+                    for ev in group
                 )
 
                 if notification_already_sent:
@@ -497,14 +559,17 @@ class Command(BaseCommand):
                 if not dry_run:
                     # Claim notification FIRST (in separate transaction) before sending
                     # This prevents duplicate sends if FCM push fails
-                    claimed = EconomicCalendarEventNotification.create_notification_record(
-                        event=event,
-                        user=None,
-                        notification_type=EconomicCalendarEventNotification.NotificationType.BROADCAST,
-                        sent_to_all=True,
-                        is_sent=False  # Mark as in-progress, not yet sent
-                    )
-                    
+                    claimed = [
+                        ev for ev in group
+                        if EconomicCalendarEventNotification.create_notification_record(
+                            event=ev,
+                            user=None,
+                            notification_type=broadcast_type,
+                            sent_to_all=True,
+                            is_sent=False  # Mark as in-progress, not yet sent
+                        )
+                    ]
+
                     if not claimed:
                         if verbose:
                             self.stdout.write(
@@ -517,12 +582,12 @@ class Command(BaseCommand):
                         users_to_notify = self._get_users_for_event_notification(event)
                         
                         # Send the actual notifications
-                        self._send_event_notification(event, users_to_notify, mark_sent=True)
-                        
+                        self._send_event_notification(event, users_to_notify, mark_sent=True, events=group)
+
                     except Exception as send_err:
                         # Mark as failed but keep the claim to prevent retries
                         EconomicCalendarEventNotification.objects.filter(
-                            event=event,
+                            event__in=group,
                             user=None,
                             notification_type=EconomicCalendarEventNotification.NotificationType.BROADCAST,
                             sent_to_all_users=True,
@@ -573,7 +638,7 @@ class Command(BaseCommand):
 
         return list(all_users)
 
-    def _send_event_notification(self, event, users, mark_sent=False):
+    def _send_event_notification(self, event, users, mark_sent=False, events=None):
         """
         Send FCM push + in-app notifications for an economic event to all users.
         
@@ -648,7 +713,7 @@ class Command(BaseCommand):
         # Mark as sent AFTER successful delivery (in separate transaction)
         if mark_sent:
             EconomicCalendarEventNotification.objects.filter(
-                event=event,
+                event__in=events or [event],
                 user=None,
                 notification_type=EconomicCalendarEventNotification.NotificationType.BROADCAST,
                 sent_to_all_users=True,
