@@ -223,6 +223,9 @@ class ConversationListCreateView(APIView):
                 conversation=OuterRef("pk"), is_deleted=False, read_at__isnull=True
             )
             .exclude(sender=request.user)
+            # Clear ChatMessage.Meta.ordering: SQL Server rejects a non-grouped column
+            # (created_at) in the ORDER BY of a GROUP BY subquery (error 8127).
+            .order_by()
             .values("conversation")
             .annotate(cnt=Count("id"))
             .values("cnt")
