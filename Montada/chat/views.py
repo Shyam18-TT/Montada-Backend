@@ -335,7 +335,7 @@ class ConversationDetailView(APIView):
 
 class MessageListCreateView(APIView):
     """
-    GET: List messages in a conversation (paginated, newest first for display reverse).
+    GET: List messages in a conversation (paginated, newest first).
     POST: Send a new message; broadcasts to WebSocket group.
     """
     permission_classes = [IsAuthenticated]
@@ -356,11 +356,11 @@ class MessageListCreateView(APIView):
                 {"error": "You are not part of this conversation."},
                 status=status.HTTP_403_FORBIDDEN,
             )
-        # Chronological order (oldest first) so the list is natural chat order
+        # Newest first: page 1 holds the latest messages, later pages go further back.
         messages = (
             conv.messages.filter(is_deleted=False)
             .select_related("sender")
-            .order_by("created_at")
+            .order_by("-created_at", "-id")
         )
         paginator = self.pagination_class()
         page = paginator.paginate_queryset(messages, request)
