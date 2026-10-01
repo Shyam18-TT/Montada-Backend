@@ -814,3 +814,61 @@ class TestJson(APIView):
     permission_classes = [permissions.AllowAny]
     def get(self, request):
         return Response({'message':"Response from the server"})
+
+class NotificationPreferencesView(APIView):
+    """
+    Per-category notification settings for the authenticated user.
+
+    GET: every category the user can configure, with its current mode.
+        {
+          "modes": ["sound", "silent", "off"],
+          "preferences": [
+            {"category": "NEWS", "label": "News", "description": "...",
+             "mode": "sound", "enabled": true, "sound": true},
+            ...
+          ]
+        }
+    PUT / PATCH: change one or more categories (others are left as they are). Body:
+        {"preferences": {"NEWS": "silent", "MESSAGES": "off"}}
+      or
+        {"preferences": [{"category": "NEWS", "enabled": true, "sound": false}]}
+      Returns the same payload as GET.
+
+    Modes: "sound" = notify with sound (default), "silent" = notify without sound,
+    "off" = no push and no in-app notification for that category.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def _payload(self, user):
+        from .notification_preferences import CATEGORIES, MODES, OFF, SOUND, categories_for_user, get_user_modes
+
+        modes = get_user_modes(user)
+        return {
+            "modes": list(MODES),
+            "preferences": [
+                {
+                    "category": key,
+                    "label": CATEGORIES[key]["label"],
+                    "description": CATEGORIES[key]["description"],
+                    "mode": modes[key],
+                    "enabled": modes[key] != OFF,
+                    "sound": modes[key] == SOUND,
+                }
+                for key in categories_for_user(user)
+            ],
+        }
+
+    def get(self, request):
+        return Response(self._payload(request.user), status=status.HTTP_200_OK)
+
+    def put(self, request):
+        from .notification_preferences import save_user_modes
+        from .serializers import NotificationPreferencesUpdateSerializer
+
+        serializer = NotificationPreferencesUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        save_user_modes(request.user, serializer.validated_data["preferences"])
+        return Response(self._payload(request.user), status=status.HTTP_200_OK)
+
+    def patch(self, request):
+        return self.put(request)

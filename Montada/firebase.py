@@ -198,14 +198,21 @@ _ANDROID_CHANNEL_BY_TYPE = {
 }
 
 
-def android_channel_for(data: Optional[dict]) -> str:
+# Silent variant of every channel: the app must create "<channel>_silent" with no sound,
+# because on Android 8+ only the channel (not the message) decides whether a sound plays.
+ANDROID_SILENT_CHANNEL_SUFFIX = "_silent"
+
+
+def android_channel_for(data: Optional[dict], sound: bool = True) -> str:
     """Android notification channel for a push, based on its data payload."""
     data = data or {}
     push_type = str(data.get("type") or "").strip().lower()
     if push_type == "economic_event":
         importance = str(data.get("importance") or "").strip().lower()
-        return "montada_economic_high" if importance == "high" else "montada_economic"
-    return _ANDROID_CHANNEL_BY_TYPE.get(push_type, ANDROID_DEFAULT_CHANNEL_ID)
+        channel = "montada_economic_high" if importance == "high" else "montada_economic"
+    else:
+        channel = _ANDROID_CHANNEL_BY_TYPE.get(push_type, ANDROID_DEFAULT_CHANNEL_ID)
+    return channel if sound else channel + ANDROID_SILENT_CHANNEL_SUFFIX
 
 
 def send_push_to_tokens(
@@ -214,6 +221,7 @@ def send_push_to_tokens(
     body: str,
     data: Optional[dict] = None,
     image_url: Optional[str] = None,
+    sound: bool = True,
 ) -> dict:
     """
     Send an FCM push notification to a list of device tokens.
@@ -226,6 +234,7 @@ def send_push_to_tokens(
     data      : optional dict of string key-value pairs sent as the data payload
                 (all values must be strings).
     image_url : optional URL to an image shown in the notification.
+    sound     : False delivers the notification silently (silent Android channel, no iOS sound).
 
     Returns
     -------
@@ -252,6 +261,8 @@ def send_push_to_tokens(
     # Ensure data values are all strings (FCM requirement)
     clean_data = {str(k): str(v) for k, v in (data or {}).items()}
     clean_data["source"] = "montada-app"
+    # Lets the app decide whether to play a sound for foreground notifications it shows itself.
+    clean_data["sound"] = "1" if sound else "0"
 
     notification = messaging.Notification(
         title=title,
@@ -264,8 +275,8 @@ def send_push_to_tokens(
             title=title,
             body=body,
             image=image_url or None,
-            channel_id=android_channel_for(data),
-            sound=ANDROID_PUSH_SOUND,
+            channel_id=android_channel_for(data, sound=sound),
+            sound=ANDROID_PUSH_SOUND if sound else None,
         ),
     )
     apns_config = messaging.APNSConfig(
@@ -273,7 +284,8 @@ def send_push_to_tokens(
         payload=messaging.APNSPayload(
             aps=messaging.Aps(
                 alert=messaging.ApsAlert(title=title, body=body),
-                sound=IOS_PUSH_SOUND,
+                # No aps.sound = iOS shows the notification silently.
+                sound=IOS_PUSH_SOUND if sound else None,
                 # Only image pushes need the Notification Service Extension; routing every
                 # push through it risks the extension replacing the content and dropping the sound.
                 mutable_content=True if image_url else None,
@@ -341,6 +353,10 @@ def send_push_to_users(
     """
     Send an FCM push notification to all registered devices of the given users.
 
+    Applies each user's notification preference for the payload's category
+    (Mainapp.notification_preferences): users who turned it off are skipped, and users who
+    chose "without sound" get a silent push.
+
     Parameters
     ----------
     users     : iterable of User model instances (or a queryset).
@@ -350,22 +366,52 @@ def send_push_to_users(
     -------
     Same dict as send_push_to_tokens.
     """
+    empty_result = {"success_count": 0, "failure_count": 0, "failed_tokens": [], "errors": []}
     if not push_enabled():
         logger.info("FCM push disabled (FCM_PUSH_ENABLED=false) – skipping send to users.")
-        return {"success_count": 0, "failure_count": 0, "failed_tokens": [], "errors": []}
+        return empty_result
     users = _filter_users_who_blocked_source(users, data)
-    tokens = get_push_tokens_for_users(users)
-    if not tokens:
-        logger.info("FCM: no device tokens found for the given users – skipping.")
-        return {"success_count": 0, "failure_count": 0, "failed_tokens": [], "errors": []}
 
-    return send_push_to_tokens(
-        tokens=tokens,
-        title=title,
-        body=body,
-        data=data,
-        image_url=image_url,
-    )
+    with_sound, without_sound = users, []
+    category = None
+    try:
+        from Mainapp.notification_preferences import category_for_push, split_by_sound
+
+        category = category_for_push(data)
+        if category:
+            with_sound, without_sound = split_by_sound(users, category)
+    except Exception:
+        logger.exception("FCM: notification preference lookup failed; sending with sound.")
+        with_sound, without_sound = users, []
+
+    if category:
+        data = {**(data or {}), "notification_category": category}
+
+    result = dict(empty_result, failed_tokens=[], errors=[])
+    sent_any = False
+    for group, sound in ((with_sound, True), (without_sound, False)):
+        if not group:
+            continue
+        tokens = get_push_tokens_for_users(group)
+        if not tokens:
+            continue
+        sent_any = True
+        group_result = send_push_to_tokens(
+            tokens=tokens,
+            title=title,
+            body=body,
+            data=data,
+            image_url=image_url,
+            sound=sound,
+        )
+        result["success_count"] += group_result.get("success_count", 0)
+        result["failure_count"] += group_result.get("failure_count", 0)
+        result["failed_tokens"].extend(group_result.get("failed_tokens", []))
+        result["errors"].extend(group_result.get("errors", []))
+
+    if not sent_any:
+        logger.info("FCM: no device tokens found for the given users – skipping.")
+    return result
 
 
 # ---------------------------------------------------------------------------

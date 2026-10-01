@@ -360,6 +360,40 @@ class UserNotification(models.Model):
 
 
 
+class NotificationPreference(models.Model):
+    """
+    A user's delivery choice for one notification category (see Mainapp.notification_preferences).
+    Only categories the user changed have a row; a missing row means the default (with sound).
+    """
+
+    class Mode(models.TextChoices):
+        SOUND = "sound", "Notify with sound"
+        SILENT = "silent", "Notify without sound"
+        OFF = "off", "Do not notify"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="notification_preferences",
+    )
+    category = models.CharField(max_length=50)
+    mode = models.CharField(max_length=10, choices=Mode.choices, default=Mode.SOUND)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["user", "category"], name="uniq_notification_pref_user_category"),
+        ]
+        indexes = [
+            # Broadcast filtering reads every non-default row of one category.
+            models.Index(fields=["category", "mode"], name="notif_pref_category_mode"),
+        ]
+
+    def __str__(self):
+        return f"{self.user} - {self.category}: {self.mode}"
+
+
 # firebase token model
 
 class DeviceToken(models.Model):

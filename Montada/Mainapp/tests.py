@@ -88,8 +88,8 @@ class UserNewsLanguagePreferenceTests(TestCase):
             news_notify_zh=True,
         )
 
-        english_ids = set(_get_news_notification_recipients("en").values_list("id", flat=True))
-        arabic_ids = set(_get_news_notification_recipients("ar").values_list("id", flat=True))
+        english_ids = {user.id for user in _get_news_notification_recipients("en")}
+        arabic_ids = {user.id for user in _get_news_notification_recipients("ar")}
 
         self.assertEqual(english_ids, {english_user.id})
         self.assertEqual(arabic_ids, {arabic_user.id})
@@ -162,3 +162,112 @@ class DeviceTokenSelectionTests(TestCase):
 
         self.assertEqual(len(tokens), 1)
         self.assertIn(tokens[0], ["first-token", "second-token"])
+
+
+class NotificationPreferenceTests(TestCase):
+    def setUp(self):
+        from rest_framework.test import APIClient
+
+        self.user = User.objects.create_user(
+            email="prefs@example.com", username="prefs@example.com", password="Testpass123!",
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(self.user)
+        self.url = "/api/auth/notification-preferences/"
+
+    def _modes(self, response):
+        return {item["category"]: item["mode"] for item in response.data["preferences"]}
+
+    def test_defaults_to_sound_and_hides_analyst_only_categories_from_traders(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 200)
+        modes = self._modes(response)
+        self.assertEqual(set(modes.values()), {"sound"})
+        self.assertIn("NEWS", modes)
+        self.assertNotIn("MY_SIGNAL_ACTIVITY", modes)
+        self.assertEqual(response.data["modes"], ["sound", "silent", "off"])
+
+    def test_update_with_mapping_and_with_booleans(self):
+        response = self.client.put(
+            self.url, {"preferences": {"NEWS": "silent", "MESSAGES": "off"}}, format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        modes = self._modes(response)
+        self.assertEqual((modes["NEWS"], modes["MESSAGES"], modes["SYMBOL_MOVES"]), ("silent", "off", "sound"))
+
+        response = self.client.patch(
+            self.url,
+            {"preferences": [
+                {"category": "NEWS", "enabled": True, "sound": True},
+                {"category": "SYMBOL_MOVES", "enabled": True, "sound": False},
+            ]},
+            format="json",
+        )
+        modes = self._modes(response)
+        self.assertEqual((modes["NEWS"], modes["MESSAGES"], modes["SYMBOL_MOVES"]), ("sound", "off", "silent"))
+        # Back to default deletes the row; only the two non-default choices are stored.
+        self.assertEqual(self.user.notification_preferences.count(), 2)
+
+    def test_rejects_unknown_category_and_mode(self):
+        response = self.client.put(self.url, {"preferences": {"BOGUS": "off"}}, format="json")
+        self.assertEqual(response.status_code, 400)
+        response = self.client.put(self.url, {"preferences": {"NEWS": "loud"}}, format="json")
+        self.assertEqual(response.status_code, 400)
+
+    def test_filters_and_sound_split(self):
+        from .notification_preferences import (
+            Category, category_for_push, filter_recipients, notifications_enabled, save_user_modes,
+            split_by_sound,
+        )
+
+        quiet = User.objects.create_user(email="q@example.com", username="q@example.com", password="x")
+        muted = User.objects.create_user(email="m@example.com", username="m@example.com", password="x")
+        save_user_modes(quiet, {Category.NEWS: "silent"})
+        save_user_modes(muted, {Category.NEWS: "off"})
+        users = [self.user, quiet, muted]
+
+        self.assertEqual(filter_recipients(users, Category.NEWS), [self.user, quiet])
+        self.assertEqual(filter_recipients(users, Category.MESSAGES), users)
+        self.assertEqual(split_by_sound(users, Category.NEWS), ([self.user], [quiet]))
+        self.assertFalse(notifications_enabled(muted, Category.NEWS))
+        self.assertTrue(notifications_enabled(muted, Category.MESSAGES))
+
+        self.assertEqual(category_for_push({"type": "news_update"}), Category.NEWS)
+        self.assertEqual(category_for_push({"type": "chat_message"}), Category.MESSAGES)
+        self.assertEqual(category_for_push({"type": "admin_broadcast", "category": "promotional"}), Category.ANNOUNCEMENTS)
+        self.assertIsNone(category_for_push({"type": "admin_broadcast", "category": "system_alert"}))
+        self.assertIsNone(category_for_push({"type": "unknown"}))
+
+    def test_push_is_split_by_preference(self):
+        from unittest.mock import patch
+
+        import firebase
+        from .notification_preferences import Category, save_user_modes
+
+        quiet = User.objects.create_user(email="q2@example.com", username="q2@example.com", password="x")
+        muted = User.objects.create_user(email="m2@example.com", username="m2@example.com", password="x")
+        for user, token in ((self.user, "tok-loud"), (quiet, "tok-quiet"), (muted, "tok-muted")):
+            DeviceToken.objects.create(user=user, fcm_token=token, device_id=token)
+        save_user_modes(quiet, {Category.NEWS: "silent"})
+        save_user_modes(muted, {Category.NEWS: "off"})
+
+        calls = []
+
+        def fake_send(**kwargs):
+            calls.append((kwargs["tokens"], kwargs["sound"], kwargs["data"]["notification_category"]))
+            return {"success_count": len(kwargs["tokens"]), "failure_count": 0, "failed_tokens": [], "errors": []}
+
+        with self.settings(FCM_PUSH_ENABLED=True), \
+                patch.object(firebase, "send_push_to_tokens", side_effect=fake_send):
+            result = firebase.send_push_to_users(
+                [self.user, quiet, muted], "t", "b", data={"type": "news_update"},
+            )
+
+        self.assertEqual(calls, [(["tok-loud"], True, "NEWS"), (["tok-quiet"], False, "NEWS")])
+        self.assertEqual(result["success_count"], 2)
+
+    def test_silent_push_uses_silent_channel_and_no_ios_sound(self):
+        import firebase
+
+        self.assertEqual(firebase.android_channel_for({"type": "news_update"}), "montada_news")
+        self.assertEqual(firebase.android_channel_for({"type": "news_update"}, sound=False), "montada_news_silent")

@@ -426,3 +426,59 @@ class DeleteAccountConfirmSerializer(serializers.Serializer):
 
         attrs['otp_obj'] = otp_obj
         return attrs
+
+
+class NotificationPreferencesUpdateSerializer(serializers.Serializer):
+    """
+    Body for updating notification preferences. `preferences` is either a mapping
+    {"NEWS": "silent", "MESSAGES": "off"} or a list of items, each with a "category" and
+    either "mode" ("sound" | "silent" | "off") or "enabled" + "sound" booleans:
+    [{"category": "NEWS", "mode": "silent"}, {"category": "MESSAGES", "enabled": false}].
+    Categories not sent are left unchanged.
+    """
+    preferences = serializers.JSONField()
+
+    @staticmethod
+    def _mode_from_item(item):
+        from .notification_preferences import MODES, OFF, SILENT, SOUND
+
+        mode = item.get("mode")
+        if mode is not None:
+            mode = str(mode).strip().lower()
+            if mode not in MODES:
+                raise serializers.ValidationError(f"mode must be one of: {', '.join(MODES)}.")
+            return mode
+        if "enabled" not in item and "sound" not in item:
+            raise serializers.ValidationError('Each item needs "mode" or "enabled"/"sound".')
+        if not item.get("enabled", True):
+            return OFF
+        return SOUND if item.get("sound", True) else SILENT
+
+    def validate_preferences(self, value):
+        from .notification_preferences import is_valid_category
+
+        if isinstance(value, dict):
+            items = [{"category": category, "mode": mode} for category, mode in value.items()]
+        elif isinstance(value, list):
+            items = value
+        else:
+            raise serializers.ValidationError("Must be an object or a list.")
+        if not items:
+            raise serializers.ValidationError("At least one preference is required.")
+
+        modes = {}
+        errors = {}
+        for item in items:
+            if not isinstance(item, dict):
+                raise serializers.ValidationError("Each item must be an object.")
+            category = str(item.get("category") or "").strip().upper()
+            if not is_valid_category(category):
+                errors[category or "?"] = "Unknown notification category."
+                continue
+            try:
+                modes[category] = self._mode_from_item(item)
+            except serializers.ValidationError as exc:
+                errors[category] = exc.detail[0] if isinstance(exc.detail, list) else exc.detail
+        if errors:
+            raise serializers.ValidationError(errors)
+        return modes

@@ -15,6 +15,7 @@ from .views import (
     SaveFCMToken,
     RequestAccountDeletionOTPView,
     ConfirmAccountDeletionView,
+    NotificationPreferencesView,
     TestJson
 )
 
@@ -37,6 +38,7 @@ urlpatterns = [
     path('resend-password-reset-otp/', resend_password_reset_otp_view, name='resend_password_reset_otp'),
 
     path('save-fcm-token/', SaveFCMToken.as_view(), name='save_fcm_token'),
+    path('notification-preferences/', NotificationPreferencesView.as_view(), name='notification_preferences'),
     path('delete-account/request-otp/', RequestAccountDeletionOTPView.as_view(), name='request_account_deletion_otp'),
     path('delete-account/confirm/', ConfirmAccountDeletionView.as_view(), name='confirm_account_deletion'),
 

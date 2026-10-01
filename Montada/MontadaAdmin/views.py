@@ -3225,6 +3225,16 @@ class AdminFCMBroadcastView(APIView):
                 status=status.HTTP_200_OK,
             )
 
+        # Users who turned announcements off are skipped, except for mandatory
+        # system / subscription notices.
+        from Mainapp.notification_preferences import (
+            MANDATORY_ADMIN_BROADCAST_CATEGORIES,
+            Category as NotificationCategory,
+            filter_recipients,
+        )
+        if category not in MANDATORY_ADMIN_BROADCAST_CATEGORIES:
+            recipient_list = filter_recipients(recipient_list, NotificationCategory.ANNOUNCEMENTS)
+
         # ── Save UserNotification rows ───────────────────────────────────────
         notification_type = _PUSH_CATEGORY_MAP.get(category, "INFO")
         try:
@@ -3273,9 +3283,10 @@ class AdminFCMBroadcastView(APIView):
         fcm_failure = 0
         if token_strings:
             try:
-                from firebase import send_push_to_tokens_in_background
-                send_push_to_tokens_in_background(
-                    tokens=token_strings,
+                # Sent per user (not per token) so each recipient's sound preference applies.
+                from firebase import send_push_to_users_in_background
+                send_push_to_users_in_background(
+                    users=recipient_list,
                     title=title,
                     body=message,
                     data={

@@ -11,6 +11,7 @@ from rest_framework.pagination import PageNumberPagination
 
 from Followers.models import Follow
 from Dashboard.realtime import broadcast_notifications
+from Mainapp.notification_preferences import Category as NotificationCategory, filter_recipients
 from Subscriptions.analyst_plan_access import (
     filter_visible_analyst_ids_for_signals,
     user_has_analyst_signal_access,
@@ -104,7 +105,10 @@ def _reset_signal_lifecycle_if_needed(signal, *, old_status, old_direction, old_
     )
 
 
-def _create_and_broadcast_notifications(users, *, title, body, notification_type="INFO", redirect_url=None):
+def _create_and_broadcast_notifications(
+    users, *, title, body, notification_type="INFO", redirect_url=None, preference_category=None,
+):
+    users = filter_recipients(users, preference_category)
     if not users:
         return
     try:
@@ -189,7 +193,10 @@ def _notify_analyst_signal_applied(applied):
         "timeframe": timeframe,
     }
 
-    _create_and_broadcast_notifications([analyst], title=title, body=body, notification_type="INFO")
+    _create_and_broadcast_notifications(
+        [analyst], title=title, body=body, notification_type="INFO",
+        preference_category=NotificationCategory.MY_SIGNAL_ACTIVITY,
+    )
     _send_push_notifications([analyst], title=title, body=body, data=data_payload)
 
 
@@ -223,7 +230,10 @@ def _notify_signal_published(signal, *, old_status=None):
         "timeframe": timeframe,
     }
 
-    _create_and_broadcast_notifications(recipients, title=title, body=body, notification_type="INFO")
+    _create_and_broadcast_notifications(
+        recipients, title=title, body=body, notification_type="INFO",
+        preference_category=NotificationCategory.TRADE_IDEAS,
+    )
     _send_push_notifications(recipients, title=title, body=body, data=data_payload)
 
 
@@ -269,7 +279,10 @@ def _notify_signal_closed(signal, *, old_status=None):
         "timeframe": timeframe,
     }
 
-    _create_and_broadcast_notifications(recipients, title=title, body=body, notification_type="INFO")
+    _create_and_broadcast_notifications(
+        recipients, title=title, body=body, notification_type="INFO",
+        preference_category=NotificationCategory.TRADE_IDEAS,
+    )
     _send_push_notifications(recipients, title=title, body=body, data=data_payload)
 
 
@@ -1083,6 +1096,9 @@ class SignalPushNotificationView(generics.GenericAPIView):
             "signal_status": signal.status or "",
         }
 
+        # Recipients who turned trade-idea notifications off get neither in-app nor push.
+        recipient_list = filter_recipients(recipient_list, NotificationCategory.TRADE_IDEAS)
+
         # ── Save to UserNotification (non-fatal) ────────────────────────────
         db_error = None
         try:
@@ -1127,9 +1143,10 @@ class SignalPushNotificationView(generics.GenericAPIView):
         fcm_error = None
         if token_strings:
             try:
-                from firebase import send_push_to_tokens_in_background
-                send_push_to_tokens_in_background(
-                    tokens=token_strings,
+                # Sent per user (not per token) so each recipient's sound preference applies.
+                from firebase import send_push_to_users_in_background
+                send_push_to_users_in_background(
+                    users=recipient_list,
                     title=title,
                     body=body,
                     data=data_payload,

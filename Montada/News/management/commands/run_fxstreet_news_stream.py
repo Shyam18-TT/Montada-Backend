@@ -72,12 +72,18 @@ def _is_english_news_language(language):
 
 
 def _get_news_notification_recipients(language):
+    from Mainapp.notification_preferences import Category, filter_recipients
+
     preference_field = NEWS_LANGUAGE_RECIPIENT_FIELDS.get(
         _normalize_notification_language(language)
     )
     if not preference_field:
-        return User.objects.none()
-    return User.objects.filter(is_active=True, **{preference_field: True}).only("id")
+        return []
+    # Language opt-in plus the News category preference (users who turned news off are skipped).
+    return filter_recipients(
+        User.objects.filter(is_active=True, **{preference_field: True}).only("id"),
+        Category.NEWS,
+    )
 
 
 def _notify_users_about_news(instance, *, event_name):
@@ -115,7 +121,7 @@ def _notify_users_about_news(instance, *, event_name):
     image_url = getattr(instance, "image_url", None) or None
 
     batch_users = []
-    for user in recipients.iterator(chunk_size=NOTIFICATION_BATCH_SIZE):
+    for user in recipients:
         batch_users.append(user)
         if len(batch_users) < NOTIFICATION_BATCH_SIZE:
             continue

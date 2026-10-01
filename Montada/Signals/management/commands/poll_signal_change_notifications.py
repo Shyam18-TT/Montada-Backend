@@ -935,8 +935,11 @@ class Command(BaseCommand):
         from Mainapp.notifications import bulk_create_user_notifications
 
         User = get_user_model()
-        users = list(User.objects.filter(is_active=True).distinct())
-        
+        from Mainapp.notification_preferences import Category, filter_recipients
+
+        # Skip users who turned market-move notifications off (push and in-app).
+        users = filter_recipients(User.objects.filter(is_active=True).distinct(), Category.SYMBOL_MOVES)
+
         # Limit users if specified
         if self.max_users_per_notification > 0:
             users = users[:self.max_users_per_notification]
