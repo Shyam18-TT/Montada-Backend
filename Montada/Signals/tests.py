@@ -42,21 +42,21 @@ class SignalChangeNotificationThresholdTests(TestCase):
         self.command = Command()
         self.command.threshold = Decimal("0.5")
         self.command.share_threshold = Decimal("5.0")
-        self.command.share_step = Decimal("0.5")
+        self.command.share_step = Decimal("5.0")
 
-    def test_share_levels_start_at_five_percent_then_every_half_percent(self):
+    def test_share_levels_start_at_five_percent_then_every_five_percent(self):
         from Signals.management.commands.poll_signal_change_notifications import (
             _step_count_for,
             _step_percentage,
         )
 
-        start, step = Decimal("5.0"), Decimal("0.5")
+        start, step = Decimal("5.0"), Decimal("5.0")
         self.assertEqual(_step_count_for(Decimal("4.9"), start, step), 0)
         self.assertEqual(_step_count_for(Decimal("5.0"), start, step), 1)
-        self.assertEqual(_step_count_for(Decimal("6.2"), start, step), 3)
+        self.assertEqual(_step_count_for(Decimal("15.2"), start, step), 3)
         self.assertEqual(
             [_step_percentage(n, start, step) for n in (1, 2, 3)],
-            [Decimal("5.0"), Decimal("5.5"), Decimal("6.0")],
+            [Decimal("5.0"), Decimal("10.0"), Decimal("15.0")],
         )
 
     def test_duplicate_futures_contracts_are_skipped(self):
@@ -68,6 +68,20 @@ class SignalChangeNotificationThresholdTests(TestCase):
         }
         skipped = _drop_duplicate_futures(symbols)
         self.assertEqual(skipped, {"US100_Z26", "US100.Z26", "GER40_Z26"})
+
+    def test_fx2_and_forex_minors_are_excluded(self):
+        from Signals.management.commands.poll_signal_change_notifications import _EXCLUDED_STOCK_SYMBOLS
+
+        for symbol in ("USDSAR", "USDAED", "AUDNOK", "AUDNOK.P", "AUDNOK.", "AUDNOKP", "ZARJPY.P"):
+            self.assertIn(symbol, _EXCLUDED_STOCK_SYMBOLS)
+        for symbol in ("EURUSD", "GBPUSD", "USDJPY", "GOLD"):
+            self.assertNotIn(symbol, _EXCLUDED_STOCK_SYMBOLS)
+
+    def test_agricultural_cfds_use_five_percent_threshold(self):
+        self.command._share_symbols = set()
+        for symbol in ("WHEAT_Z26", "COCOA_Z26", "SUGAR_H27", "SOYBEAN_X26", "COFFEE"):
+            self.assertEqual(self.command._get_notification_threshold(symbol, []), Decimal("5.0"))
+        self.assertEqual(self.command._get_notification_threshold("NATGAS_X26", []), Decimal("0.5"))
 
     def test_crypto_and_metals_thresholds(self):
         self.command._share_symbols = {"BTCUSD", "ETHUSD"}
@@ -174,7 +188,7 @@ class SignalChangeNotificationThresholdTests(TestCase):
         command.verbose = False
         command.threshold = Decimal("0.5")
         command.share_threshold = Decimal("5.0")
-        command.share_step = Decimal("0.5")
+        command.share_step = Decimal("5.0")
         command.reset_threshold = Decimal("0.3")
         command.state_ttl = 3600
         command.lock_ttl = 60
@@ -232,19 +246,19 @@ class SignalChangeNotificationThresholdTests(TestCase):
             ), patch("firebase.send_push_to_users", push):
                 command._run_poll()
 
-        poll("-7.37", "308.615")  # crosses 0.5% ... 7% in one move
+        poll("-7.37", "308.615")  # crypto: first level is 5%
         push.assert_called_once()
-        self.assertEqual(push.call_args.kwargs["title"], "BCHUSD down 7%")
+        self.assertEqual(push.call_args.kwargs["title"], "BCHUSD down 5%")
         self.assertEqual(push.call_args.kwargs["body"], "BCHUSD is down 7.37%, trading at 308.615.")
         self.assertEqual(UserNotification.objects.count(), 1)
 
-        poll("-7.45", "308.1")  # still below the next level: nothing new
+        poll("-9.9", "300.1")  # still below the next level (10%): nothing new
         self.assertEqual(push.call_count, 1)
 
-        poll("-8.1", "305.9")  # next level only
+        poll("-15.2", "282.5")  # crosses 10% and 15% in one move: one push for 15%
         self.assertEqual(push.call_count, 2)
-        self.assertEqual(push.call_args.kwargs["title"], "BCHUSD down 8%")
-        self.assertEqual(push.call_args.kwargs["body"], "BCHUSD is down 8.1%, trading at 305.9.")
+        self.assertEqual(push.call_args.kwargs["title"], "BCHUSD down 15%")
+        self.assertEqual(push.call_args.kwargs["body"], "BCHUSD is down 15.2%, trading at 282.5.")
 
     def test_current_price_comes_from_same_quote_as_change(self):
         command = self._make_poll_command()

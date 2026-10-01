@@ -17,9 +17,26 @@ from Signals.management.commands.run_price_alerts import _describe_push_result
 
 logger = logging.getLogger(__name__)
 
-# Symbols that must never trigger change notifications, normalized via _normalize_symbol.
-# Empty: all US, EU and UAE stocks alert, using the share threshold below.
-_EXCLUDED_STOCK_SYMBOLS = frozenset()
+# "FX 2" (Gulf/EGP pegs) and "Forex Minors" never trigger change notifications.
+_EXCLUDED_FX2_SYMBOLS = ("USDSAR", "USDEGP", "USDAED", "USDQAR", "USDKWD")
+_EXCLUDED_FOREX_MINOR_SYMBOLS = (
+    "AUDNOK", "AUDSGD", "CADSGD", "CHFSGD", "EURCZK", "EURHUF", "EURNOK", "EURPLN", "EURSEK",
+    "EURSGD", "EURZAR", "GBPMXN", "GBPNOK", "GBPSEK", "GBPSGD", "NOKJPY", "NOKSEK", "SGDJPY",
+    "USDCNH", "USDCZK", "USDHKD", "USDHUF", "USDMXN", "USDNOK", "USDPLN", "USDSEK", "USDSGD",
+    "USDTHB", "USDZAR", "ZARJPY",
+)
+# Broker variants of each minor: AUDNOK, AUDNOK.p, AUDNOK., AUDNOKp.
+_FOREX_MINOR_SUFFIXES = ("", ".p", ".", "p")
+
+# Symbols that must never trigger change notifications, uppercased to match _normalize_symbol.
+_EXCLUDED_STOCK_SYMBOLS = frozenset(
+    {symbol.upper() for symbol in _EXCLUDED_FX2_SYMBOLS}
+    | {
+        (symbol + suffix).upper()
+        for symbol in _EXCLUDED_FOREX_MINOR_SYMBOLS
+        for suffix in _FOREX_MINOR_SUFFIXES
+    }
+)
 
 # Symbols where the live-quote feed uses a different name than Instrument.symbol in the DB
 # (e.g. DB has "GOLD" but the feed key is "XAUUSD"). Mirrors SYMBOL_ALIASES_DB in
@@ -38,11 +55,11 @@ _SYMBOL_ALIASES = {
 
 DEFAULT_PRICE_URL = "https://trustcapital.com/api/get-MT5-price"
 DEFAULT_THRESHOLD_PERCENT = Decimal("0.5")
-# UAE, US and EU stocks and crypto first alert at 5%, then every 0.5% after (5, 5.5, 6, ...).
+# UAE, US and EU stocks and crypto first alert at 5%, then every 5% after (5, 10, 15, ...).
 # Other instruments (forex, metals, indices, energy, ...) alert every
 # DEFAULT_THRESHOLD_PERCENT (0.5, 1, 1.5, ...).
 DEFAULT_US_EU_SHARE_THRESHOLD_PERCENT = Decimal("5.0")
-DEFAULT_SHARE_STEP_PERCENT = Decimal("0.5")
+DEFAULT_SHARE_STEP_PERCENT = Decimal("5.0")
 _SHARE_ASSET_CLASS_NAMES = frozenset({
     "share", "shares", "stock", "stocks", "equity", "equities", "mena shares", "menashares",
     "crypto", "cryptos", "cryptocurrency", "cryptocurrencies",
@@ -52,6 +69,11 @@ _SHARE_ASSET_CLASS_NAMES = frozenset({
 _CRYPTO_SYMBOLS = frozenset({
     "ADAUSD", "BCHUSD", "BNBUSD", "BTCUSD", "DOGEUSD", "DOGUSD", "DOTUSD", "ETHUSD",
     "LNKUSD", "LTCUSD", "SOLUSD", "XLMUSD", "XRPUSD",
+})
+# Agricultural commodity CFDs also use the 5% threshold. Matched by base name so every
+# contract month qualifies (WHEAT_Z26, WHEAT_H27, ...), plus the undated names.
+_AGRICULTURAL_BASE_SYMBOLS = frozenset({
+    "WHEAT", "COCOA", "COFFEE", "CORN", "SOYBEAN", "COTTON", "SUGAR",
 })
 DEFAULT_STATE_TTL_SECONDS = 60 * 60 * 24 * 7
 DEFAULT_LOCK_TTL_SECONDS = 60
@@ -121,8 +143,9 @@ def _parse_decimal(value):
 
 def _format_percent(value):
     normalized = value.normalize()
+    # format(..., "f") avoids scientific notation: Decimal("10").normalize() is 1E+1.
     if normalized == normalized.to_integral():
-        return str(normalized.to_integral())
+        return format(normalized.to_integral(), "f")
     return format(normalized, "f").rstrip("0").rstrip(".")
 
 
@@ -776,6 +799,8 @@ class Command(BaseCommand):
     def _get_notification_threshold(self, symbol, signals=None):
         share_symbols = getattr(self, "_share_symbols", None) or set()
         if _symbol_alias_candidates(symbol) & share_symbols:
+            return self.share_threshold
+        if (_futures_base_symbol(symbol) or symbol) in _AGRICULTURAL_BASE_SYMBOLS:
             return self.share_threshold
         if signals:
             for signal in signals:

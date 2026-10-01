@@ -143,16 +143,22 @@ class NewsArticleCreateSerializer(serializers.ModelSerializer):
             "updated_at",
         )
         read_only_fields = ("id", "created_at", "updated_at", "published_at", "views_count")
+        # Only title is mandatory; every other field is optional.
         extra_kwargs = {
             "slug": {"required": False, "allow_blank": True},
-            "summary": {"required": False, "allow_blank": True},
-            "featured_image": {"required": False},
+            "summary": {"required": False, "allow_blank": True, "allow_null": True},
+            "content": {"required": False, "allow_blank": True, "allow_null": True},
+            "featured_image": {"required": False, "allow_null": True},
             "category": {"required": False, "allow_null": True},
             "tags": {"required": False},
             "status": {"default": "draft"},
             "is_featured": {"default": False},
             "content_access": {"default": NewsArticle.ContentAccess.PREMIUM},
         }
+
+    def validate_content(self, value):
+        # The content column is NOT NULL; store a missing body as an empty string.
+        return value or ""
 
     def validate_status(self, value):
         if value not in ("draft", "published", "archived"):
