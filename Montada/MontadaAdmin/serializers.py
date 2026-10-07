@@ -641,10 +641,12 @@ class AdminTraderForAnalystSubscriptionSerializer(serializers.ModelSerializer):
 
 
 try:
-    from News.models import NewsCategory, NewsArticle
+    from News.models import NewsCategory, NewsArticle, NewsArticleComment, NewsArticleLike
 except ImportError:
     NewsCategory = None
     NewsArticle = None
+    NewsArticleComment = None
+    NewsArticleLike = None
 
 def _build_media_url(value):
     """Return full URL for a media file using PUBLIC_MEDIA_BASE_URL."""
@@ -660,10 +662,64 @@ def _build_media_url(value):
 
 
 if NewsArticle is not None:
+    class AdminNewsArticleCommentSerializer(serializers.ModelSerializer):
+        """Comment on a news article for admin. Only `content` is editable."""
+
+        user_name = serializers.CharField(source="user.name", read_only=True)
+        user_username = serializers.CharField(source="user.username", read_only=True)
+        user_profile_picture = serializers.SerializerMethodField()
+
+        class Meta:
+            model = NewsArticleComment
+            fields = (
+                "id",
+                "article",
+                "user",
+                "user_name",
+                "user_username",
+                "user_profile_picture",
+                "content",
+                "created_at",
+                "updated_at",
+            )
+            read_only_fields = ("id", "article", "user", "created_at", "updated_at")
+
+        def get_user_profile_picture(self, obj):
+            return _build_media_url(obj.user.profile_picture)
+
+        def validate_content(self, value):
+            value = (value or "").strip()
+            if not value:
+                raise serializers.ValidationError("Comment content cannot be empty.")
+            return value
+
+    class AdminNewsArticleLikeSerializer(serializers.ModelSerializer):
+        """User who liked a news article, for admin."""
+
+        user_name = serializers.CharField(source="user.name", read_only=True)
+        user_username = serializers.CharField(source="user.username", read_only=True)
+        user_profile_picture = serializers.SerializerMethodField()
+
+        class Meta:
+            model = NewsArticleLike
+            fields = ("id", "user", "user_name", "user_username", "user_profile_picture", "created_at")
+            read_only_fields = fields
+
+        def get_user_profile_picture(self, obj):
+            return _build_media_url(obj.user.profile_picture)
+
     class AdminNewsArticleListSerializer(serializers.ModelSerializer):
-        """Read-only news article for admin list. Excludes tags and is_featured."""
+        """
+        Read-only news article for admin list. Excludes tags and is_featured.
+        Includes likes and non-deleted comments; the view prefetches them into
+        `admin_likes` / `admin_comments`.
+        """
 
         category_name = serializers.SerializerMethodField()
+        like_count = serializers.SerializerMethodField()
+        comment_count = serializers.SerializerMethodField()
+        likes = serializers.SerializerMethodField()
+        comments = serializers.SerializerMethodField()
 
         class Meta:
             model = NewsArticle
@@ -681,11 +737,41 @@ if NewsArticle is not None:
                 "published_at",
                 "created_at",
                 "updated_at",
+                "like_count",
+                "comment_count",
+                "likes",
+                "comments",
             )
             read_only_fields = fields
 
         def get_category_name(self, obj):
             return obj.category.name if obj.category else None
+
+        @staticmethod
+        def _likes(obj):
+            if hasattr(obj, "admin_likes"):
+                return obj.admin_likes
+            return list(obj.likes.select_related("user").order_by("-created_at"))
+
+        @staticmethod
+        def _comments(obj):
+            if hasattr(obj, "admin_comments"):
+                return obj.admin_comments
+            return list(
+                obj.comments.filter(is_deleted=False).select_related("user").order_by("-created_at")
+            )
+
+        def get_like_count(self, obj):
+            return len(self._likes(obj))
+
+        def get_comment_count(self, obj):
+            return len(self._comments(obj))
+
+        def get_likes(self, obj):
+            return AdminNewsArticleLikeSerializer(self._likes(obj), many=True).data
+
+        def get_comments(self, obj):
+            return AdminNewsArticleCommentSerializer(self._comments(obj), many=True).data
 
         def to_representation(self, instance):
             data = super().to_representation(instance)
@@ -694,6 +780,8 @@ if NewsArticle is not None:
             return data
 else:
     AdminNewsArticleListSerializer = None
+    AdminNewsArticleCommentSerializer = None
+    AdminNewsArticleLikeSerializer = None
 
 if NewsCategory is not None:
     class AdminNewsCategoryCreateSerializer(serializers.ModelSerializer):

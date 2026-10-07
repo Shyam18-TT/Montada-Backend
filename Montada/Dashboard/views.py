@@ -150,7 +150,10 @@ class AnalyticsGraphView(APIView):
     Analytics graph data for analyst dashboard.
     Query param: type=winrate | growthrate
     - winrate: last 6 months win rate per month (month, win_rate, win_count, loss_count).
+      growth_percentage = change in win rate (last 3 vs first 3 months) in percentage points.
     - growthrate: last 6 months followers count at end of each month (month, followers_count).
+      growth_percentage = relative % change this month vs last month (None from a 0 baseline);
+      followers_gained = net change in followers this month vs last month.
     """
     permission_classes = [IsAuthenticated, IsAnalystPermission]
 
@@ -178,7 +181,7 @@ class AnalyticsGraphView(APIView):
         signals_base = TradingSignal.active.filter(analyst=user, status=TradingSignal.Status.CLOSED)
         result = []
         for start, end, year, month, label in _last_six_months_ranges():
-            month_signals = signals_base.filter(updated_at__gte=start, updated_at__lte=end)
+            month_signals = signals_base.filter(closed_at__gte=start, closed_at__lte=end)
             wins = month_signals.filter(is_win=True).count()
             losses = month_signals.filter(is_loss=True).count()
             total = wins + losses
@@ -227,7 +230,8 @@ class AnalyticsGraphView(APIView):
             for tf in all_timeframes
         ]
 
-        # One growth percentage: compare first 3 months vs last 3 months (win rate improvement)
+        # One growth figure: win rate of the last 3 months minus the first 3 months, in
+        # percentage points (a 5% -> 60% win rate is +55, not the relative +1000%).
         first_half = result[:3]
         last_half = result[-3:]
         wins_first = sum(d['win_count'] for d in first_half)
@@ -238,10 +242,10 @@ class AnalyticsGraphView(APIView):
         total_last = wins_last + losses_last
         win_rate_first = (wins_first / total_first) * 100 if total_first > 0 else None
         win_rate_last = (wins_last / total_last) * 100 if total_last > 0 else None
-        if win_rate_first is not None and win_rate_last is not None and win_rate_first > 0:
-            growth_percentage = round(((win_rate_last - win_rate_first) / win_rate_first) * 100, 2)
+        if win_rate_first is not None and win_rate_last is not None:
+            growth_percentage = round(win_rate_last - win_rate_first, 2)
         else:
-            growth_percentage = None  # not enough data or no baseline
+            growth_percentage = None  # no closed signals in one of the halves
 
         return {
             'type': 'winrate',
@@ -249,10 +253,11 @@ class AnalyticsGraphView(APIView):
             'signals_by_asset_class': signals_by_asset_class,
             'signals_by_timeframe': signals_by_timeframe,
             'growth_percentage': growth_percentage,
+            'growth_unit': 'percentage_points',
         }
 
     def _get_growthrate_data(self, user):
-        """Last 6 months: cumulative followers count at end of each month. One growth_percentage (first vs last month)."""
+        """Last 6 months: cumulative followers count at end of each month. One growth_percentage (this month vs last month)."""
         result = []
         for start, end, year, month, label in _last_six_months_ranges():
             count = Follow.objects.filter(
@@ -268,14 +273,21 @@ class AnalyticsGraphView(APIView):
                 'month_number': month,
                 'followers_count': count,
             })
-        # One growth percentage: first month vs last month followers
-        first_count = result[0]['followers_count'] if result else 0
+        # One growth percentage: this month vs last month followers. Measuring across all
+        # six months blew small bases up (2 -> 28 followers = +1300%).
+        previous_count = result[-2]['followers_count'] if len(result) >= 2 else 0
         last_count = result[-1]['followers_count'] if result else 0
-        if first_count > 0:
-            growth_percentage = round(((last_count - first_count) / first_count) * 100, 2)
+        if previous_count > 0:
+            growth_percentage = round(((last_count - previous_count) / previous_count) * 100, 2)
         else:
-            growth_percentage = None if last_count == 0 else 100.0  # no baseline: 0→something = 100%
-        return {'type': 'growthrate', 'data': result, 'growth_percentage': growth_percentage}
+            growth_percentage = None  # no baseline: a % change from 0 followers is undefined
+        return {
+            'type': 'growthrate',
+            'data': result,
+            'growth_percentage': growth_percentage,
+            'growth_unit': 'percent',
+            'followers_gained': last_count - previous_count,
+        }
 
 
 class ActivePollsListView(APIView):

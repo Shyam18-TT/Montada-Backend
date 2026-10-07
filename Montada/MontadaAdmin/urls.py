@@ -22,6 +22,7 @@ from .views import (
     AdminNewsArticleCreateView,
     AdminNewsArticleDetailView,
     AdminNewsArticleUnpublishView,
+    AdminNewsArticleCommentDetailView,
     AdminPollStatsView,
     AdminPollsListView,
     AdminPollCreateView,
@@ -98,6 +99,7 @@ urlpatterns = [
     path("news/articles/create/", AdminNewsArticleCreateView.as_view(), name="admin_news_article_create"),
     path("news/articles/<uuid:pk>/", AdminNewsArticleDetailView.as_view(), name="admin_news_article_detail"),
     path("news/articles/<uuid:pk>/unpublish/", AdminNewsArticleUnpublishView.as_view(), name="admin_news_article_unpublish"),
+    path("news/comments/<uuid:pk>/", AdminNewsArticleCommentDetailView.as_view(), name="admin_news_comment_detail"),
 
     path("polls/stats/", AdminPollStatsView.as_view(), name="admin_poll_stats"),
     path("polls/", AdminPollsListView.as_view(), name="admin_polls_list"),

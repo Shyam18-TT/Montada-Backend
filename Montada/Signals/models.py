@@ -244,9 +244,15 @@ class TradingSignal(models.Model):
         help_text="True after the price-alert FCM push has been sent for this signal (TP/SL hit). Ensures we only send once."
     )
 
+    closed_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the signal was closed. Set automatically in save(); analytics bucket closed signals by it.",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    
+
     # Custom managers
     objects = models.Manager()  # Default manager (includes all signals)
     active = ActiveSignalManager()  # Manager that excludes soft-deleted signals
@@ -274,6 +280,18 @@ class TradingSignal(models.Model):
                 )
         if self.confidence_level and self.confidence_level > 100:
             raise ValueError("Confidence level cannot exceed 100%")
+
+    def save(self, *args, **kwargs):
+        # Stamp closed_at on every path that closes a signal (price alerts, analyst/admin
+        # edits, Django admin) and clear it if the signal is reopened. Later edits to a
+        # closed signal keep the original close time, unlike updated_at.
+        is_closed = self.status == self.Status.CLOSED
+        if is_closed != (self.closed_at is not None):
+            self.closed_at = timezone.now() if is_closed else None
+            update_fields = kwargs.get("update_fields")
+            if update_fields is not None:
+                kwargs["update_fields"] = {*update_fields, "closed_at"}
+        super().save(*args, **kwargs)
 
     def soft_delete(self):
         """Soft delete the signal by setting deleted_at timestamp"""

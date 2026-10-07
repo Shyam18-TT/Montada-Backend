@@ -99,12 +99,13 @@ except ImportError:
     TradingSignalSerializer = None
 
 try:
-    from News.models import NewsCategory, NewsArticle, LiveNews, NewsArticleComment
+    from News.models import NewsCategory, NewsArticle, LiveNews, NewsArticleComment, NewsArticleLike
 except ImportError:
     NewsCategory = None
     NewsArticle = None
     LiveNews = None
     NewsArticleComment = None
+    NewsArticleLike = None
 
 try:
     from chat.models import ChatMessage
@@ -139,6 +140,7 @@ from .serializers import (
     AdminCreateSignalSerializer,
     AdminNewsCategoryCreateSerializer,
     AdminNewsArticleListSerializer,
+    AdminNewsArticleCommentSerializer,
     AdminChangeUserPasswordSerializer,
     AdminSuspendUserSerializer,
     AdminAssignAnalystPlanSubscriptionSerializer,
@@ -482,8 +484,8 @@ def _win_rate_for_period(start, end):
         return 0
     qs = TradingSignal.active.filter(
         status=TradingSignal.Status.CLOSED,
-        updated_at__gte=start,
-        updated_at__lte=end,
+        closed_at__gte=start,
+        closed_at__lte=end,
     )
     wins = qs.filter(is_win=True).count()
     losses = qs.filter(is_loss=True).count()
@@ -595,22 +597,22 @@ class AdminDashboardStatsView(APIView):
             # Signals created in period (for date filter)
             active_created_in_period = TradingSignal.active.filter(created_at__gte=start, created_at__lte=end).count()
             active_created_prev = TradingSignal.active.filter(created_at__gte=prev_start, created_at__lte=prev_end).count()
-            # Closed in period (status=CLOSED, updated_at in range)
+            # Closed in period (status=CLOSED, closed_at in range)
             closed_in_period = TradingSignal.active.filter(
                 status=TradingSignal.Status.CLOSED,
-                updated_at__gte=start,
-                updated_at__lte=end,
+                closed_at__gte=start,
+                closed_at__lte=end,
             ).count()
             closed_prev = TradingSignal.active.filter(
                 status=TradingSignal.Status.CLOSED,
-                updated_at__gte=prev_start,
-                updated_at__lte=prev_end,
+                closed_at__gte=prev_start,
+                closed_at__lte=prev_end,
             ).count()
             # Win rate: closed in period, wins / (wins + losses) * 100
             closed_in_period_qs = TradingSignal.active.filter(
                 status=TradingSignal.Status.CLOSED,
-                updated_at__gte=start,
-                updated_at__lte=end,
+                closed_at__gte=start,
+                closed_at__lte=end,
             )
             wins = closed_in_period_qs.filter(is_win=True).count()
             losses = closed_in_period_qs.filter(is_loss=True).count()
@@ -619,8 +621,8 @@ class AdminDashboardStatsView(APIView):
 
             closed_prev_qs = TradingSignal.active.filter(
                 status=TradingSignal.Status.CLOSED,
-                updated_at__gte=prev_start,
-                updated_at__lte=prev_end,
+                closed_at__gte=prev_start,
+                closed_at__lte=prev_end,
             )
             wins_prev = closed_prev_qs.filter(is_win=True).count()
             losses_prev = closed_prev_qs.filter(is_loss=True).count()
@@ -777,8 +779,8 @@ class AdminDashboardGraphsView(APIView):
                 win = TradingSignal.active.filter(
                     status=TradingSignal.Status.CLOSED,
                     is_win=True,
-                    updated_at__gte=day_start,
-                    updated_at__lte=day_end,
+                    closed_at__gte=day_start,
+                    closed_at__lte=day_end,
                 ).count()
             else:
                 total = 0
@@ -2245,6 +2247,7 @@ class AdminNewsArticleListView(generics.ListAPIView):
     GET: List news articles for admin. Paginated.
     Query params: search (title/summary/content), category (UUID of category), page, page_size.
     Excludes soft-deleted (is_deleted=True). Ordered by created_at desc. Response excludes tags and is_featured.
+    Each article includes like_count, comment_count, likes and comments (non-deleted, newest first).
     """
     permission_classes = [IsAuthenticated, IsAdminUser]
     serializer_class = AdminNewsArticleListSerializer
@@ -2256,6 +2259,20 @@ class AdminNewsArticleListView(generics.ListAPIView):
         qs = (
             NewsArticle.objects.filter(is_deleted=False)
             .select_related("author", "category")
+            .prefetch_related(
+                Prefetch(
+                    "likes",
+                    queryset=NewsArticleLike.objects.select_related("user").order_by("-created_at"),
+                    to_attr="admin_likes",
+                ),
+                Prefetch(
+                    "comments",
+                    queryset=NewsArticleComment.objects.filter(is_deleted=False)
+                    .select_related("user")
+                    .order_by("-created_at"),
+                    to_attr="admin_comments",
+                ),
+            )
             .order_by("-created_at")
         )
         search = (self.request.query_params.get("search") or "").strip()
@@ -2391,6 +2408,63 @@ class AdminNewsArticleUnpublishView(APIView):
         article.save(update_fields=["status", "published_at"])
         return Response(
             {"message": "Article unpublished successfully.", "status": article.status},
+            status=status.HTTP_200_OK,
+        )
+
+
+class AdminNewsArticleCommentDetailView(APIView):
+    """
+    GET   : Retrieve a news article comment.
+    PATCH : Edit the comment text. Body: {"content": "..."}
+    PUT   : Same as PATCH.
+    DELETE: Soft-delete the comment (sets is_deleted=True, keeps the DB row).
+    Admin only.  URL: news/comments/<pk>/
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def _get_comment(self, pk):
+        return get_object_or_404(
+            NewsArticleComment.objects.select_related("user"), pk=pk, is_deleted=False,
+        )
+
+    def get(self, request, pk):
+        if NewsArticleComment is None or AdminNewsArticleCommentSerializer is None:
+            return Response(
+                {"error": "News app is not available."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        return Response(AdminNewsArticleCommentSerializer(self._get_comment(pk)).data)
+
+    def patch(self, request, pk):
+        if NewsArticleComment is None or AdminNewsArticleCommentSerializer is None:
+            return Response(
+                {"error": "News app is not available."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        comment = self._get_comment(pk)
+        serializer = AdminNewsArticleCommentSerializer(
+            comment, data={"content": request.data.get("content")}, partial=True,
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(
+            {"message": "Comment updated successfully.", "comment": serializer.data},
+            status=status.HTTP_200_OK,
+        )
+
+    put = patch
+
+    def delete(self, request, pk):
+        if NewsArticleComment is None:
+            return Response(
+                {"error": "News app is not available."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        comment = self._get_comment(pk)
+        comment.is_deleted = True
+        comment.save(update_fields=["is_deleted", "updated_at"])
+        return Response(
+            {"message": "Comment deleted successfully."},
             status=status.HTTP_200_OK,
         )
 
@@ -3742,8 +3816,8 @@ class AdminPerformanceAnalyticsView(APIView):
             return err
         prev_start, prev_end = _prev_period(start, end)
 
-        closed_qs      = TradingSignal.active.filter(status="CLOSED", updated_at__gte=start,      updated_at__lte=end)
-        closed_prev_qs = TradingSignal.active.filter(status="CLOSED", updated_at__gte=prev_start, updated_at__lte=prev_end)
+        closed_qs      = TradingSignal.active.filter(status="CLOSED", closed_at__gte=start,      closed_at__lte=end)
+        closed_prev_qs = TradingSignal.active.filter(status="CLOSED", closed_at__gte=prev_start, closed_at__lte=prev_end)
 
         # Current period: avg_confidence, avg_rr, win_rate
         agg = closed_qs.aggregate(
@@ -3843,14 +3917,14 @@ class AdminPerformanceGraphsView(APIView):
         six_start, six_end = _closed_signals_last_six_months()
         base_qs = TradingSignal.active.filter(
             status=TradingSignal.Status.CLOSED,
-            updated_at__gte=six_start,
-            updated_at__lte=six_end,
+            closed_at__gte=six_start,
+            closed_at__lte=six_end,
         )
 
         # 1. Win rate trend — last 6 months
         win_rate_trend = []
         for start, end, year, month, label in _last_six_months_ranges():
-            m_qs = base_qs.filter(updated_at__gte=start, updated_at__lte=end)
+            m_qs = base_qs.filter(closed_at__gte=start, closed_at__lte=end)
             agg = m_qs.aggregate(
                 wins=Count("id", filter=Q(is_win=True)),
                 losses=Count("id", filter=Q(is_loss=True)),
