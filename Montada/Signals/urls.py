@@ -37,6 +37,8 @@ urlpatterns = [
         name='subscribed_analyst_signals',
     ),
     path('apply-signal/', TraderApplySignalView.as_view(), name='trader_apply_signal'),
+    # The mobile app sends the signal id in the URL instead of the body.
+    path('apply-signal/<uuid:signal_id>/', TraderApplySignalView.as_view(), name='trader_apply_signal_by_id'),
     path('my-applied-signals/', TraderAppliedSignalsListView.as_view(), name='trader_applied_signals_list'),
     path('<str:pk>/notify/', SignalPushNotificationView.as_view(), name='signal_push_notify'),
 

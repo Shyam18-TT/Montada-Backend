@@ -829,7 +829,8 @@ def _get_trader_visible_signals_queryset(user):
 class TraderApplySignalView(generics.GenericAPIView):
     """
     API endpoint for traders to apply (take) a signal.
-    POST with { "signal": "<uuid>", "note": "optional" }.
+    POST apply-signal/ with { "signal": "<uuid>", "note": "optional" },
+    or POST apply-signal/<signal_id>/ with an optional { "note": "..." } (the URL id wins).
     Trader must follow the analyst, have an active per-analyst subscription covering signals,
     and the signal must be OPEN.
     Each signal can be applied only once per trader.
@@ -838,7 +839,10 @@ class TraderApplySignalView(generics.GenericAPIView):
     serializer_class = ApplySignalSerializer
 
     def post(self, request, *args, **kwargs):
-        serializer = ApplySignalSerializer(data=request.data)
+        data = {"note": request.data.get("note"), "signal": request.data.get("signal")}
+        if kwargs.get("signal_id"):
+            data["signal"] = str(kwargs["signal_id"])
+        serializer = ApplySignalSerializer(data={k: v for k, v in data.items() if v is not None})
         serializer.is_valid(raise_exception=True)
 
         signal_id = serializer.validated_data['signal']
