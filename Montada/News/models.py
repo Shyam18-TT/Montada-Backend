@@ -402,7 +402,7 @@ class EconomicCalendarEventNotification(models.Model):
         EVENT = "event", "Event-Time Notification"
         BROADCAST = "broadcast", "Broadcast to All Users"
         ADMIN_ADVANCE = "admin_advance", "Admin Global Advance Reminder"
-    
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     
     # Reference to the event
@@ -456,6 +456,16 @@ class EconomicCalendarEventNotification(models.Model):
         ordering = ["-sent_at"]
         # Prevent duplicate event notifications to same user
         unique_together = ("event", "user", "notification_type", "sent_to_all_users")
+        constraints = [
+            # SQL Server builds the unique_together above as a filtered index that skips
+            # user IS NULL, so all-users claim rows need their own constraint for the
+            # IntegrityError-based claim in claim_broadcast_notification to work.
+            models.UniqueConstraint(
+                fields=["event", "notification_type"],
+                condition=models.Q(user__isnull=True, sent_to_all_users=True),
+                name="econ_event_notif_broadcast_uniq",
+            ),
+        ]
         indexes = [
             models.Index(fields=["event"]),
             models.Index(fields=["user"]),
@@ -504,16 +514,28 @@ class EconomicCalendarEventNotification(models.Model):
         Returns:
             bool: True if this caller should send; False if already claimed/sent.
         """
-        from django.db import IntegrityError
+        return cls.claim_broadcast_notification(event, cls.NotificationType.ADMIN_ADVANCE)
+
+    @classmethod
+    def claim_broadcast_notification(cls, event, notification_type):
+        """
+        Atomically reserve the right to send an all-users notification of this type once.
+
+        Returns:
+            bool: True if this caller should send; False if already claimed/sent.
+        """
+        from django.db import IntegrityError, transaction
 
         try:
-            cls.objects.create(
-                event=event,
-                user=None,
-                notification_type=cls.NotificationType.ADMIN_ADVANCE,
-                sent_to_all_users=True,
-                is_sent=True,
-            )
+            # Savepoint so a lost race does not break a surrounding transaction.
+            with transaction.atomic():
+                cls.objects.create(
+                    event=event,
+                    user=None,
+                    notification_type=notification_type,
+                    sent_to_all_users=True,
+                    is_sent=True,
+                )
             return True
         except IntegrityError:
             return False

@@ -389,10 +389,13 @@ def send_push_to_users(
 
     result = dict(empty_result, failed_tokens=[], errors=[])
     sent_any = False
+    # A device registered under two users can land in both groups; it gets one push.
+    sent_tokens: set[str] = set()
     for group, sound in ((with_sound, True), (without_sound, False)):
         if not group:
             continue
-        tokens = get_push_tokens_for_users(group)
+        tokens = [t for t in get_push_tokens_for_users(group) if t not in sent_tokens]
+        sent_tokens.update(tokens)
         if not tokens:
             continue
         sent_any = True

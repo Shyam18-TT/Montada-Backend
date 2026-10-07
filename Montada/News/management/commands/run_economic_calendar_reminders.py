@@ -5,8 +5,9 @@ This command:
 1. Checks for reminders that should trigger (reminder_time <= now, is_active, not is_sent)
 2. Sends FCM push + in-app notifications to users for their reminders
 3. Sends admin-configured global advance reminders to all active users (MontadaAdmin settings)
-4. Sends event-time notifications to all subscribed users when events occur (unchanged)
-5. Marks reminders as sent to avoid duplicate notifications
+4. Sends one release notification per high/medium event to all active users, including the
+   actual value re-fetched from Tradays once it is published
+5. Claims every notification in the DB before sending so it goes out at most once
 
 Usage (one-time run):
     python manage.py run_economic_calendar_reminders
@@ -38,6 +39,7 @@ from Mainapp.notification_preferences import (
     notifications_enabled,
 )
 from Mainapp.notifications import bulk_create_user_notifications
+from News.management.commands.fetch_economic_calendar import TradaysFetchError, fetch_tradays_events
 from firebase import send_push_to_users
 
 try:
@@ -50,6 +52,19 @@ User = get_user_model()
 
 
 class Command(BaseCommand):
+    # Importance levels that get a release notification (with the actual value) to all users.
+    RELEASE_IMPORTANCES = (
+        EconomicCalendarEvent.Importance.HIGH,
+        EconomicCalendarEvent.Importance.MEDIUM,
+    )
+    # How long after release to wait for Tradays to publish the actual value before the
+    # release notification goes out without it.
+    ACTUAL_VALUE_WAIT = timedelta(minutes=10)
+    # Events released longer ago than this are not notified (e.g. after scheduler downtime).
+    RELEASE_WINDOW = timedelta(minutes=30)
+    # A personal reminder this close to the global advance reminder replaces it for that user.
+    REMINDER_OVERLAP = timedelta(minutes=5)
+
     help = 'Check economic calendar reminders and send notifications when they trigger or events occur.'
 
     def add_arguments(self, parser):
@@ -144,8 +159,8 @@ class Command(BaseCommand):
         # --- Step 2: Admin global advance reminders (all users, N minutes before) ---
         global_reminders_sent = self._process_global_admin_reminders(now, dry_run, verbose)
 
-        # --- Step 3: Event-time notifications (unchanged) ---
-        event_notifications_sent = self._process_event_notifications(now, dry_run, verbose)
+        # --- Step 3: Release notifications with the actual value (all users) ---
+        release_notifications_sent = self._process_release_notifications(now, dry_run, verbose)
 
         # --- Summary ---
         self.stdout.write(
@@ -153,7 +168,7 @@ class Command(BaseCommand):
                 f'\n✓ Completed.\n'
                 f'  Per-user reminders sent: {reminders_sent}\n'
                 f'  Global advance reminders sent: {global_reminders_sent}\n'
-                f'  Event notifications sent: {event_notifications_sent}'
+                f'  Release notifications sent: {release_notifications_sent}'
             )
         )
 
@@ -179,12 +194,21 @@ class Command(BaseCommand):
         for reminder in pending_reminders:
             try:
                 if not dry_run:
-                    # Mark as sent FIRST (before sending) to prevent duplicate sends if push fails
-                    reminder.is_sent = True
-                    reminder.sent_at = now
-                    reminder.save(update_fields=['is_sent', 'sent_at', 'updated_at'])
-                    
-                    # Send notification after marking as sent
+                    # Atomically claim before sending: only the run whose UPDATE flips is_sent
+                    # sends, so overlapping runs cannot double-send (and a failed push is not retried).
+                    claimed = EconomicCalendarReminder.objects.filter(
+                        pk=reminder.pk, is_sent=False,
+                    ).update(is_sent=True, sent_at=now, updated_at=now)
+                    if not claimed:
+                        continue
+                    if reminder.event.release_date <= now:
+                        # Missed while the scheduler was down; a "starts in" reminder would be wrong.
+                        logger.info(
+                            "Skipped stale reminder %s: event %s already released",
+                            reminder.id, reminder.event.id,
+                        )
+                        continue
+
                     self._send_reminder_notification(reminder)
 
                 count += 1
@@ -373,7 +397,20 @@ class Command(BaseCommand):
                         )
                     continue
 
-                users = list(User.objects.filter(is_active=True))
+                # Users whose own reminder fires at about the same time already got that one.
+                trigger_time = event.release_date - timedelta(minutes=minutes_before)
+                personal_reminder_user_ids = set(
+                    EconomicCalendarReminder.objects.filter(
+                        event__in=group,
+                        is_active=True,
+                        reminder_time__gte=trigger_time - self.REMINDER_OVERLAP,
+                        reminder_time__lte=trigger_time + self.REMINDER_OVERLAP,
+                    ).values_list("user_id", flat=True)
+                )
+                users = [
+                    user for user in User.objects.filter(is_active=True)
+                    if user.id not in personal_reminder_user_ids
+                ]
                 if not users:
                     if verbose:
                         self.stdout.write(
@@ -516,180 +553,198 @@ class Command(BaseCommand):
             f"for event {event.event_name} ({event.id})"
         )
 
-    def _process_event_notifications(self, now, dry_run, verbose):
+    @staticmethod
+    def _expects_actual(event):
+        """Speeches, reports and auctions have no forecast/previous and never get an actual value."""
+        return bool(event.forecast_value or event.previous_value)
+
+    def _awaiting_actual(self, event):
+        return self._expects_actual(event) and not event.actual_value
+
+    def _process_release_notifications(self, now, dry_run, verbose):
         """
-        Send notifications to all subscribed users when economic events occur.
-        
-        An event notification is sent for any event where:
-        - release_date is very close to now (within a 5-minute window)
-        - We haven't already sent a broadcast notification for this event
-        
+        Send one notification per high/medium event to all active users when it is released.
+
+        Values are pulled fresh from Tradays because the scheduled calendar sync usually ran
+        before the release. The notification waits up to ACTUAL_VALUE_WAIT for the actual
+        value; events that never get one (speeches, reports) go out right away without it.
+
         Returns count of events with notifications sent.
         """
+        window_start = now - self.RELEASE_WINDOW
+        notification_type = EconomicCalendarEventNotification.NotificationType.BROADCAST
+        already_sent = EconomicCalendarEventNotification.objects.filter(
+            event_id=OuterRef("pk"),
+            user__isnull=True,
+            notification_type=notification_type,
+            sent_to_all_users=True,
+        )
+
+        pending_events = list(
+            EconomicCalendarEvent.objects.filter(
+                release_date__gte=window_start,
+                release_date__lte=now,
+                importance__in=self.RELEASE_IMPORTANCES,
+            ).exclude(Exists(already_sent))
+        )
+        if not pending_events:
+            return 0
+
+        if any(self._awaiting_actual(ev) for ev in pending_events):
+            self._refresh_actual_values(pending_events, window_start, now, dry_run, verbose)
+
+        # The feed holds one row per country/currency, so "GDP q/q" at 09:00 can exist many
+        # times. Users only need one notification per name + time.
+        sent_keys = self._already_notified_keys(
+            window_start, now, notification_type, sent_to_all_users=True,
+        )
         count = 0
 
-        # Find events that just occurred (within last 5 minutes from event release)
-        event_window_start = now - timedelta(minutes=5)
-        event_window_end = now
-
-        recent_events = EconomicCalendarEvent.objects.filter(
-            release_date__gte=event_window_start,
-            release_date__lte=event_window_end,
-            importance=EconomicCalendarEvent.Importance.HIGH,
-        )
-
-        broadcast_type = EconomicCalendarEventNotification.NotificationType.BROADCAST
-        sent_keys = self._already_notified_keys(
-            event_window_start, event_window_end, broadcast_type, sent_to_all_users=True,
-        )
-        event_groups = self._group_duplicate_events(recent_events)
-
-        if verbose:
-            self.stdout.write(f"Found {len(event_groups)} distinct events occurring in the last 5 minutes.")
-
-        for group in event_groups:
+        for group in self._group_duplicate_events(pending_events):
             event = group[0]
             try:
-                # Already notified for this name + time (any row of the group)?
-                notification_already_sent = self._event_key(event) in sent_keys or any(
-                    EconomicCalendarEventNotification.check_notification_sent(
-                        event=ev, user=None, notification_type=broadcast_type,
-                    )
-                    for ev in group
-                )
+                waited = now - event.release_date >= self.ACTUAL_VALUE_WAIT
+                if any(self._awaiting_actual(ev) for ev in group) and not waited:
+                    if verbose:
+                        self.stdout.write(f"  … Waiting for the actual value of {event.event_name}")
+                    continue
 
-                if notification_already_sent:
+                released = [ev for ev in group if ev.actual_value]
+                if released:
+                    event = released[0]
+
+                if dry_run:
+                    count += 1
                     if verbose:
                         self.stdout.write(
-                            f"  ⊘ Event notification already sent for {event.event_name} ({event.id}) - skipping"
+                            f"  [dry-run] Would send release notification for "
+                            f"{event.event_name}: {event.actual_value or 'no actual value'}"
                         )
                     continue
 
-                if not dry_run:
-                    # Claim notification FIRST (in separate transaction) before sending
-                    # This prevents duplicate sends if FCM push fails
-                    claimed = [
-                        ev for ev in group
-                        if EconomicCalendarEventNotification.create_notification_record(
-                            event=ev,
-                            user=None,
-                            notification_type=broadcast_type,
-                            sent_to_all=True,
-                            is_sent=False  # Mark as in-progress, not yet sent
+                # Claim every row in DB before push so overlapping scheduler ticks cannot double-send.
+                claimed = [
+                    ev for ev in group
+                    if EconomicCalendarEventNotification.claim_broadcast_notification(ev, notification_type)
+                ]
+                if not claimed or self._event_key(event) in sent_keys:
+                    if verbose:
+                        self.stdout.write(
+                            f"  ⊘ Release notification already sent for {event.event_name} ({event.id})"
                         )
-                    ]
+                    continue
 
-                    if not claimed:
-                        if verbose:
-                            self.stdout.write(
-                                f"  ⊘ Event notification already claimed by another process for {event.event_name} ({event.id})"
-                            )
-                        continue
-                    
-                    try:
-                        # Get all users with active reminders or subscriptions for this event
-                        users_to_notify = self._get_users_for_event_notification(event)
-                        
-                        # Send the actual notifications
-                        self._send_event_notification(event, users_to_notify, mark_sent=True, events=group)
-
-                    except Exception as send_err:
-                        # Mark as failed but keep the claim to prevent retries
-                        EconomicCalendarEventNotification.objects.filter(
-                            event__in=group,
-                            user=None,
-                            notification_type=EconomicCalendarEventNotification.NotificationType.BROADCAST,
-                            sent_to_all_users=True,
-                        ).update(is_sent=True, error_message=str(send_err)[:1000])
-                        logger.exception(f"Error sending event notification for event {event.id}", exc_info=send_err)
-                        raise
-                else:
-                    users_to_notify = self._get_users_for_event_notification(event)
+                users = list(User.objects.filter(is_active=True))
+                try:
+                    self._send_release_notification(event, users, released or group)
+                except Exception as send_err:
+                    # Keep the claim row so the next scheduler tick cannot double-send.
+                    EconomicCalendarEventNotification.objects.filter(
+                        event__in=group,
+                        user=None,
+                        notification_type=notification_type,
+                        sent_to_all_users=True,
+                    ).update(error_message=str(send_err)[:1000])
+                    raise
 
                 count += 1
-
                 if verbose:
                     self.stdout.write(
-                        f"  ✓ Event notification sent to {len(users_to_notify)} users - "
-                        f"{event.event_name} ({event.importance})"
+                        f"  ✓ Release notification sent to {len(users)} users — "
+                        f"{event.event_name}: {event.actual_value or 'no actual value'}"
                     )
-
             except Exception as e:
                 self.stderr.write(
                     self.style.ERROR(
-                        f'Error processing event {event.id}: {str(e)}'
+                        f"Error processing release notification for event {event.id}: {str(e)}"
                     )
                 )
-                logger.exception(f"Error processing event {event.id}", exc_info=e)
+                logger.exception(
+                    f"Error processing release notification for event {event.id}",
+                    exc_info=e,
+                )
 
         return count
 
-    def _get_users_for_event_notification(self, event):
+    def _refresh_actual_values(self, events, window_start, now, dry_run, verbose):
+        """Update actual/forecast/previous values on `events` in place from the Tradays feed."""
+        try:
+            provider_events = fetch_tradays_events(
+                window_start - timedelta(minutes=1), now + timedelta(minutes=1),
+            )
+        except TradaysFetchError as e:
+            self.stderr.write(self.style.WARNING(f"Could not refresh actual values: {e}"))
+            logger.warning("Could not refresh economic calendar actual values: %s", e)
+            return
+
+        provider_by_id = {data.get("Id"): data for data in provider_events if data.get("Id")}
+        value_fields = (
+            ("actual_value", "ActualValue"),
+            ("forecast_value", "ForecastValue"),
+            ("previous_value", "PreviousValue"),
+        )
+        changed = []
+        for event in events:
+            data = provider_by_id.get(event.provider_id)
+            if not data:
+                continue
+            updated = False
+            for field, key in value_fields:
+                value = str(data.get(key) or "").strip() or None
+                if value is not None and getattr(event, field) != value:
+                    setattr(event, field, value)
+                    updated = True
+            if updated:
+                changed.append(event)
+
+        if verbose:
+            self.stdout.write(f"Refreshed values for {len(changed)} recently released events from Tradays.")
+        if changed and not dry_run:
+            EconomicCalendarEvent.objects.bulk_update(
+                changed, [field for field, _ in value_fields], batch_size=500,
+            )
+
+    @staticmethod
+    def _format_event_values(event):
+        parts = [f"Actual: {event.actual_value}"]
+        if event.forecast_value:
+            parts.append(f"Forecast: {event.forecast_value}")
+        if event.previous_value:
+            parts.append(f"Previous: {event.previous_value}")
+        return " | ".join(parts)
+
+    def _send_release_notification(self, event, users, events):
         """
-        Get all users who should receive an event notification.
-        Returns users who:
-        - Have active reminders for this event
-        - Are subscribed to market data/news
-        """
-        # Get users with active reminders for this event
-        reminder_users = User.objects.filter(
-            economic_event_reminders__event=event,
-            economic_event_reminders__is_active=True,
-        ).distinct()
-
-        # Get subscribed users (have active subscription for market data/news)
-        subscribed_users = User.objects.filter(
-            is_subscribed=True,
-        ).distinct()
-
-        # Combine both sets
-        all_users = reminder_users | subscribed_users
-
-        return list(all_users)
-
-    def _send_event_notification(self, event, users, mark_sent=False, events=None):
-        """
-        Send FCM push + in-app notifications for an economic event to all users.
-        
-        Args:
-            event: The economic calendar event
-            users: List of users to notify
-            mark_sent: If True, mark the tracking record as sent after successful delivery
+        FCM + in-app notification for a released economic event, with the actual value(s)
+        when the provider has published them.
         """
         users = filter_recipients(users, NotificationCategory.ECONOMIC_EVENTS)
         if not users:
-            if mark_sent:
-                # Everyone opted out: still close the claim so it is not retried.
-                EconomicCalendarEventNotification.objects.filter(
-                    event__in=events or [event],
-                    user=None,
-                    notification_type=EconomicCalendarEventNotification.NotificationType.BROADCAST,
-                    sent_to_all_users=True,
-                ).update(is_sent=True)
             return
 
-        # Build notification content
-        title = f"Economic event: {event.event_name}"
-        body = (
-            f"{event.event_name} just occurred. "
-            f"Currency: {event.currency_code or 'N/A'} | "
-            f"Country: {event.country_name or 'N/A'} | "
-            f"Importance: {event.get_importance_display()}"
-        )
-
-        # Additional details if available
-        if event.actual_value:
-            body += f" | Actual: {event.actual_value}"
-        if event.forecast_value:
-            body += f" | Forecast: {event.forecast_value}"
-
-        # Determine notification type based on importance
-        if event.importance == "high":
-            notification_type = "SUCCESS"
-        elif event.importance == "medium":
-            notification_type = "INFO"
+        impact = event.get_importance_display()
+        released = [ev for ev in events if ev.actual_value]
+        if not released:
+            title = f"Economic event: {event.event_name}"
+            body = (
+                f"{event.event_name} ({self._event_location_label(events)} - {impact} Impact) "
+                f"has just taken place."
+            )
+        elif len(released) == 1:
+            title = f"{event.event_name}: {event.actual_value}"
+            body = (
+                f"{event.event_name} ({self._event_location_label(released)} - {impact} Impact) — "
+                f"{self._format_event_values(event)}"
+            )
         else:
-            notification_type = "INFO"
+            # Same event name released for several countries at once; list each result.
+            title = f"Released: {event.event_name}"
+            body = f"{event.event_name} ({impact} Impact) — " + "; ".join(
+                f"{ev.country_name or ev.currency_code or 'N/A'}: {self._format_event_values(ev)}"
+                for ev in released
+            )
+
+        notification_type = "SUCCESS" if event.importance == "high" else "INFO"
 
         data_payload = {
             "type": "economic_event",
@@ -703,7 +758,6 @@ class Command(BaseCommand):
             "previous_value": event.previous_value or "",
         }
 
-        # Bulk create in-app notifications
         notifications_to_create = [
             UserNotification(
                 user=user,
@@ -719,24 +773,14 @@ class Command(BaseCommand):
         # Short committed chunks; the FCM call runs outside any transaction so the
         # notification rows are not left locked while the push goes out.
         bulk_create_user_notifications(notifications_to_create)
-
-        # Send FCM push to all users
         send_push_to_users(
             users=users,
             title=title,
             body=body,
             data=data_payload,
         )
-        
-        # Mark as sent AFTER successful delivery (in separate transaction)
-        if mark_sent:
-            EconomicCalendarEventNotification.objects.filter(
-                event__in=events or [event],
-                user=None,
-                notification_type=EconomicCalendarEventNotification.NotificationType.BROADCAST,
-                sent_to_all_users=True,
-            ).update(is_sent=True)
 
         logger.info(
-            f"Sent event notification to {len(users)} users for event {event.event_name} ({event.id})"
+            f"Sent release notification to {len(users)} users for event "
+            f"{event.event_name} ({event.id}): {event.actual_value or 'no actual value'}"
         )

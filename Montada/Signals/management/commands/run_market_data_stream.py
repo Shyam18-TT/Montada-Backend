@@ -77,6 +77,15 @@ def _extract_symbol_digits(symbol_info):
 # price API, so the day rollover is picked up without restarting the stream.
 OPEN_PRICES_REFRESH_SECONDS = 60
 
+# The MT5 Manager connection can die silently (e.g. the MT5 server restarts over the weekend):
+# the process keeps running but no ticks arrive, so prices freeze while bid_today keeps
+# rolling over and the daily change becomes wrong. Crypto ticks around the clock, so this
+# long without ANY tick means the connection is dead and the stream reconnects itself.
+DEFAULT_STALE_TICK_SECONDS = 120
+# Wait between reconnect attempts: doubles after each failure, capped.
+RECONNECT_BACKOFF_START_SECONDS = 5
+RECONNECT_BACKOFF_MAX_SECONDS = 120
+
 
 class Command(BaseCommand):
     help = "Stream MT5 Manager ticks and broadcast them over the market data websocket."
@@ -99,6 +108,15 @@ class Command(BaseCommand):
             default=250,
             help="How often buffered ticks are flushed to websocket clients.",
         )
+        parser.add_argument(
+            "--stale-tick-seconds",
+            type=int,
+            default=DEFAULT_STALE_TICK_SECONDS,
+            help=(
+                "Reconnect to MT5 Manager when no tick has arrived for this many seconds "
+                f"(minimum 30). Default: {DEFAULT_STALE_TICK_SECONDS}."
+            ),
+        )
 
     def handle(self, *args, **options):
         if MT5Manager is None:
@@ -107,16 +125,17 @@ class Command(BaseCommand):
             )
             return
 
-        server = getattr(settings, "MT5_MANAGER_SERVER", "")
-        login = int(getattr(settings, "MT5_MANAGER_LOGIN", 0) or 0)
-        password = str(getattr(settings, "MT5_MANAGER_PASSWORD", "") or "")
-        timeout_ms = max(1000, int(options.get("timeout_ms") or 120000))
-        requested_symbols = [
+        self._server = getattr(settings, "MT5_MANAGER_SERVER", "")
+        self._login = int(getattr(settings, "MT5_MANAGER_LOGIN", 0) or 0)
+        self._password = str(getattr(settings, "MT5_MANAGER_PASSWORD", "") or "")
+        self._timeout_ms = max(1000, int(options.get("timeout_ms") or 120000))
+        self._requested_symbols = [
             symbol.strip()
             for symbol in str(options.get("symbols") or "").split(",")
             if symbol.strip()
         ]
         publish_interval_ms = max(50, int(options.get("publish_interval_ms") or 250))
+        stale_tick_seconds = max(30, int(options.get("stale_tick_seconds") or DEFAULT_STALE_TICK_SECONDS))
 
         from channels.layers import get_channel_layer
 
@@ -127,7 +146,6 @@ class Command(BaseCommand):
             )
             return
 
-        manager = MT5Manager.ManagerAPI()
         self._channel_layer = channel_layer
         self._publish_interval_seconds = publish_interval_ms / 1000.0
         self._pending_ticks = {}
@@ -137,32 +155,89 @@ class Command(BaseCommand):
         self._open_prices = {}
         # MT5 symbol digits keyed by symbol name (PHP rounds with mt5 Digits).
         self._symbol_digits = {}
+        self._selected_symbols = []
         self._stop_dispatcher = threading.Event()
         self._last_broadcast_error_at = 0.0
-        self._dispatcher_thread = threading.Thread(
+        # Watchdog state: time of the last tick, and a flag set when MT5 reports a disconnect.
+        self._last_tick_at = time.monotonic()
+        self._connection_lost = threading.Event()
+        self._tick_sink = self._build_tick_sink()
+        self._manager_sink = self._build_manager_sink()
+        self._manager = None
+
+        dispatcher_thread = threading.Thread(
             target=self._dispatch_ticks_loop,
             name="signals-market-data-dispatcher",
             daemon=True,
         )
-        sink = self._build_tick_sink()
+        dispatcher_thread.start()
+        threading.Thread(
+            target=self._open_prices_refresh_loop,
+            name="signals-market-open-prices",
+            daemon=True,
+        ).start()
 
+        backoff = RECONNECT_BACKOFF_START_SECONDS
+        try:
+            while True:
+                if self._manager is None:
+                    if self._connect_and_subscribe():
+                        backoff = RECONNECT_BACKOFF_START_SECONDS
+                    else:
+                        self.stderr.write(self.style.WARNING(f"Retrying MT5 connection in {backoff}s..."))
+                        time.sleep(backoff)
+                        backoff = min(backoff * 2, RECONNECT_BACKOFF_MAX_SECONDS)
+                    continue
+
+                time.sleep(1)
+                idle_seconds = time.monotonic() - self._last_tick_at
+                if self._connection_lost.is_set():
+                    reason = "MT5 Manager reported a disconnect"
+                elif idle_seconds >= stale_tick_seconds:
+                    reason = f"no ticks for {int(idle_seconds)}s"
+                else:
+                    continue
+
+                logger.warning("Market data stream reconnecting: %s.", reason)
+                self.stderr.write(self.style.WARNING(f"Reconnecting to MT5 Manager ({reason})..."))
+                self._disconnect()
+        except KeyboardInterrupt:
+            self.stdout.write(self.style.WARNING("Stopping market data stream..."))
+        finally:
+            self._stop_dispatcher.set()
+            if dispatcher_thread.is_alive():
+                dispatcher_thread.join(timeout=2.0)
+            self._disconnect()
+            self.stdout.write(self.style.SUCCESS("Disconnected from MT5 Manager."))
+
+    def _connect_and_subscribe(self):
+        """Open a fresh MT5 Manager connection and subscribe to ticks. True on success."""
+        manager = MT5Manager.ManagerAPI()
+        self._connection_lost.clear()
         self.stdout.write(
             self.style.SUCCESS(
-                f"Connecting to {server} (login={login}) for market data stream..."
+                f"Connecting to {self._server} (login={self._login}) for market data stream..."
             )
         )
 
         pump_modes = getattr(MT5Manager.ManagerAPI, "EnPumpModes", None)
         pump_mode = getattr(pump_modes, "PUMP_MODE_SYMBOLS", 0)
-        if not manager.Connect(server, login, password, pump_mode, timeout_ms):
+        try:
+            # Connection events (OnDisconnect) make reconnects immediate; the tick watchdog
+            # still covers a connection that dies without reporting it.
+            manager.Subscribe(self._manager_sink)
+        except Exception:
+            logger.debug("MT5 Manager connection-event subscription unavailable.", exc_info=True)
+        if not manager.Connect(self._server, self._login, self._password, pump_mode, self._timeout_ms):
             self.stderr.write(
                 self.style.ERROR(f"Connection failed: {getattr(MT5Manager, 'LastError', lambda: '')()}")
             )
-            return
+            self._safe_disconnect(manager)
+            return False
 
         self.stdout.write(self.style.SUCCESS("Connected to MT5 Manager successfully."))
 
-        symbols_to_add = requested_symbols
+        symbols_to_add = list(self._requested_symbols)
         if not symbols_to_add:
             try:
                 raw_symbols = manager.SymbolGetArray() or []
@@ -193,8 +268,8 @@ class Command(BaseCommand):
             self.stderr.write(
                 self.style.WARNING("No symbols available to subscribe. Disconnecting.")
             )
-            manager.Disconnect()
-            return
+            self._safe_disconnect(manager)
+            return False
 
         selected_symbols = []
         for symbol_name in symbols_to_add:
@@ -214,10 +289,11 @@ class Command(BaseCommand):
         )
 
         if selected_symbols:
+            self._selected_symbols = selected_symbols
             try:
                 self._refresh_open_prices(selected_symbols)
                 initial_snapshot = load_market_snapshot_from_db(selected_symbols)
-                self._latest_ticks = {}
+                latest_ticks = {}
                 for tick in initial_snapshot:
                     symbol = tick.get("symbol")
                     if not symbol:
@@ -225,7 +301,8 @@ class Command(BaseCommand):
                     if symbol not in self._symbol_digits and tick.get("digits") is not None:
                         self._symbol_digits[symbol] = tick["digits"]
                     # Rebuild with the website's reference prices so the change matches it.
-                    self._latest_ticks[symbol] = self._build_tick(symbol, tick.get("bid"), tick.get("ask"))
+                    latest_ticks[symbol] = self._build_tick(symbol, tick.get("bid"), tick.get("ask"))
+                self._latest_ticks = latest_ticks
 
                 save_market_snapshot(self._latest_ticks.values())
                 self.stdout.write(
@@ -236,39 +313,37 @@ class Command(BaseCommand):
             except Exception as exc:
                 logger.exception("Failed to prepare initial market snapshot: %s", exc)
 
-        if not manager.TickSubscribe(sink):
+        if not manager.TickSubscribe(self._tick_sink):
             self.stderr.write(
                 self.style.ERROR(
                     f"Tick subscription failed: {getattr(MT5Manager, 'LastError', lambda: '')()}"
                 )
             )
-            manager.Disconnect()
-            return
+            self._safe_disconnect(manager)
+            return False
 
+        self._manager = manager
+        self._last_tick_at = time.monotonic()
         self.stdout.write(self.style.SUCCESS("Market data websocket broadcasting is live."))
-        self._dispatcher_thread.start()
-        threading.Thread(
-            target=self._open_prices_refresh_loop,
-            args=(selected_symbols,),
-            name="signals-market-open-prices",
-            daemon=True,
-        ).start()
+        return True
 
-        try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            self.stdout.write(self.style.WARNING("Stopping market data stream..."))
-        finally:
-            self._stop_dispatcher.set()
-            if self._dispatcher_thread.is_alive():
-                self._dispatcher_thread.join(timeout=2.0)
+    def _safe_disconnect(self, manager):
+        """Unsubscribe and disconnect, ignoring errors from an already-dead connection."""
+        steps = (
+            lambda: manager.TickUnsubscribe(self._tick_sink),
+            lambda: manager.Unsubscribe(self._manager_sink),
+            manager.Disconnect,
+        )
+        for step in steps:
             try:
-                manager.TickUnsubscribe(sink)
+                step()
             except Exception:
-                logger.exception("Failed to unsubscribe MT5 tick sink cleanly.")
-            manager.Disconnect()
-            self.stdout.write(self.style.SUCCESS("Disconnected from MT5 Manager."))
+                logger.debug("MT5 Manager cleanup step failed.", exc_info=True)
+
+    def _disconnect(self):
+        manager, self._manager = self._manager, None
+        if manager is not None:
+            self._safe_disconnect(manager)
 
     def _refresh_open_prices(self, symbols):
         """Reload bid_today / ask_today from the website's price API (keeps old values on failure)."""
@@ -285,8 +360,12 @@ class Command(BaseCommand):
                 ", ".join(missing[:20]),
             )
 
-    def _open_prices_refresh_loop(self, symbols):
+    def _open_prices_refresh_loop(self):
         while not self._stop_dispatcher.wait(timeout=OPEN_PRICES_REFRESH_SECONDS):
+            # Symbols of the current connection (they can change after a reconnect).
+            symbols = list(self._selected_symbols)
+            if not symbols:
+                continue
             try:
                 self._refresh_open_prices(symbols)
             except Exception:
@@ -310,6 +389,8 @@ class Command(BaseCommand):
     def _build_tick_sink(self):
         class TickSink:
             def OnTick(self, symbol, tick):  # noqa: N802 - MT5Manager callback naming
+                # Watchdog heartbeat: any tick proves the connection is alive.
+                self_outer._last_tick_at = time.monotonic()
                 try:
                     tick_digits = getattr(tick, "Digits", None)
                     if tick_digits is None:
@@ -330,6 +411,19 @@ class Command(BaseCommand):
 
         self_outer = self
         return TickSink()
+
+    def _build_manager_sink(self):
+        """Connection-event sink: flags a disconnect so the main loop reconnects right away."""
+        class ManagerSink:
+            def OnConnect(self):  # noqa: N802 - MT5Manager callback naming
+                return None
+
+            def OnDisconnect(self):  # noqa: N802 - MT5Manager callback naming
+                logger.warning("MT5 Manager connection lost.")
+                self_outer._connection_lost.set()
+
+        self_outer = self
+        return ManagerSink()
 
     def _dispatch_ticks_loop(self):
         while not self._stop_dispatcher.is_set():

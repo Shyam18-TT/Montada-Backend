@@ -22,6 +22,33 @@ def is_skipped_event_name(event_name):
     return any(pattern.match(normalized_name) for pattern in SKIPPED_EVENT_NAME_PATTERNS)
 
 
+class TradaysFetchError(Exception):
+    pass
+
+
+def fetch_tradays_events(date_from, date_to, timeout=15):
+    """Return the raw Tradays event dicts released between date_from and date_to (UTC datetimes)."""
+    url = (
+        f"{Command.TRADAYS_URL}"
+        f"&from={date_from.strftime('%Y-%m-%dT%H:%M:%S')}"
+        f"&to={date_to.strftime('%Y-%m-%dT%H:%M:%S')}"
+    )
+    try:
+        response = requests.get(url, headers=Command.HEADERS, timeout=timeout)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        raise TradaysFetchError(f'Failed to reach Tradays: {e}') from e
+
+    match = re.search(r'Calendar\.Data\s*=\s*(\[.*?\]);', response.text, re.DOTALL)
+    if not match:
+        raise TradaysFetchError('Could not find Calendar.Data in the page source.')
+
+    try:
+        return json.loads(match.group(1))
+    except json.JSONDecodeError as e:
+        raise TradaysFetchError(f'JSON parse error: {e}') from e
+
+
 class Command(BaseCommand):
     help = 'Fetches economic calendar data from Tradays (20-day window from today) and saves/updates in the database.'
 
@@ -80,29 +107,11 @@ class Command(BaseCommand):
         # Calculate date window (single calculation)
         now, window_start, window_end = self.get_date_window()
 
-        date_from_str = window_start.strftime("%Y-%m-%dT%H:%M:%S")
-        date_to_str = window_end.strftime("%Y-%m-%dT%H:%M:%S")
-        
-        dynamic_url = f"{self.TRADAYS_URL}&from={date_from_str}&to={date_to_str}"
-
-        # --- 1. Fetch raw HTML from Tradays widget ---
+        # --- 1-2. Fetch the Tradays widget and extract Calendar.Data JSON ---
         try:
-            response = requests.get(dynamic_url, headers=self.HEADERS, timeout=15)
-            response.raise_for_status()
-        except requests.exceptions.RequestException as e:
-            self.stderr.write(self.style.ERROR(f'Failed to reach Tradays: {e}'))
-            return
-
-        # --- 2. Extract Calendar.Data JSON from the page ---
-        match = re.search(r'Calendar\.Data\s*=\s*(\[.*?\]);', response.text, re.DOTALL)
-        if not match:
-            self.stderr.write(self.style.ERROR('Could not find Calendar.Data in the page source.'))
-            return
-
-        try:
-            all_events = json.loads(match.group(1))
-        except json.JSONDecodeError as e:
-            self.stderr.write(self.style.ERROR(f'JSON parse error: {e}'))
+            all_events = fetch_tradays_events(window_start, window_end)
+        except TradaysFetchError as e:
+            self.stderr.write(self.style.ERROR(str(e)))
             return
 
         self.stdout.write(f'Fetched {len(all_events)} total events from provider.')
