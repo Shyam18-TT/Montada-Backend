@@ -137,7 +137,8 @@ def get_push_tokens_for_users(users) -> list[str]:
         "FCM token resolution: %d unique token(s) from %d device_id(s) for %d user(s)",
         len(resolved_tokens),
         len(seen_device_ids),
-        len(users) if hasattr(users, '__len__') else 0,
+        # Only count real lists: len() on a queryset would run the user query again.
+        len(users) if isinstance(users, (list, tuple, set)) else "?",
     )
     return resolved_tokens
 
@@ -466,6 +467,14 @@ def _schedule_push(func, label, **kwargs):
     except Exception:
         submit()
     return None
+
+
+def run_in_background(func, label, **kwargs) -> None:
+    """
+    Queue func(**kwargs) on the push worker after the current transaction commits.
+    func should return a send_push_* result dict (it is logged).
+    """
+    return _schedule_push(func, label, **kwargs)
 
 
 def send_push_to_users_in_background(users, title, body, data=None, image_url=None) -> None:

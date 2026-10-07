@@ -149,8 +149,12 @@ class NewsArticleListView(generics.ListAPIView):
             is_free_article = Q(content_access=NewsArticle.ContentAccess.FREE)
             qs = qs.filter(~is_analyst_author | is_free_article | Exists(article_access))
         else:
-            # Analyst: only articles created by himself; optional status filter
-            qs = qs.filter(author=self.request.user)
+            analyst_id = self.request.query_params.get('analyst')
+            if analyst_id:
+                qs = qs.filter(author_id=analyst_id)
+            else:
+                qs = qs.filter(author=self.request.user)
+                
             status_param = (self.request.query_params.get("status") or "").strip().lower()
             if status_param in ("draft", "published", "archived"):
                 qs = qs.filter(status=status_param)
@@ -1232,7 +1236,8 @@ class TradaysEconomicCalendarView(generics.ListAPIView):
     Query params:
         date_from   : ISO date string YYYY-MM-DD — filter events on or after this date
         date_to     : ISO date string YYYY-MM-DD — filter events on or before this date
-        importance  : none | low | medium | high — filter by importance level
+        importance  : none | low | medium | high — filter by importance level; several
+                      allowed, comma-separated (high,low) or repeated (&importance=low)
         currency    : e.g. USD, EUR — filter by currency code (case-insensitive)
         search      : free-text search against event_name and country_name
         page        : page number (default 1)
@@ -1290,10 +1295,15 @@ class TradaysEconomicCalendarView(generics.ListAPIView):
                 release_date__lte=now + datetime.timedelta(days=20),
             )
 
-        # Importance filter
-        importance = self.request.query_params.get("importance", "").strip().lower()
-        if importance in ("none", "low", "medium", "high"):
-            qs = qs.filter(importance=importance)
+        # Importance filter: one or more levels, comma-separated and/or repeated
+        # (?importance=high,low or ?importance=high&importance=low). Unknown values are ignored.
+        importances = {
+            value.strip().lower()
+            for param in self.request.query_params.getlist("importance")
+            for value in param.split(",")
+        } & {"none", "low", "medium", "high"}
+        if importances:
+            qs = qs.filter(importance__in=importances)
 
         # Currency filter
         currency = self.request.query_params.get("currency", "").strip().upper()

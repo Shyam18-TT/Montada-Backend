@@ -989,10 +989,9 @@ class Command(BaseCommand):
         try:
             from Dashboard.realtime import broadcast_notifications
 
-            broadcast_notifications(
-                UserNotification.objects.filter(id__in=[notification.id for notification in notifications]),
-                event_name="created",
-            )
+            # bulk_create filled id/created_at, so broadcast the objects without re-reading them
+            # (an id__in lookup scans the table on MSSQL and breaks past 2100 ids).
+            broadcast_notifications(notifications, event_name="created")
         except Exception:
             logger.exception("Failed to broadcast signal change notifications.")
 

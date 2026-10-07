@@ -127,12 +127,10 @@ def _create_and_broadcast_notifications(
             for user in users
         ]
         bulk_create_user_notifications(created_notifications)
-        broadcast_notifications(
-            UserNotification.objects.filter(
-                id__in=[notification.id for notification in created_notifications]
-            ),
-            event_name="created",
-        )
+        # bulk_create fills id/created_at on these objects, so broadcast them as-is. Re-reading
+        # them by id is slow on MSSQL: UUID params arrive as nvarchar against the char(32)
+        # key, so the lookup scans the whole notification table.
+        broadcast_notifications(created_notifications, event_name="created")
     except Exception:
         logger.exception("Failed to create/broadcast in-app notifications.")
 
@@ -1011,20 +1009,7 @@ class SignalPushNotificationView(generics.GenericAPIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        # Fetch the signal; must belong to this analyst
-        try:
-            signal = (
-                TradingSignal.active
-                .select_related("instrument", "asset_class", "timeframe", "analyst")
-                .get(pk=pk, analyst=request.user)
-            )
-        except TradingSignal.DoesNotExist:
-            return Response(
-                {"error": "Signal not found or does not belong to you."},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-
-        # Validate required fields
+        # Validate the body before touching the DB
         audience = (request.data.get("audience") or "").strip().lower()
         category = (request.data.get("category") or "").strip().lower()
         custom_title = (request.data.get("custom_title") or "").strip() or None
@@ -1041,28 +1026,34 @@ class SignalPushNotificationView(generics.GenericAPIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Build recipients queryset
-        from django.contrib.auth import get_user_model
-        UserModel = get_user_model()
+        # Fetch the signal; must belong to this analyst
+        try:
+            signal = (
+                TradingSignal.active
+                .select_related("instrument", "timeframe")
+                .get(pk=pk, analyst=request.user)
+            )
+        except TradingSignal.DoesNotExist:
+            return Response(
+                {"error": "Signal not found or does not belong to you."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # Recipients as subqueries (no id lists in SQL); only the id column is loaded.
+        from Mainapp.models import NotificationPreference
+        from Mainapp.notification_preferences import OFF
 
         if audience == "followers":
-            recipient_ids = (
-                Follow.objects.filter(
-                    followed=request.user,
-                    status=Follow.Status.ACCEPTED,
-                    is_active=True,
-                ).values_list("follower_id", flat=True)
-            )
-            recipients = UserModel.objects.filter(id__in=recipient_ids)
+            audience_ids = Follow.objects.filter(
+                followed=request.user,
+                status=Follow.Status.ACCEPTED,
+                is_active=True,
+            ).values("follower_id")
         else:  # applied
-            recipient_ids = (
-                AppliedSignal.objects.filter(signal=signal)
-                .values_list("trader_id", flat=True)
-            )
-            recipients = UserModel.objects.filter(id__in=recipient_ids)
+            audience_ids = AppliedSignal.objects.filter(signal=signal).values("trader_id")
+        audience_qs = get_user_model().objects.filter(id__in=audience_ids).only("id")
 
-        # Evaluate once so the same list is reused for DB save + FCM send
-        recipient_list = list(recipients)
+        recipient_list = list(audience_qs)
         recipient_count = len(recipient_list)
         if recipient_count == 0:
             return Response(
@@ -1099,53 +1090,35 @@ class SignalPushNotificationView(generics.GenericAPIView):
         # Recipients who turned trade-idea notifications off get neither in-app nor push.
         recipient_list = filter_recipients(recipient_list, NotificationCategory.TRADE_IDEAS)
 
-        # ── Save to UserNotification (non-fatal) ────────────────────────────
-        db_error = None
-        try:
-            from Mainapp.models import UserNotification
-            from Mainapp.notifications import bulk_create_user_notifications
-            created_notifications = [
-                UserNotification(
-                    user=recipient,
-                    title=title,
-                    message=body,
-                    notification_type="INFO",
-                    category="TRADING_SIGNAL",
-                )
-                for recipient in recipient_list
-            ]
-            bulk_create_user_notifications(created_notifications)
-            broadcast_notifications(
-                UserNotification.objects.filter(
-                    id__in=[notification.id for notification in created_notifications]
-                ),
-                event_name="created",
-            )
-        except Exception as exc:
-            db_error = str(exc)
-
-        # ── Resolve FCM device tokens (non-fatal) ────────────────────────────
-        token_strings = []
+        # ── Count device tokens (non-fatal) ──────────────────────────────────
+        # Uses the subquery form of the audience so SQL joins instead of matching a list of
+        # UUID params (which scans on MSSQL and fails past 2100 recipients).
         device_tokens_found = 0
         tokens_error = None
         try:
             from firebase import get_push_tokens_for_users
-            token_strings = get_push_tokens_for_users(recipient_list)
-            device_tokens_found = len(token_strings)
+            opted_out_ids = NotificationPreference.objects.filter(
+                category=NotificationCategory.TRADE_IDEAS, mode=OFF,
+            ).values("user_id")
+            device_tokens_found = len(
+                get_push_tokens_for_users(audience_qs.exclude(id__in=opted_out_ids))
+            )
         except Exception as exc:
             tokens_error = str(exc)
 
-        # ── Queue Firebase send (non-fatal) ──────────────────────────────────
-        # The push runs on a background worker so this request does not wait on FCM.
+        # ── Queue in-app rows + WebSocket broadcast + FCM push (non-fatal) ────
+        # Inserting into the large notification table and pushing to FCM take seconds, so
+        # they run on the background push worker and the analyst gets an immediate answer.
         # success_count / failure_count stay 0 here; delivery results go to the server log.
         fcm_success = 0
         fcm_failure = 0
         fcm_error = None
-        if token_strings:
+        if recipient_list:
             try:
-                # Sent per user (not per token) so each recipient's sound preference applies.
-                from firebase import send_push_to_users_in_background
-                send_push_to_users_in_background(
+                from firebase import run_in_background
+                run_in_background(
+                    _deliver_signal_notification,
+                    "signal_notify",
                     users=recipient_list,
                     title=title,
                     body=body,
@@ -1156,14 +1129,12 @@ class SignalPushNotificationView(generics.GenericAPIView):
                 fcm_failure = device_tokens_found
 
         # ── Build response message ───────────────────────────────────────────
-        if db_error and tokens_error:
-            msg = "Both DB save and token lookup failed."
-        elif db_error:
-            msg = "DB save failed; push queued."
+        if fcm_error:
+            msg = "Notification could not be queued."
+        elif not recipient_list:
+            msg = "All recipients turned trade-idea notifications off. No notification sent."
         elif device_tokens_found == 0:
-            msg = "Notification saved. No device tokens registered for recipients."
-        elif fcm_error:
-            msg = "Notification saved. FCM push could not be queued."
+            msg = "Notification queued. No device tokens registered for recipients."
         else:
             msg = "Notification saved and push queued."
 
@@ -1178,12 +1149,20 @@ class SignalPushNotificationView(generics.GenericAPIView):
             "success_count": fcm_success,
             "failure_count": fcm_failure,
         }
-        if db_error:
-            response_data["db_error"] = db_error
         if tokens_error:
             response_data["tokens_error"] = tokens_error
         if fcm_error:
             response_data["fcm_error"] = fcm_error
 
         return Response(response_data, status=status.HTTP_200_OK)
+
+
+def _deliver_signal_notification(users, title, body, data):
+    """
+    Background job for SignalPushNotificationView: in-app notification rows, WebSocket
+    broadcast and FCM push. `users` are already filtered by notification preference.
+    """
+    _create_and_broadcast_notifications(users, title=title, body=body)
+    from firebase import send_push_to_users
+    return send_push_to_users(users=users, title=title, body=body, data=data)
 
