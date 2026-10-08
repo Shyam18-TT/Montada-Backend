@@ -89,7 +89,7 @@ class NewsArticle(models.Model):
     content_access = models.CharField(
         max_length=20,
         choices=ContentAccess.choices,
-        default=ContentAccess.PREMIUM,
+        default=ContentAccess.FREE,
         help_text="Free: visible to all authenticated traders. Premium: requires an active analyst plan covering articles.",
     )
 
@@ -402,6 +402,7 @@ class EconomicCalendarEventNotification(models.Model):
         EVENT = "event", "Event-Time Notification"
         BROADCAST = "broadcast", "Broadcast to All Users"
         ADMIN_ADVANCE = "admin_advance", "Admin Global Advance Reminder"
+        ACTUAL_VALUE = "actual_value", "Actual Value Released"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     

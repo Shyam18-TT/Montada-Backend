@@ -86,6 +86,7 @@ MIDDLEWARE = [
 
 # CORS: allow localhost on any port + your web origins (no trailing slashes)
 CORS_ALLOWED_ORIGINS = [
+    "http://192.168.1.125:59688",
     "http://localhost:3000",
     "http://localhost:5000",
     "http://localhost:8080",

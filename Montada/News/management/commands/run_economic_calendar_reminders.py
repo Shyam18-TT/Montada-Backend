@@ -5,8 +5,9 @@ This command:
 1. Checks for reminders that should trigger (reminder_time <= now, is_active, not is_sent)
 2. Sends FCM push + in-app notifications to users for their reminders
 3. Sends admin-configured global advance reminders to all active users (MontadaAdmin settings)
-4. Sends one release notification per high/medium event to all active users, including the
-   actual value re-fetched from Tradays once it is published
+4. Sends a release notification per high/medium event to all active users, including the
+   actual value re-fetched from Tradays if it is published within 5 minutes; otherwise a
+   follow-up with the actual value goes out when it arrives (up to 30 minutes after release)
 5. Claims every notification in the DB before sending so it goes out at most once
 
 Usage (one-time run):
@@ -58,10 +59,13 @@ class Command(BaseCommand):
         EconomicCalendarEvent.Importance.MEDIUM,
     )
     # How long after release to wait for Tradays to publish the actual value before the
-    # release notification goes out without it.
-    ACTUAL_VALUE_WAIT = timedelta(minutes=10)
-    # Events released longer ago than this are not notified (e.g. after scheduler downtime).
+    # release notification goes out without it ("has just taken place").
+    ACTUAL_VALUE_WAIT = timedelta(minutes=5)
+    # Events released longer ago than this are not notified (e.g. after scheduler downtime),
+    # and an actual value published later than this gets no follow-up notification.
     RELEASE_WINDOW = timedelta(minutes=30)
+    # Tradays EventType for data releases; 0 (speeches/meetings) and 2 (reports) never get an actual.
+    TRADAYS_INDICATOR_TYPE = 1
     # A personal reminder this close to the global advance reminder replaces it for that user.
     REMINDER_OVERLAP = timedelta(minutes=5)
 
@@ -160,7 +164,9 @@ class Command(BaseCommand):
         global_reminders_sent = self._process_global_admin_reminders(now, dry_run, verbose)
 
         # --- Step 3: Release notifications with the actual value (all users) ---
-        release_notifications_sent = self._process_release_notifications(now, dry_run, verbose)
+        release_notifications_sent, follow_ups_sent = self._process_release_notifications(
+            now, dry_run, verbose,
+        )
 
         # --- Summary ---
         self.stdout.write(
@@ -168,7 +174,8 @@ class Command(BaseCommand):
                 f'\n✓ Completed.\n'
                 f'  Per-user reminders sent: {reminders_sent}\n'
                 f'  Global advance reminders sent: {global_reminders_sent}\n'
-                f'  Release notifications sent: {release_notifications_sent}'
+                f'  Release notifications sent: {release_notifications_sent}\n'
+                f'  Actual value follow-ups sent: {follow_ups_sent}'
             )
         )
 
@@ -553,9 +560,13 @@ class Command(BaseCommand):
             f"for event {event.event_name} ({event.id})"
         )
 
-    @staticmethod
-    def _expects_actual(event):
-        """Speeches, reports and auctions have no forecast/previous and never get an actual value."""
+    @classmethod
+    def _expects_actual(cls, event):
+        """Whether Tradays will publish an actual value (speeches and reports never get one)."""
+        event_type = getattr(event, "provider_event_type", None)
+        if event_type is not None:
+            return event_type == cls.TRADAYS_INDICATOR_TYPE
+        # Feed unavailable this tick: fall back to whether the event has any figures.
         return bool(event.forecast_value or event.previous_value)
 
     def _awaiting_actual(self, event):
@@ -563,40 +574,76 @@ class Command(BaseCommand):
 
     def _process_release_notifications(self, now, dry_run, verbose):
         """
-        Send one notification per high/medium event to all active users when it is released.
+        Notify all active users about released high/medium events, in up to two steps:
+
+        1. Release notification: sent as soon as the actual value is published, or after
+           ACTUAL_VALUE_WAIT without it ("has just taken place").
+        2. Actual-value follow-up: when step 1 went out without the value and Tradays
+           publishes it within RELEASE_WINDOW of the release.
 
         Values are pulled fresh from Tradays because the scheduled calendar sync usually ran
-        before the release. The notification waits up to ACTUAL_VALUE_WAIT for the actual
-        value; events that never get one (speeches, reports) go out right away without it.
+        before the release. Events that never get a value (speeches, reports) only get step 1.
 
-        Returns count of events with notifications sent.
+        Returns (release notifications sent, actual-value follow-ups sent).
         """
         window_start = now - self.RELEASE_WINDOW
-        notification_type = EconomicCalendarEventNotification.NotificationType.BROADCAST
-        already_sent = EconomicCalendarEventNotification.objects.filter(
-            event_id=OuterRef("pk"),
-            user__isnull=True,
-            notification_type=notification_type,
-            sent_to_all_users=True,
-        )
+        types = EconomicCalendarEventNotification.NotificationType
 
-        pending_events = list(
+        def claim_exists(notification_type):
+            return Exists(EconomicCalendarEventNotification.objects.filter(
+                event_id=OuterRef("pk"),
+                user__isnull=True,
+                notification_type=notification_type,
+                sent_to_all_users=True,
+            ))
+
+        # An ACTUAL_VALUE claim means users already have this event's value: nothing left to send.
+        events = list(
             EconomicCalendarEvent.objects.filter(
                 release_date__gte=window_start,
                 release_date__lte=now,
                 importance__in=self.RELEASE_IMPORTANCES,
-            ).exclude(Exists(already_sent))
+            )
+            .exclude(claim_exists(types.ACTUAL_VALUE))
+            .annotate(release_notified=claim_exists(types.BROADCAST))
         )
-        if not pending_events:
-            return 0
+        if not events:
+            return 0, 0
 
-        if any(self._awaiting_actual(ev) for ev in pending_events):
-            self._refresh_actual_values(pending_events, window_start, now, dry_run, verbose)
+        if any(not ev.actual_value for ev in events):
+            self._refresh_actual_values(events, window_start, now, dry_run, verbose)
 
+        release_sent = self._send_first_release_notifications(
+            [ev for ev in events if not ev.release_notified], window_start, now, dry_run, verbose,
+        )
+        follow_ups_sent = self._send_actual_value_follow_ups(
+            [ev for ev in events if ev.release_notified and ev.actual_value], dry_run, verbose,
+        )
+        return release_sent, follow_ups_sent
+
+    def _claim_group(self, group, notification_type):
+        """Claim every row in DB before push so overlapping scheduler ticks cannot double-send."""
+        return [
+            ev for ev in group
+            if EconomicCalendarEventNotification.claim_broadcast_notification(ev, notification_type)
+        ]
+
+    @staticmethod
+    def _record_send_error(events, notification_type, error):
+        # Keep the claim rows so the next scheduler tick cannot double-send.
+        EconomicCalendarEventNotification.objects.filter(
+            event__in=events,
+            user=None,
+            notification_type=notification_type,
+            sent_to_all_users=True,
+        ).update(error_message=str(error)[:1000])
+
+    def _send_first_release_notifications(self, pending_events, window_start, now, dry_run, verbose):
+        types = EconomicCalendarEventNotification.NotificationType
         # The feed holds one row per country/currency, so "GDP q/q" at 09:00 can exist many
         # times. Users only need one notification per name + time.
         sent_keys = self._already_notified_keys(
-            window_start, now, notification_type, sent_to_all_users=True,
+            window_start, now, types.BROADCAST, sent_to_all_users=True,
         )
         count = 0
 
@@ -622,29 +669,24 @@ class Command(BaseCommand):
                         )
                     continue
 
-                # Claim every row in DB before push so overlapping scheduler ticks cannot double-send.
-                claimed = [
-                    ev for ev in group
-                    if EconomicCalendarEventNotification.claim_broadcast_notification(ev, notification_type)
-                ]
+                claimed = self._claim_group(group, types.BROADCAST)
                 if not claimed or self._event_key(event) in sent_keys:
                     if verbose:
                         self.stdout.write(
                             f"  ⊘ Release notification already sent for {event.event_name} ({event.id})"
                         )
                     continue
+                # Values included in this notification must not be repeated by a follow-up.
+                self._claim_group(released, types.ACTUAL_VALUE)
 
                 users = list(User.objects.filter(is_active=True))
                 try:
-                    self._send_release_notification(event, users, released or group)
+                    self._send_release_notification(
+                        event, users, released or group,
+                        value_to_follow=any(self._awaiting_actual(ev) for ev in group),
+                    )
                 except Exception as send_err:
-                    # Keep the claim row so the next scheduler tick cannot double-send.
-                    EconomicCalendarEventNotification.objects.filter(
-                        event__in=group,
-                        user=None,
-                        notification_type=notification_type,
-                        sent_to_all_users=True,
-                    ).update(error_message=str(send_err)[:1000])
+                    self._record_send_error(group, types.BROADCAST, send_err)
                     raise
 
                 count += 1
@@ -661,6 +703,54 @@ class Command(BaseCommand):
                 )
                 logger.exception(
                     f"Error processing release notification for event {event.id}",
+                    exc_info=e,
+                )
+
+        return count
+
+    def _send_actual_value_follow_ups(self, released_events, dry_run, verbose):
+        """Send the actual value for events whose release notification went out without it."""
+        notification_type = EconomicCalendarEventNotification.NotificationType.ACTUAL_VALUE
+        count = 0
+
+        for group in self._group_duplicate_events(released_events):
+            event = group[0]
+            try:
+                if dry_run:
+                    count += 1
+                    if verbose:
+                        self.stdout.write(
+                            f"  [dry-run] Would send actual value follow-up for "
+                            f"{event.event_name}: {event.actual_value}"
+                        )
+                    continue
+
+                claimed = self._claim_group(group, notification_type)
+                if not claimed:
+                    continue
+                event = claimed[0]
+
+                users = list(User.objects.filter(is_active=True))
+                try:
+                    self._send_release_notification(event, users, claimed, follow_up=True)
+                except Exception as send_err:
+                    self._record_send_error(claimed, notification_type, send_err)
+                    raise
+
+                count += 1
+                if verbose:
+                    self.stdout.write(
+                        f"  ✓ Actual value follow-up sent to {len(users)} users — "
+                        f"{event.event_name}: {event.actual_value}"
+                    )
+            except Exception as e:
+                self.stderr.write(
+                    self.style.ERROR(
+                        f"Error processing actual value follow-up for event {event.id}: {str(e)}"
+                    )
+                )
+                logger.exception(
+                    f"Error processing actual value follow-up for event {event.id}",
                     exc_info=e,
                 )
 
@@ -688,6 +778,7 @@ class Command(BaseCommand):
             data = provider_by_id.get(event.provider_id)
             if not data:
                 continue
+            event.provider_event_type = data.get("EventType")
             updated = False
             for field, key in value_fields:
                 value = str(data.get(key) or "").strip() or None
@@ -713,10 +804,11 @@ class Command(BaseCommand):
             parts.append(f"Previous: {event.previous_value}")
         return " | ".join(parts)
 
-    def _send_release_notification(self, event, users, events):
+    def _send_release_notification(self, event, users, events, value_to_follow=False, follow_up=False):
         """
         FCM + in-app notification for a released economic event, with the actual value(s)
-        when the provider has published them.
+        when the provider has published them. `follow_up` marks the later actual-value update
+        for an event already announced without it.
         """
         users = filter_recipients(users, NotificationCategory.ECONOMIC_EVENTS)
         if not users:
@@ -729,6 +821,14 @@ class Command(BaseCommand):
             body = (
                 f"{event.event_name} ({self._event_location_label(events)} - {impact} Impact) "
                 f"has just taken place."
+            )
+            if value_to_follow:
+                body += " The actual value will follow once it is released."
+        elif follow_up and len(released) == 1:
+            title = f"Actual released: {event.event_name}: {event.actual_value}"
+            body = (
+                f"{event.event_name} ({self._event_location_label(released)} - {impact} Impact) — "
+                f"{self._format_event_values(event)}"
             )
         elif len(released) == 1:
             title = f"{event.event_name}: {event.actual_value}"
@@ -756,6 +856,7 @@ class Command(BaseCommand):
             "actual_value": event.actual_value or "",
             "forecast_value": event.forecast_value or "",
             "previous_value": event.previous_value or "",
+            "is_follow_up": "true" if follow_up else "false",
         }
 
         notifications_to_create = [
