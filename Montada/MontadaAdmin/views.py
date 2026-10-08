@@ -875,7 +875,7 @@ class TopAnalystLeaderboardView(APIView):
                 total_signals=Coalesce(Subquery(signals_subq), 0),
                 wins=Coalesce(Subquery(wins_subq), 0),
                 losses=Coalesce(Subquery(losses_subq), 0),
-            )
+            ).order_by("-wins")[:20]
         )
 
         # Build list with win_rate and sort by win_rate desc (then by total_signals desc as tiebreaker)
@@ -3326,16 +3326,8 @@ class AdminFCMBroadcastView(APIView):
                 status=status.HTTP_200_OK,
             )
 
-        # Users who turned announcements off are skipped, except for mandatory
-        # system / subscription notices.
-        from Mainapp.notification_preferences import (
-            MANDATORY_ADMIN_BROADCAST_CATEGORIES,
-            Category as NotificationCategory,
-            filter_recipients,
-        )
-        if category not in MANDATORY_ADMIN_BROADCAST_CATEGORIES:
-            recipient_list = filter_recipients(recipient_list, NotificationCategory.ANNOUNCEMENTS)
-
+        # Everyone gets the in-app notification. Push respects the Announcements preference,
+        # except for mandatory system / subscription notices (see send_push_to_users).
         # ── Save UserNotification rows ───────────────────────────────────────
         notification_type = _PUSH_CATEGORY_MAP.get(category, "INFO")
         try:

@@ -50,10 +50,6 @@ def _notify_analyst_follow(analyst_user, follower_user, title, message=None):
     """Create a UserNotification for the analyst when someone follows them."""
     if UserNotification is None:
         return
-    from Mainapp.notification_preferences import Category, notifications_enabled
-
-    if not notifications_enabled(analyst_user, Category.FOLLOWERS):
-        return
     UserNotification.objects.create(
         user=analyst_user,
         title=title,

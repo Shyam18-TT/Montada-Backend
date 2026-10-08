@@ -817,7 +817,8 @@ class TestJson(APIView):
 
 class NotificationPreferencesView(APIView):
     """
-    Per-category notification settings for the authenticated user.
+    Per-category push notification settings for the authenticated user.
+    In-app notifications are always created and have no setting.
 
     GET: every category the user can configure, with its current mode.
         {
@@ -834,8 +835,8 @@ class NotificationPreferencesView(APIView):
         {"preferences": [{"category": "NEWS", "enabled": true, "sound": false}]}
       Returns the same payload as GET.
 
-    Modes: "sound" = notify with sound (default), "silent" = notify without sound,
-    "off" = no push and no in-app notification for that category.
+    Modes: "sound" = push with sound, "silent" = push without sound,
+    "off" = no push for that category (default).
     """
     permission_classes = [permissions.IsAuthenticated]
 

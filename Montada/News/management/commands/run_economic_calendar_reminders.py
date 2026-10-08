@@ -34,11 +34,6 @@ from django.contrib.auth import get_user_model
 
 from News.models import EconomicCalendarEvent, EconomicCalendarReminder, EconomicCalendarEventNotification
 from Mainapp.models import UserNotification
-from Mainapp.notification_preferences import (
-    Category as NotificationCategory,
-    filter_recipients,
-    notifications_enabled,
-)
 from Mainapp.notifications import bulk_create_user_notifications
 from News.management.commands.fetch_economic_calendar import TradaysFetchError, fetch_tradays_events
 from firebase import send_push_to_users
@@ -286,16 +281,15 @@ class Command(BaseCommand):
         else:
             notification_type = "INFO"
 
-        # Create in-app notification (the push below is skipped centrally for opted-out users)
-        if notifications_enabled(user, NotificationCategory.ECONOMIC_REMINDERS):
-            UserNotification.objects.create(
-                user=user,
-                title=title,
-                message=body,
-                notification_type=notification_type,
-                category="ECONOMIC_EVENT",
-                redirect_url=f"/economic-calendar/{event.id}/",
-            )
+        # In-app notification; push preferences are applied in send_push_to_users.
+        UserNotification.objects.create(
+            user=user,
+            title=title,
+            message=body,
+            notification_type=notification_type,
+            category="ECONOMIC_EVENT",
+            redirect_url=f"/economic-calendar/{event.id}/",
+        )
 
         # Send FCM push notification
         data_payload = {
@@ -505,9 +499,6 @@ class Command(BaseCommand):
 
     def _send_global_advance_notification(self, event, users, minutes_before, events=None):
         """FCM + in-app notification to all active users before an economic event."""
-        users = filter_recipients(users, NotificationCategory.ECONOMIC_EVENTS)
-        if not users:
-            return
         country = self._event_location_label(events or [event])
         impact = event.get_importance_display()
         title = f"Upcoming: {event.event_name}"
@@ -810,9 +801,6 @@ class Command(BaseCommand):
         when the provider has published them. `follow_up` marks the later actual-value update
         for an event already announced without it.
         """
-        users = filter_recipients(users, NotificationCategory.ECONOMIC_EVENTS)
-        if not users:
-            return
 
         impact = event.get_importance_display()
         released = [ev for ev in events if ev.actual_value]

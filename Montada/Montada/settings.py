@@ -32,6 +32,7 @@ DEBUG = True
 ALLOWED_HOSTS = [
     "*",
     "localhost",
+    "192.168.1.50",
     "127.0.0.1",
     "app.themontada.com",
     "uat.themontada.com",
@@ -86,7 +87,7 @@ MIDDLEWARE = [
 
 # CORS: allow localhost on any port + your web origins (no trailing slashes)
 CORS_ALLOWED_ORIGINS = [
-    "http://192.168.1.125:59688",
+    "http://192.168.1.50:8000",
     "http://localhost:3000",
     "http://localhost:5000",
     "http://localhost:8080",
@@ -361,7 +362,7 @@ MARKET_NEWS_AND_DATA_FREE_ACCESS = os.environ.get(
 # Master switch for Firebase (FCM) push notifications. When False, no push is sent to FCM
 # (in-app notifications and websockets are unaffected). Currently OFF.
 # Turn back on with env FCM_PUSH_ENABLED=true (or change the default) and restart the workers.
-FCM_PUSH_ENABLED = False
+FCM_PUSH_ENABLED = True
 
 # MT5 Manager API (for run_price_alerts --use-mt5-manager). Optional; can use env vars instead.
 MT5_MANAGER_SERVER   = os.environ.get("MT5_MANAGER_SERVER", "23.83.116.76:443")   # e.g. "192.168.1.100:443"

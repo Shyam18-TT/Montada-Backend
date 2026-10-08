@@ -1,23 +1,24 @@
 """
-Per-user notification preferences.
+Per-user push notification preferences.
 
-Every notification the app sends belongs to one category below. For each category a user
+Every push the app sends belongs to one category below. For each category a user
 chooses a mode:
 
-    sound  - push + in-app notification, push plays a sound (default)
-    silent - push + in-app notification, push is delivered without sound
-    off    - no push and no in-app notification
+    sound  - push plays a sound
+    silent - push is delivered without sound
+    off    - no push (default: users opt in from settings)
+
+In-app notifications are not affected: every user always gets them.
 
 How it is enforced
 ------------------
-- Push: firebase.send_push_to_users() maps the payload's data["type"] to a category
-  (category_for_push) and splits recipients by mode, so every sender is covered.
-- In-app: senders drop opted-out users before creating UserNotification rows, with
-  filter_recipients() / notifications_enabled().
+firebase.send_push_to_users() maps the payload's data["type"] to a category
+(category_for_push) and splits recipients by mode, so every sender is covered.
 
 Only changed categories are stored (NotificationPreference rows); a missing row means
 DEFAULT_MODE. Queries filter by category, never by a list of user ids, so broadcasts to
 every user stay a single small query (and avoid SQL Server's 2100-parameter limit).
+Account notices (MANDATORY_ADMIN_BROADCAST_CATEGORIES) ignore preferences and always go out.
 """
 from collections import OrderedDict
 
@@ -25,7 +26,7 @@ SOUND = "sound"
 SILENT = "silent"
 OFF = "off"
 MODES = (SOUND, SILENT, OFF)
-DEFAULT_MODE = SOUND
+DEFAULT_MODE = OFF
 
 
 class Category:
@@ -37,7 +38,6 @@ class Category:
     ECONOMIC_EVENTS = "ECONOMIC_EVENTS"
     ECONOMIC_REMINDERS = "ECONOMIC_REMINDERS"
     NEWS = "NEWS"
-    FOLLOWERS = "FOLLOWERS"
     ANNOUNCEMENTS = "ANNOUNCEMENTS"
 
 
@@ -83,12 +83,6 @@ CATEGORIES = OrderedDict([
         "label": "News",
         "description": "Live market news.",
         "push_types": ("news_update",),
-    }),
-    (Category.FOLLOWERS, {
-        "label": "Followers",
-        "description": "New followers.",
-        "push_types": (),
-        "analyst_only": True,
     }),
     (Category.ANNOUNCEMENTS, {
         "label": "Announcements",
@@ -142,12 +136,14 @@ def get_user_modes(user):
     return modes
 
 
-def _user_ids_with_mode(category, mode):
+def _mode_by_user_id(category):
+    """{user_id: mode} for users whose mode for `category` differs from DEFAULT_MODE."""
     from Mainapp.models import NotificationPreference
 
-    return set(
-        NotificationPreference.objects.filter(category=category, mode=mode)
-        .values_list("user_id", flat=True)
+    return dict(
+        NotificationPreference.objects.filter(category=category, mode__in=MODES)
+        .exclude(mode=DEFAULT_MODE)
+        .values_list("user_id", "mode")
     )
 
 
@@ -155,39 +151,24 @@ def _user_id(user):
     return getattr(user, "id", user)
 
 
-def filter_recipients(users, category):
-    """Users minus those who turned `category` off. Returns a list."""
-    users = list(users or [])
-    if not users or not category:
-        return users
-    off_ids = _user_ids_with_mode(category, OFF)
-    if not off_ids:
-        return users
-    return [user for user in users if _user_id(user) not in off_ids]
-
-
-def notifications_enabled(user, category):
-    """True unless the user turned `category` off."""
-    if not user or not category:
-        return True
+def enabled_users_q(category):
+    """Q for a User queryset matching users who receive `category` (no id lists in SQL)."""
+    from django.db.models import Q
     from Mainapp.models import NotificationPreference
 
-    return not NotificationPreference.objects.filter(
-        user_id=_user_id(user), category=category, mode=OFF
-    ).exists()
+    if DEFAULT_MODE == OFF:
+        opted_in = NotificationPreference.objects.filter(category=category, mode__in=(SOUND, SILENT))
+        return Q(id__in=opted_in.values("user_id"))
+    opted_out = NotificationPreference.objects.filter(category=category, mode=OFF)
+    return ~Q(id__in=opted_out.values("user_id"))
 
 
 def split_by_sound(users, category):
-    """(with_sound, without_sound) for `category`; users who turned it off are dropped."""
+    """(with_sound, without_sound) for `category`; users who have it off are dropped."""
     users = list(users or [])
     if not users or not category:
         return users, []
-    from Mainapp.models import NotificationPreference
-
-    rows = NotificationPreference.objects.filter(
-        category=category, mode__in=(SILENT, OFF)
-    ).values_list("user_id", "mode")
-    mode_by_user_id = dict(rows)
+    mode_by_user_id = _mode_by_user_id(category)
     with_sound, without_sound = [], []
     for user in users:
         mode = mode_by_user_id.get(_user_id(user), DEFAULT_MODE)

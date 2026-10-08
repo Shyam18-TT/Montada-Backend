@@ -403,21 +403,16 @@ def _close_signal_and_notify(signal, hit_type, current_price):
         f"Entry: {signal.entry_price} | TP: {signal.take_profit} | SL: {signal.stop_loss}"
     )
 
-    # In-app notification (once), unless the analyst turned this category off.
+    # In-app notification (once).
     try:
-        from Mainapp.notification_preferences import Category, notifications_enabled
-
-        if notifications_enabled(analyst, Category.MY_SIGNAL_ACTIVITY):
-            UserNotification.objects.create(
-                user=analyst,
-                title=title,
-                message=message,
-                notification_type="SUCCESS" if is_win else "WARNING",
-                category="TRADING_SIGNAL",
-            )
-            print("[CHECK] Step 4b: UserNotification created for analyst.")
-        else:
-            print("[CHECK] Step 4b: Analyst turned signal activity notifications off; skipped.")
+        UserNotification.objects.create(
+            user=analyst,
+            title=title,
+            message=message,
+            notification_type="SUCCESS" if is_win else "WARNING",
+            category="TRADING_SIGNAL",
+        )
+        print("[CHECK] Step 4b: UserNotification created for analyst.")
     except Exception as e:
         logger.warning("UserNotification create failed: %s", e)
         print("[CHECK] Step 4b: UserNotification create FAILED: %s" % e)
@@ -477,16 +472,13 @@ def _trigger_user_price_alert(alert, current_price):
     message = f"{symbol} reached your target: price is {current_price} ({cond} {target_desc})."
 
     try:
-        from Mainapp.notification_preferences import Category, notifications_enabled
-
-        if notifications_enabled(alert.user, Category.PRICE_ALERTS):
-            UserNotification.objects.create(
-                user=alert.user,
-                title=title,
-                message=message,
-                notification_type="SUCCESS",
-                category="PRICE_ALERT",
-            )
+        UserNotification.objects.create(
+            user=alert.user,
+            title=title,
+            message=message,
+            notification_type="SUCCESS",
+            category="PRICE_ALERT",
+        )
     except Exception as e:
         logger.warning("UserNotification create for price alert failed: %s", e)
 

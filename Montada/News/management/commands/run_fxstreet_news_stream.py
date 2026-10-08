@@ -72,18 +72,13 @@ def _is_english_news_language(language):
 
 
 def _get_news_notification_recipients(language):
-    from Mainapp.notification_preferences import Category, filter_recipients
-
     preference_field = NEWS_LANGUAGE_RECIPIENT_FIELDS.get(
         _normalize_notification_language(language)
     )
     if not preference_field:
         return []
-    # Language opt-in plus the News category preference (users who turned news off are skipped).
-    return filter_recipients(
-        User.objects.filter(is_active=True, **{preference_field: True}).only("id"),
-        Category.NEWS,
-    )
+    # Language opt-in; the News push preference is applied in send_push_to_users.
+    return list(User.objects.filter(is_active=True, **{preference_field: True}).only("id"))
 
 
 def _notify_users_about_news(instance, *, event_name):

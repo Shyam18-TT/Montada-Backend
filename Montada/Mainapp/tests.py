@@ -178,11 +178,12 @@ class NotificationPreferenceTests(TestCase):
     def _modes(self, response):
         return {item["category"]: item["mode"] for item in response.data["preferences"]}
 
-    def test_defaults_to_sound_and_hides_analyst_only_categories_from_traders(self):
+    def test_defaults_to_off_and_hides_analyst_only_categories_from_traders(self):
         response = self.client.get(self.url)
         self.assertEqual(response.status_code, 200)
         modes = self._modes(response)
-        self.assertEqual(set(modes.values()), {"sound"})
+        self.assertEqual(set(modes.values()), {"off"})
+        self.assertFalse(any(item["enabled"] for item in response.data["preferences"]))
         self.assertIn("NEWS", modes)
         self.assertNotIn("MY_SIGNAL_ACTIVITY", modes)
         self.assertEqual(response.data["modes"], ["sound", "silent", "off"])
@@ -193,18 +194,19 @@ class NotificationPreferenceTests(TestCase):
         )
         self.assertEqual(response.status_code, 200)
         modes = self._modes(response)
-        self.assertEqual((modes["NEWS"], modes["MESSAGES"], modes["SYMBOL_MOVES"]), ("silent", "off", "sound"))
+        self.assertEqual((modes["NEWS"], modes["MESSAGES"], modes["SYMBOL_MOVES"]), ("silent", "off", "off"))
 
         response = self.client.patch(
             self.url,
             {"preferences": [
-                {"category": "NEWS", "enabled": True, "sound": True},
+                {"category": "NEWS", "enabled": False},
                 {"category": "SYMBOL_MOVES", "enabled": True, "sound": False},
+                {"category": "MESSAGES", "enabled": True, "sound": True},
             ]},
             format="json",
         )
         modes = self._modes(response)
-        self.assertEqual((modes["NEWS"], modes["MESSAGES"], modes["SYMBOL_MOVES"]), ("sound", "off", "silent"))
+        self.assertEqual((modes["NEWS"], modes["MESSAGES"], modes["SYMBOL_MOVES"]), ("off", "sound", "silent"))
         # Back to default deletes the row; only the two non-default choices are stored.
         self.assertEqual(self.user.notification_preferences.count(), 2)
 
@@ -216,21 +218,22 @@ class NotificationPreferenceTests(TestCase):
 
     def test_filters_and_sound_split(self):
         from .notification_preferences import (
-            Category, category_for_push, filter_recipients, notifications_enabled, save_user_modes,
-            split_by_sound,
+            Category, category_for_push, enabled_users_q, save_user_modes, split_by_sound,
         )
 
         quiet = User.objects.create_user(email="q@example.com", username="q@example.com", password="x")
         muted = User.objects.create_user(email="m@example.com", username="m@example.com", password="x")
+        save_user_modes(self.user, {Category.NEWS: "sound"})
         save_user_modes(quiet, {Category.NEWS: "silent"})
         save_user_modes(muted, {Category.NEWS: "off"})
         users = [self.user, quiet, muted]
 
-        self.assertEqual(filter_recipients(users, Category.NEWS), [self.user, quiet])
-        self.assertEqual(filter_recipients(users, Category.MESSAGES), users)
         self.assertEqual(split_by_sound(users, Category.NEWS), ([self.user], [quiet]))
-        self.assertFalse(notifications_enabled(muted, Category.NEWS))
-        self.assertTrue(notifications_enabled(muted, Category.MESSAGES))
+        # Nobody enabled messages, and push is off by default.
+        self.assertEqual(split_by_sound(users, Category.MESSAGES), ([], []))
+        self.assertEqual(
+            set(User.objects.filter(enabled_users_q(Category.NEWS))), {self.user, quiet},
+        )
 
         self.assertEqual(category_for_push({"type": "news_update"}), Category.NEWS)
         self.assertEqual(category_for_push({"type": "chat_message"}), Category.MESSAGES)
@@ -248,8 +251,9 @@ class NotificationPreferenceTests(TestCase):
         muted = User.objects.create_user(email="m2@example.com", username="m2@example.com", password="x")
         for user, token in ((self.user, "tok-loud"), (quiet, "tok-quiet"), (muted, "tok-muted")):
             DeviceToken.objects.create(user=user, fcm_token=token, device_id=token)
+        save_user_modes(self.user, {Category.NEWS: "sound"})
         save_user_modes(quiet, {Category.NEWS: "silent"})
-        save_user_modes(muted, {Category.NEWS: "off"})
+        # muted never enabled news, so it stays off by default.
 
         calls = []
 

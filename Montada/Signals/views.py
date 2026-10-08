@@ -11,7 +11,7 @@ from rest_framework.pagination import PageNumberPagination
 
 from Followers.models import Follow
 from Dashboard.realtime import broadcast_notifications
-from Mainapp.notification_preferences import Category as NotificationCategory, filter_recipients
+from Mainapp.notification_preferences import Category as NotificationCategory
 from Subscriptions.analyst_plan_access import (
     filter_visible_analyst_ids_for_signals,
     user_has_analyst_signal_access,
@@ -106,9 +106,9 @@ def _reset_signal_lifecycle_if_needed(signal, *, old_status, old_direction, old_
 
 
 def _create_and_broadcast_notifications(
-    users, *, title, body, notification_type="INFO", redirect_url=None, preference_category=None,
+    users, *, title, body, notification_type="INFO", redirect_url=None,
 ):
-    users = filter_recipients(users, preference_category)
+    users = list(users or [])
     if not users:
         return
     try:
@@ -193,7 +193,6 @@ def _notify_analyst_signal_applied(applied):
 
     _create_and_broadcast_notifications(
         [analyst], title=title, body=body, notification_type="INFO",
-        preference_category=NotificationCategory.MY_SIGNAL_ACTIVITY,
     )
     _send_push_notifications([analyst], title=title, body=body, data=data_payload)
 
@@ -230,7 +229,6 @@ def _notify_signal_published(signal, *, old_status=None):
 
     _create_and_broadcast_notifications(
         recipients, title=title, body=body, notification_type="INFO",
-        preference_category=NotificationCategory.TRADE_IDEAS,
     )
     _send_push_notifications(recipients, title=title, body=body, data=data_payload)
 
@@ -279,7 +277,6 @@ def _notify_signal_closed(signal, *, old_status=None):
 
     _create_and_broadcast_notifications(
         recipients, title=title, body=body, notification_type="INFO",
-        preference_category=NotificationCategory.TRADE_IDEAS,
     )
     _send_push_notifications(recipients, title=title, body=body, data=data_payload)
 
@@ -1044,8 +1041,7 @@ class SignalPushNotificationView(generics.GenericAPIView):
             )
 
         # Recipients as subqueries (no id lists in SQL); only the id column is loaded.
-        from Mainapp.models import NotificationPreference
-        from Mainapp.notification_preferences import OFF
+        from Mainapp.notification_preferences import enabled_users_q
 
         if audience == "followers":
             audience_ids = Follow.objects.filter(
@@ -1091,9 +1087,6 @@ class SignalPushNotificationView(generics.GenericAPIView):
             "signal_status": signal.status or "",
         }
 
-        # Recipients who turned trade-idea notifications off get neither in-app nor push.
-        recipient_list = filter_recipients(recipient_list, NotificationCategory.TRADE_IDEAS)
-
         # ── Count device tokens (non-fatal) ──────────────────────────────────
         # Uses the subquery form of the audience so SQL joins instead of matching a list of
         # UUID params (which scans on MSSQL and fails past 2100 recipients).
@@ -1101,11 +1094,10 @@ class SignalPushNotificationView(generics.GenericAPIView):
         tokens_error = None
         try:
             from firebase import get_push_tokens_for_users
-            opted_out_ids = NotificationPreference.objects.filter(
-                category=NotificationCategory.TRADE_IDEAS, mode=OFF,
-            ).values("user_id")
             device_tokens_found = len(
-                get_push_tokens_for_users(audience_qs.exclude(id__in=opted_out_ids))
+                get_push_tokens_for_users(
+                    audience_qs.filter(enabled_users_q(NotificationCategory.TRADE_IDEAS))
+                )
             )
         except Exception as exc:
             tokens_error = str(exc)
