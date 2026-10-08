@@ -45,6 +45,7 @@ from django.utils.decorators import method_decorator
 from News.views import eodhd_category_news_response_for_request
 from Dashboard.realtime import broadcast_notifications
 from Mainapp.db_timing import log_manual_exception, log_manual_timing
+from MontadaAdmin.user_status import STATUS_FILTERS, USER_STATUS_CHOICES, filter_users_by_status
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
@@ -906,8 +907,8 @@ class TopAnalystLeaderboardView(APIView):
 class AdminAnalystListView(generics.ListAPIView):
     """
     GET: Paginated list of analysts for admin dashboard.
-    Query params: page, page_size (optional), search (name or email), status (active|suspended|pending).
-    Each item: id, name, email, status (active/inactive), signals_count, followers, win_rate, registered_at, is_verified.
+    Query params: page, page_size (optional), search (name or email), status (active|pending|suspended|inactive).
+    Each item: id, name, email, status (active|pending|suspended|inactive), signals_count, followers, win_rate, registered_at, is_verified.
     """
     permission_classes = [IsAuthenticated, IsAdminUser]
     pagination_class = AdminPageNumberPagination
@@ -922,13 +923,7 @@ class AdminAnalystListView(generics.ListAPIView):
                 Q(name__icontains=search) | Q(email__icontains=search)
             )
 
-        status_param = (self.request.query_params.get("status") or "").strip().lower()
-        if status_param == "active":
-            qs = qs.filter(is_active=True)
-        elif status_param == "suspended":
-            qs = qs.filter(is_active=False)
-        elif status_param == "pending":
-            qs = qs.filter(is_verified=False)
+        qs = filter_users_by_status(qs, self.request.query_params.get("status"))
 
         if Follow is not None:
             followers_subq = (
@@ -1345,8 +1340,8 @@ class AdminTraderListView(generics.ListAPIView):
     """
     GET: Paginated list of traders for admin dashboard.
     Query params: page, page_size (optional), search (name or email),
-    status (active|suspended|pending), plan (basic|trial|subscribed).
-    Each item: id, name, email, status (active/inactive), subscription (trial|subscribed|basic), signals_applied, registered_at, is_verified.
+    status (active|pending|suspended|inactive), plan (basic|trial|subscribed).
+    Each item: id, name, email, status (active|pending|suspended|inactive), subscription (trial|subscribed|basic), signals_applied, registered_at, is_verified.
     """
     permission_classes = [IsAuthenticated, IsAdminUser]
     pagination_class = AdminPageNumberPagination
@@ -1361,13 +1356,7 @@ class AdminTraderListView(generics.ListAPIView):
                 Q(name__icontains=search) | Q(email__icontains=search)
             )
 
-        status_param = (self.request.query_params.get("status") or "").strip().lower()
-        if status_param == "active":
-            qs = qs.filter(is_active=True)
-        elif status_param == "suspended":
-            qs = qs.filter(is_active=False)
-        elif status_param == "pending":
-            qs = qs.filter(is_verified=False)
+        qs = filter_users_by_status(qs, self.request.query_params.get("status"))
 
         plan_param = (self.request.query_params.get("plan") or "").strip().lower()
         if plan_param and Subscription is not None:
@@ -1407,6 +1396,44 @@ class AdminTraderListView(generics.ListAPIView):
             qs = qs.select_related("subscription")
 
         return qs
+
+
+class AdminUserStatusFiltersView(APIView):
+    """
+    GET: Status filter options for the admin user lists, with the number of users in each.
+    Query params: user_type (trader|analyst, optional; omit for all users),
+    search (name or email, optional; counts match the list for the same search).
+    Pass the chosen ``value`` as ``?status=`` to users/traders/ or users/analysts/
+    (``all`` means no status param).
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request):
+        qs = User.objects.all()
+
+        user_type = (request.query_params.get("user_type") or "").strip().lower()
+        if user_type:
+            if user_type not in ("trader", "analyst"):
+                return Response(
+                    {"error": "user_type must be 'trader' or 'analyst'."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            qs = qs.filter(user_type=user_type)
+
+        search = (request.query_params.get("search") or "").strip()
+        if search:
+            qs = qs.filter(Q(name__icontains=search) | Q(email__icontains=search))
+
+        counts = qs.aggregate(
+            all=Count("id"),
+            **{value: Count("id", filter=STATUS_FILTERS[value]) for value, _ in USER_STATUS_CHOICES},
+        )
+        filters = [{"value": "all", "label": "All", "count": counts["all"]}]
+        filters += [
+            {"value": value, "label": label, "count": counts[value]}
+            for value, label in USER_STATUS_CHOICES
+        ]
+        return Response({"filters": filters}, status=status.HTTP_200_OK)
 
 
 class AdminTradersForSubscriptionPickerView(generics.ListAPIView):

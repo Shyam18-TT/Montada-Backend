@@ -21,6 +21,7 @@ except ImportError:
     EconomicCalendarGlobalReminderSettings = None
 
 from Moderation.models import UserBlock, ModerationReport
+from MontadaAdmin.user_status import user_status
 
 
 class AdminLoginSerializer(serializers.Serializer):
@@ -455,7 +456,7 @@ class AdminAnalystWithPlansTableSerializer(serializers.ModelSerializer):
         )
 
     def get_status(self, obj):
-        return "active" if obj.is_active else "inactive"
+        return user_status(obj)
 
 
 class AdminAnalystListSerializer(serializers.ModelSerializer):
@@ -485,7 +486,7 @@ class AdminAnalystListSerializer(serializers.ModelSerializer):
         return str(obj.id)
 
     def get_status(self, obj):
-        return "active" if obj.is_active else "inactive"
+        return user_status(obj)
 
     def get_signals_count(self, obj):
         return getattr(obj, "signals_count", 0) or 0
@@ -530,7 +531,7 @@ class AdminTraderListSerializer(serializers.ModelSerializer):
         return str(obj.id)
 
     def get_status(self, obj):
-        return "active" if obj.is_active else "inactive"
+        return user_status(obj)
 
     def get_signals_applied(self, obj):
         return getattr(obj, "signals_applied_count", 0) or 0
@@ -634,7 +635,7 @@ class AdminTraderForAnalystSubscriptionSerializer(serializers.ModelSerializer):
         return str(obj.id)
 
     def get_status(self, obj):
-        return "active" if obj.is_active else "inactive"
+        return user_status(obj)
 
     def get_registered_at(self, obj):
         return obj.created_at.isoformat() if obj.created_at else None
