@@ -120,11 +120,9 @@ except ImportError:
     LiveNewsSerializer = None
 
 try:
-    from Dashboard.models import PollQuestion, PollOption, PollResponse
+    from Dashboard import polls as poll_service
 except ImportError:
-    PollQuestion = None
-    PollOption = None
-    PollResponse = None
+    poll_service = None
 
 from Moderation.models import UserBlock, ModerationReport
 
@@ -1795,210 +1793,124 @@ class AdminNewsArticleStatsView(APIView):
         )
 
 
+def _polls_unavailable_response():
+    return Response(
+        {"error": "Dashboard/Poll app is not available."},
+        status=status.HTTP_503_SERVICE_UNAVAILABLE,
+    )
+
+
+def _poll_error_response(exc):
+    return Response({"error": exc.message}, status=exc.status_code)
+
+
 class AdminPollStatsView(APIView):
     """
     GET: Poll stats for admin. One response: total_polls, active_polls, closed_polls_count, total_votes.
-    active_polls = questions with is_active=True, closed_polls_count = is_active=False.
+    active_polls = polls whose current session is accepting votes; closed_polls_count = all others.
+    Also: scheduled_polls, cancelled_polls, ended_polls, total_sessions, current_session_votes.
+    total_votes counts every vote ever recorded, across all sessions.
     """
     permission_classes = [IsAuthenticated, IsAdminUser]
 
     def get(self, request):
-        if PollQuestion is None or PollResponse is None:
-            return Response(
-                {"error": "Dashboard/Poll app is not available."},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
-        total_polls = PollQuestion.objects.count()
-        active_polls = PollQuestion.objects.filter(is_active=True).count()
-        closed_polls_count = PollQuestion.objects.filter(is_active=False).count()
-        total_votes = PollResponse.objects.count()
-        return Response(
-            {
-                "total_polls": total_polls,
-                "active_polls": active_polls,
-                "closed_polls_count": closed_polls_count,
-                "total_votes": total_votes,
-            },
-            status=status.HTTP_200_OK,
-        )
+        if poll_service is None:
+            return _polls_unavailable_response()
+        return Response(poll_service.poll_stats(), status=status.HTTP_200_OK)
 
 
 class AdminPollsListView(APIView):
     """
-    GET: List poll questions for admin. Each result is a question with its options and vote counts.
-    Query params: search, status (all|active|closed|unpublished), page, page_size.
-    - all: all polls (default)
-    - active: is_active=True (published, accepting votes)
-    - closed: is_active=False
-    - unpublished: is_active=False (same as closed in current model)
+    GET: List poll questions for admin. Each result is a question with its options and vote counts
+    for the current session, plus status, schedule and current_session details.
+    Query params:
+    - search
+    - status: all (default) | active | scheduled | closed | cancelled | unpublished (= not accepting votes)
+    - start_from, start_to, end_from, end_to: ISO dates/datetimes on the current session schedule
+    - include_deleted: true to include polls deleted after receiving votes
+    - ordering: order (default) | -created_at | created_at | start_at | -start_at | end_at | -end_at
+    - page, page_size
     """
     permission_classes = [IsAuthenticated, IsAdminUser]
 
+    ORDERING = {
+        "order": ("order", "created_at"),
+        "created_at": ("created_at",),
+        "-created_at": ("-created_at",),
+        "start_at": ("current_session__start_at",),
+        "-start_at": ("-current_session__start_at",),
+        "end_at": ("current_session__end_at",),
+        "-end_at": ("-current_session__end_at",),
+    }
+
     def get_queryset(self):
-        if PollQuestion is None or PollOption is None:
-            return PollQuestion.objects.none() if PollQuestion else []
-        options_with_votes = PollOption.objects.annotate(vote_count=Count("responses"))
-        qs = (
-            PollQuestion.objects.all()
-            .order_by("order")
-            .prefetch_related(Prefetch("options", queryset=options_with_votes))
-        )
-        search = (self.request.query_params.get("search") or "").strip()
+        params = self.request.query_params
+        include_deleted = params.get("include_deleted", "").lower() in ("true", "1", "yes")
+        qs = poll_service.admin_question_queryset(include_deleted=include_deleted)
+        search = (params.get("search") or "").strip()
         if search:
             qs = qs.filter(Q(question_text__icontains=search))
-        status_param = (self.request.query_params.get("status") or "all").strip().lower()
-        if status_param == "active":
-            qs = qs.filter(is_active=True)
-        elif status_param in ("closed", "unpublished"):
-            qs = qs.filter(is_active=False)
+        now = timezone.now()
+        status_param = (params.get("status") or "all").strip().lower()
+        if status_param in poll_service.STATUS_VALUES:
+            qs = qs.filter(poll_service.question_status_q(status_param, now))
+        elif status_param == "unpublished":
+            qs = qs.exclude(poll_service.question_status_q(poll_service.ACTIVE, now))
         # "all" or any other value: no filter
-        return qs
+        for param, lookup in (
+            ("start_from", "current_session__start_at__gte"),
+            ("start_to", "current_session__start_at__lte"),
+            ("end_from", "current_session__end_at__gte"),
+            ("end_to", "current_session__end_at__lte"),
+        ):
+            value = params.get(param)
+            if value:
+                if len(value) == 10:  # plain date: whole day inclusive
+                    value = value + ("T00:00:00" if param.endswith("from") else "T23:59:59.999999")
+                qs = qs.filter(**{lookup: poll_service.parse_datetime_value(value, param)})
+        ordering = self.ORDERING.get((params.get("ordering") or "order").strip(), self.ORDERING["order"])
+        return qs.order_by(*ordering, "id")
 
     def get(self, request):
-        if PollQuestion is None or PollOption is None:
+        if poll_service is None:
             return Response(
                 {"error": "Dashboard/Poll app is not available.", "results": [], "count": 0},
                 status=status.HTTP_200_OK,
             )
-        qs = self.get_queryset()
+        try:
+            qs = self.get_queryset()
+        except poll_service.PollError as exc:
+            return _poll_error_response(exc)
         paginator = AdminPageNumberPagination()
         page = paginator.paginate_queryset(qs, request)
         if page is None:
-            page = list(qs)
-            paginated = False
-        else:
-            paginated = True
-        result = []
-        for q in page:
-            opts = list(q.options.all())
-            total_votes_q = sum(getattr(opt, "vote_count", 0) for opt in opts)
-            options_data = [
-                {
-                    "id": str(opt.id),
-                    "option_text": opt.option_text,
-                    "vote_count": getattr(opt, "vote_count", 0),
-                    "vote_percentage": round(
-                        (getattr(opt, "vote_count", 0) / total_votes_q) * 100, 2
-                    ) if total_votes_q else 0,
-                }
-                for opt in opts
-            ]
-            result.append({
-                "id": str(q.id),
-                "question_text": q.question_text,
-                "question_type": q.question_type,
-                "order": q.order,
-                "is_active": getattr(q, "is_active", True),
-                "options": options_data,
-                "total_votes": total_votes_q,
-            })
-        if paginated:
-            return paginator.get_paginated_response(result)
-        return Response({"results": result, "count": len(result)}, status=status.HTTP_200_OK)
+            result = poll_service.admin_questions_data(qs)
+            return Response({"results": result, "count": len(result)}, status=status.HTTP_200_OK)
+        return paginator.get_paginated_response(poll_service.admin_questions_data(page))
 
 
 class AdminPollCreateView(APIView):
     """
-    POST: Create a new poll question with options. Admin only.
+    POST: Create a new poll question with options and its first voting session. Admin only.
     Body: question_text (required), question_type (optional: "single"|"multiple", default "single"),
-          order (optional, default 0), is_active (optional, default True),
-          options (optional list of { "option_text": "..." }).
+          order (optional, default 0), is_active (optional, default True; false creates it closed),
+          options (2-4 items: list of { "option_text": "..." } or strings),
+          start_at / end_at (optional ISO 8601), duration_days or duration_hours (optional, default 7 days).
+    Without a schedule the poll starts now and ends after the duration. A future start_at makes it "scheduled".
     """
     permission_classes = [IsAuthenticated, IsAdminUser]
 
-    def _question_to_data(self, q):
-        opts = list(q.options.all())
-        total_votes_q = sum(getattr(opt, "vote_count", 0) for opt in opts)
-        options_data = [
-            {
-                "id": str(opt.id),
-                "option_text": opt.option_text,
-                "vote_count": getattr(opt, "vote_count", 0),
-                "vote_percentage": round(
-                    (getattr(opt, "vote_count", 0) / total_votes_q) * 100, 2
-                ) if total_votes_q else 0,
-            }
-            for opt in opts
-        ]
-        return {
-            "id": str(q.id),
-            "question_text": q.question_text,
-            "question_type": q.question_type,
-            "order": q.order,
-            "is_active": getattr(q, "is_active", True),
-            "options": options_data,
-            "total_votes": total_votes_q,
-        }
-
     def post(self, request):
-        if PollQuestion is None or PollOption is None:
-            return Response(
-                {"error": "Dashboard/Poll app is not available."},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
-        data = request.data
-        question_text = (data.get("question_text") or "").strip()
-        if not question_text:
-            return Response(
-                {"error": "question_text is required."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        question_type = (data.get("question_type") or "single").strip().lower()
-        if question_type not in ("single", "multiple"):
-            return Response(
-                {"error": "question_type must be 'single' or 'multiple'."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        if poll_service is None:
+            return _polls_unavailable_response()
         try:
-            order = int(data.get("order", 0))
-        except (TypeError, ValueError):
-            order = 0
-        is_active = data.get("is_active", True)
-        if isinstance(is_active, str):
-            is_active = is_active.lower() in ("true", "1", "yes")
-
-        options_payload_raw = data.get("options")
-        options_texts = []
-        if isinstance(options_payload_raw, list):
-            for item in options_payload_raw:
-                if isinstance(item, dict):
-                    opt_text = (item.get("option_text") or "").strip()
-                elif isinstance(item, str):
-                    opt_text = item.strip()
-                else:
-                    continue
-                if opt_text:
-                    options_texts.append(opt_text)
-        elif options_payload_raw is not None:
-            # Provided but not a list
-            return Response(
-                {"error": "options must be a list of option objects or strings."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        if len(options_texts) < 2 or len(options_texts) > 4:
-            return Response(
-                {"error": "Poll must have between 2 and 4 options (non-empty)."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        question = PollQuestion.objects.create(
-            question_text=question_text,
-            question_type=question_type,
-            order=order,
-            is_active=is_active,
-        )
-        for opt_text in options_texts:
-            PollOption.objects.create(question=question, option_text=opt_text)
-
-        qs = PollQuestion.objects.prefetch_related(
-            Prefetch("options", queryset=PollOption.objects.annotate(vote_count=Count("responses")))
-        )
-        question = qs.get(pk=question.pk)
+            question = poll_service.create_poll(request.user, request.data)
+        except poll_service.PollError as exc:
+            return _poll_error_response(exc)
         return Response(
             {
                 "message": "Poll created successfully.",
-                "question": self._question_to_data(question),
+                "question": poll_service.admin_question_data(question.pk),
             },
             status=status.HTTP_201_CREATED,
         )
@@ -2006,162 +1918,77 @@ class AdminPollCreateView(APIView):
 
 class AdminPollQuestionDetailView(APIView):
     """
-    GET: Retrieve a single poll question by id with options and vote counts.
-    PUT/PATCH: Update question (question_text, question_type, order) and options.
-    Body for update: { "question_text": "...", "question_type": "single"|"multiple", "order": 0, "options": [ {"id": "uuid", "option_text": "..."}, {"option_text": "..."} ] }
-    Options with id are updated; options without id are created; options not in the list are deleted.
+    GET: Retrieve a single poll question by id with options, current-session vote counts, schedule
+         and current_session.
+    PUT/PATCH: Update question (question_text, question_type, order), schedule (start_at, end_at,
+         duration_days/duration_hours) and options.
+    Body for update: { "question_text": "...", "question_type": "single"|"multiple", "order": 0,
+                       "end_at": "...", "options": [ {"id": "uuid", "option_text": "..."}, {"option_text": "..."} ] }
+    Options with id are updated; options without id are created; options not in the list are removed.
+    Options that already have votes in the current session cannot be renamed or removed (reset first).
+    DELETE: Delete a poll. Polls that have received votes are hidden and closed, not erased, so their
+         voting history stays available via /sessions/.
     """
     permission_classes = [IsAuthenticated, IsAdminUser]
 
-    def get_question_queryset(self):
-        if PollQuestion is None or PollOption is None:
-            return PollQuestion.objects.none() if PollQuestion else []
-        options_with_votes = PollOption.objects.annotate(vote_count=Count("responses"))
-        return PollQuestion.objects.prefetch_related(
-            Prefetch("options", queryset=options_with_votes)
-        )
-
-    def _question_to_data(self, q):
-        opts = list(q.options.all())
-        total_votes_q = sum(getattr(opt, "vote_count", 0) for opt in opts)
-        options_data = [
-            {
-                "id": str(opt.id),
-                "option_text": opt.option_text,
-                "vote_count": getattr(opt, "vote_count", 0),
-                "vote_percentage": round(
-                    (getattr(opt, "vote_count", 0) / total_votes_q) * 100, 2
-                ) if total_votes_q else 0,
-            }
-            for opt in opts
-        ]
-        return {
-            "id": str(q.id),
-            "question_text": q.question_text,
-            "question_type": q.question_type,
-            "order": q.order,
-            "is_active": getattr(q, "is_active", True),
-            "options": options_data,
-            "total_votes": total_votes_q,
-        }
-
     def get(self, request, pk):
-        if PollQuestion is None or PollOption is None:
-            return Response(
-                {"error": "Dashboard/Poll app is not available."},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
-        qs = self.get_question_queryset()
-        question = get_object_or_404(qs, pk=pk)
-        return Response(self._question_to_data(question), status=status.HTTP_200_OK)
+        if poll_service is None:
+            return _polls_unavailable_response()
+        try:
+            return Response(poll_service.admin_question_data(pk), status=status.HTTP_200_OK)
+        except poll_service.PollError as exc:
+            return _poll_error_response(exc)
 
     def put(self, request, pk):
-        return self._update(request, pk, partial=False)
+        return self._update(request, pk)
 
     def patch(self, request, pk):
-        return self._update(request, pk, partial=True)
+        return self._update(request, pk)
 
-    def _update(self, request, pk, partial):
-        if PollQuestion is None or PollOption is None:
-            return Response(
-                {"error": "Dashboard/Poll app is not available."},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
-        question = get_object_or_404(PollQuestion, pk=pk)
-        data = request.data
-
-        if "question_text" in data:
-            question.question_text = data["question_text"]
-        if "question_type" in data:
-            qtype = data["question_type"]
-            if qtype not in ("single", "multiple"):
-                return Response(
-                    {"error": "question_type must be 'single' or 'multiple'."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            question.question_type = qtype
-        if "order" in data:
-            try:
-                question.order = int(data["order"])
-            except (TypeError, ValueError):
-                return Response(
-                    {"error": "order must be an integer."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-        question.save()
-
-        if "options" in data:
-            options_payload = data["options"]
-            if not isinstance(options_payload, list):
-                return Response(
-                    {"error": "options must be a list."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            seen_ids = set()
-            for item in options_payload:
-                if not isinstance(item, dict):
-                    continue
-                opt_text = (item.get("option_text") or "").strip()
-                if not opt_text:
-                    continue
-                opt_id = item.get("id")
-                if opt_id:
-                    try:
-                        o_uuid = uuid.UUID(str(opt_id)) if isinstance(opt_id, str) else opt_id
-                    except (ValueError, TypeError):
-                        continue
-                    if PollOption.objects.filter(question=question, id=o_uuid).exists():
-                        PollOption.objects.filter(id=o_uuid).update(option_text=opt_text)
-                        seen_ids.add(o_uuid)
-                else:
-                    new_opt = PollOption.objects.create(question=question, option_text=opt_text)
-                    seen_ids.add(new_opt.id)
-            question.options.exclude(id__in=seen_ids).delete()
-
-        qs = self.get_question_queryset()
-        question = qs.get(pk=question.pk)
+    def _update(self, request, pk):
+        if poll_service is None:
+            return _polls_unavailable_response()
+        try:
+            poll_service.update_poll(request.user, pk, request.data)
+        except poll_service.PollError as exc:
+            return _poll_error_response(exc)
         return Response(
-            {"message": "Poll question updated.", "question": self._question_to_data(question)},
+            {"message": "Poll question updated.", "question": poll_service.admin_question_data(pk)},
             status=status.HTTP_200_OK,
         )
 
     def delete(self, request, pk):
-        """DELETE: Permanently delete a poll question (and its options and responses via CASCADE)."""
-        if PollQuestion is None:
-            return Response(
-                {"error": "Dashboard/Poll app is not available."},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
-        question = get_object_or_404(PollQuestion, pk=pk)
-        question_id = str(question.id)
-        question.delete()
+        if poll_service is None:
+            return _polls_unavailable_response()
+        try:
+            poll_service.delete_poll(request.user, pk)
+        except poll_service.PollError as exc:
+            return _poll_error_response(exc)
         return Response(
-            {"message": "Poll deleted.", "id": question_id},
+            {"message": "Poll deleted.", "id": str(pk)},
             status=status.HTTP_200_OK,
         )
 
 
 class AdminPollUnpublishView(APIView):
     """
-    POST: Unpublish a poll (set is_active=False). Poll will no longer appear in active list or accept votes.
+    POST: Unpublish a poll (closes its current session). Poll will no longer appear in active list or
+    accept votes. Votes already cast are kept. Use /activate/ (or /close/ with reopen) to publish again.
     URL: polls/<pk>/unpublish/
     """
     permission_classes = [IsAuthenticated, IsAdminUser]
 
     def post(self, request, pk):
-        if PollQuestion is None:
-            return Response(
-                {"error": "Dashboard/Poll app is not available."},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
-        question = get_object_or_404(PollQuestion, pk=pk)
-        question.is_active = False
-        question.save(update_fields=["is_active"])
+        if poll_service is None:
+            return _polls_unavailable_response()
+        try:
+            poll_service.close_poll(request.user, pk)
+        except poll_service.PollError as exc:
+            return _poll_error_response(exc)
         return Response(
             {
                 "message": "Poll unpublished.",
-                "id": str(question.id),
+                "id": str(pk),
                 "is_active": False,
             },
             status=status.HTTP_200_OK,
@@ -2170,7 +1997,7 @@ class AdminPollUnpublishView(APIView):
 
 class AdminPollOptionAddView(APIView):
     """
-    POST: Add one or more options to a poll question.
+    POST: Add one or more options to a poll question (also offered in the current session if it is open).
     URL: polls/<question_pk>/options/
     Body (single): { "option_text": "New option" }
     Body (multiple): { "options": [ {"option_text": "Option A"}, {"option_text": "Option B"} ] }
@@ -2178,39 +2005,18 @@ class AdminPollOptionAddView(APIView):
     permission_classes = [IsAuthenticated, IsAdminUser]
 
     def post(self, request, question_pk):
-        if PollQuestion is None or PollOption is None:
-            return Response(
-                {"error": "Dashboard/Poll app is not available."},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
-        question = get_object_or_404(PollQuestion, pk=question_pk)
+        if poll_service is None:
+            return _polls_unavailable_response()
         data = request.data
-
-        to_create = []
-        if "options" in data and isinstance(data["options"], list):
-            for item in data["options"]:
-                if isinstance(item, dict):
-                    opt_text = (item.get("option_text") or "").strip()
-                    if opt_text:
-                        to_create.append(opt_text)
-                elif isinstance(item, str) and item.strip():
-                    to_create.append(item.strip())
-        elif "option_text" in data:
-            opt_text = (data.get("option_text") or "").strip()
-            if opt_text:
-                to_create.append(opt_text)
-
-        if not to_create:
-            return Response(
-                {"error": "Provide 'option_text' or 'options' (list of { option_text } or strings)."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        created = []
-        for opt_text in to_create:
-            opt = PollOption.objects.create(question=question, option_text=opt_text)
-            created.append({"id": str(opt.id), "option_text": opt.option_text})
-
+        try:
+            if "options" in data and isinstance(data["options"], list):
+                texts = poll_service.parse_option_texts(data["options"])
+            else:
+                texts = poll_service.parse_option_texts([data.get("option_text") or ""])
+            created = poll_service.add_options(request.user, question_pk, texts)
+        except poll_service.PollError as exc:
+            return _poll_error_response(exc)
+        created = [{"id": str(opt.id), "option_text": opt.option_text} for opt in created]
         return Response(
             {"message": f"Added {len(created)} option(s).", "options": created},
             status=status.HTTP_201_CREATED,
@@ -2221,19 +2027,18 @@ class AdminPollOptionDeleteView(APIView):
     """
     DELETE: Remove an option from a poll question.
     URL: polls/<question_pk>/options/<option_pk>/
-    Option must belong to the question. Responses for this option are deleted (CASCADE).
+    The option is hidden from future sessions; votes and results from earlier sessions are kept.
+    Rejected if the option already has votes in the current open session.
     """
     permission_classes = [IsAuthenticated, IsAdminUser]
 
     def delete(self, request, question_pk, option_pk):
-        if PollQuestion is None or PollOption is None:
-            return Response(
-                {"error": "Dashboard/Poll app is not available."},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
-        get_object_or_404(PollQuestion, pk=question_pk)
-        option = get_object_or_404(PollOption, pk=option_pk, question_id=question_pk)
-        option.delete()
+        if poll_service is None:
+            return _polls_unavailable_response()
+        try:
+            poll_service.delete_option(request.user, question_pk, option_pk)
+        except poll_service.PollError as exc:
+            return _poll_error_response(exc)
         return Response(
             {"message": "Option deleted."},
             status=status.HTTP_200_OK,
@@ -2244,26 +2049,193 @@ class AdminPollQuestionCloseView(APIView):
     """
     POST: Close or reopen a poll question.
     URL: polls/<pk>/close/
-    Body (optional): { "reopen": true } to reopen; otherwise closes the poll (is_active=False).
+    Body (optional): { "reopen": true, "end_at": "<ISO datetime>" } to reopen the current session
+    (end_at is required if its end time has passed); otherwise closes the current session.
     Closed polls are excluded from active list and reject new votes.
     """
     permission_classes = [IsAuthenticated, IsAdminUser]
 
     def post(self, request, pk):
-        if PollQuestion is None:
-            return Response(
-                {"error": "Dashboard/Poll app is not available."},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
-        question = get_object_or_404(PollQuestion, pk=pk)
+        if poll_service is None:
+            return _polls_unavailable_response()
         reopen = request.data.get("reopen") is True
-        question.is_active = reopen
-        question.save(update_fields=["is_active"])
+        try:
+            if reopen:
+                poll_service.activate_poll(request.user, pk, request.data)
+            else:
+                poll_service.close_poll(request.user, pk)
+        except poll_service.PollError as exc:
+            return _poll_error_response(exc)
+        data = poll_service.admin_question_data(pk)
         return Response(
             {
                 "message": "Poll reopened." if reopen else "Poll closed.",
-                "id": str(question.id),
-                "is_active": question.is_active,
+                "id": str(pk),
+                "is_active": data["is_active"],
+                "status": data["status"],
+                "current_session": data["current_session"],
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class AdminPollActivateView(APIView):
+    """
+    POST: Activate a poll now. A scheduled session starts immediately; a manually closed session is
+    reopened. Body (optional): { "end_at": "<ISO datetime>" } (required if the session end time has passed).
+    Cancelled sessions cannot be reactivated; use /reset/.
+    URL: polls/<pk>/activate/
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def post(self, request, pk):
+        if poll_service is None:
+            return _polls_unavailable_response()
+        try:
+            poll_service.activate_poll(request.user, pk, request.data)
+        except poll_service.PollError as exc:
+            return _poll_error_response(exc)
+        return Response(
+            {"message": "Poll activated.", "question": poll_service.admin_question_data(pk)},
+            status=status.HTTP_200_OK,
+        )
+
+
+class AdminPollCancelView(APIView):
+    """
+    POST: Cancel the poll's current session. Terminal: the session is never reopened; votes are kept.
+    Use /reset/ to start a new session later.
+    URL: polls/<pk>/cancel/
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def post(self, request, pk):
+        if poll_service is None:
+            return _polls_unavailable_response()
+        try:
+            poll_service.close_poll(request.user, pk, cancel=True)
+        except poll_service.PollError as exc:
+            return _poll_error_response(exc)
+        return Response(
+            {"message": "Poll cancelled.", "question": poll_service.admin_question_data(pk)},
+            status=status.HTTP_200_OK,
+        )
+
+
+class AdminPollResetView(APIView):
+    """
+    POST: Reset a poll. Finalizes the current session (all its votes and results are kept) and opens a
+    new session with zero votes, in which every user may vote again.
+    Body (all optional): start_at, end_at (ISO 8601), duration_days or duration_hours (default: the poll's
+    configured duration, 7 days unless changed), current_session_id (if given and the poll was already
+    reset by someone else, returns 409 instead of resetting twice).
+    URL: polls/<pk>/reset/
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def post(self, request, pk):
+        if poll_service is None:
+            return _polls_unavailable_response()
+        try:
+            question, session = poll_service.reset_poll(request.user, pk, request.data)
+        except poll_service.PollError as exc:
+            return _poll_error_response(exc)
+        return Response(
+            {"message": "Poll reset. A new voting session has started.", "question": poll_service.admin_question_data(pk)},
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class AdminPollResultsView(APIView):
+    """
+    GET: Results of the poll's current session (vote counts and percentages per option).
+    URL: polls/<pk>/results/
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request, pk):
+        if poll_service is None:
+            return _polls_unavailable_response()
+        question = get_object_or_404(poll_service.PollQuestion, pk=pk)
+        if not question.current_session_id:
+            return Response({"error": "Poll has no voting session."}, status=status.HTTP_404_NOT_FOUND)
+        session = poll_service.session_queryset().get(pk=question.current_session_id)
+        ids = [session.pk]
+        return Response(
+            {
+                "poll_id": str(question.pk),
+                "question_text": question.question_text,
+                "session": poll_service.session_to_data(
+                    session, poll_service.vote_counts(ids), poll_service.voter_counts(ids)
+                ),
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class AdminPollSessionsView(APIView):
+    """
+    GET: Voting history of a poll: every session (newest first) with schedule, status, reset metadata,
+    total votes/voters and per-option counts and percentages. Works for deleted polls too.
+    Query params: status (scheduled|active|closed|cancelled), page, page_size.
+    URL: polls/<pk>/sessions/
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request, pk):
+        if poll_service is None:
+            return _polls_unavailable_response()
+        question = get_object_or_404(poll_service.PollQuestion, pk=pk)
+        qs = poll_service.session_queryset().filter(question=question).order_by("-session_number")
+        status_param = (request.query_params.get("status") or "").strip().lower()
+        if status_param in poll_service.STATUS_VALUES:
+            qs = qs.filter(poll_service.session_status_q(status_param))
+        paginator = AdminPageNumberPagination()
+        page = paginator.paginate_queryset(qs, request)
+        sessions = list(page if page is not None else qs)
+        ids = [s.pk for s in sessions]
+        counts, voters = poll_service.vote_counts(ids), poll_service.voter_counts(ids)
+        now = timezone.now()
+        results = [poll_service.session_to_data(s, counts, voters, now) for s in sessions]
+        poll = {
+            "id": str(question.pk),
+            "question_text": question.question_text,
+            "question_type": question.question_type,
+            "is_deleted": question.is_deleted,
+            "current_session_id": str(question.current_session_id) if question.current_session_id else None,
+            "session_count": poll_service.PollSession.objects.filter(question=question).count(),
+        }
+        if page is None:
+            return Response({"poll": poll, "results": results, "count": len(results)}, status=status.HTTP_200_OK)
+        response = paginator.get_paginated_response(results)
+        response.data["poll"] = poll
+        return response
+
+
+class AdminPollSessionDetailView(APIView):
+    """
+    GET: Complete results of one voting session (current or historical).
+    URL: polls/<pk>/sessions/<session_pk>/
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request, pk, session_pk):
+        if poll_service is None:
+            return _polls_unavailable_response()
+        question = get_object_or_404(poll_service.PollQuestion, pk=pk)
+        session = poll_service.session_queryset().filter(question=question, pk=session_pk).first()
+        if session is None:
+            return Response({"error": "Session not found for this poll."}, status=status.HTTP_404_NOT_FOUND)
+        ids = [session.pk]
+        return Response(
+            {
+                "poll_id": str(question.pk),
+                "question_text": question.question_text,
+                "question_type": question.question_type,
+                "is_current": question.current_session_id == session.pk,
+                "session": poll_service.session_to_data(
+                    session, poll_service.vote_counts(ids), poll_service.voter_counts(ids)
+                ),
             },
             status=status.HTTP_200_OK,
         )
@@ -2524,6 +2496,11 @@ MARKET_DATA_SYMBOLS_BY_CATEGORY = {
     ],
     'commodity': ['SOYBEAN', 'COCOA', 'COFFEE'],
     'energy': ['CL', 'USOIL', 'BRENT', 'UKOIL', 'NATGAS'],
+    'crypto': [
+        'AAVUSD', 'ADAUSD', 'BATUSD', 'BCHUSD', 'BTCUSD', 'DOGUSD', 'DOTUSD', 'DSHUSD', 'ETCUSD', 'ETHUSD',
+        'FILUSD', 'IOTUSD', 'LNKUSD', 'LTCUSD', 'NEOUSD', 'SUSUSD', 'TETUSD', 'TRXUSD', 'UNIUSD', 'XLMUSD',
+        'XRPUSD', 'XTZUSD', 'ZECUSD',
+    ],
     'menashares': [
         'CBD', 'DEWA', 'DIB', 'DU', 'Emaar.Devel', 'Emaar.Propt', 'GULFNAV', 'NBD.Bank', 'Parkin', 'Salik',
         'Taaleem', 'Tecom.Group', 'AD.Aviation', 'AD.Insuranc', 'AD.Natl.Tak', 'AD.Ship', 'ADCB', 'ADIB',
@@ -2533,7 +2510,7 @@ MARKET_DATA_SYMBOLS_BY_CATEGORY = {
 }
 
 # Categories for which flag is set to "" when returning all (no category filter)
-MARKET_DATA_EXCLUDE_FLAGS = ('shares', 'commodity', 'metals', 'indices', 'energy')
+MARKET_DATA_EXCLUDE_FLAGS = ('shares', 'commodity', 'metals', 'indices', 'energy', 'crypto')
 
 # Keys returned per symbol (same structure as Dashboard GetMarketDataFromMT5)
 LIVE_QUOTE_KEYS = ('dir', 'bid', 'ask', 'digits', 'flag', 'ask_today', 'bid_today', 'change', 'change_percentage')
@@ -2578,7 +2555,7 @@ class AdminGetMarketDataFromMT5(APIView):
     """
     Returns mt5_prices data as a single object:
     - live_quote: dict of symbol -> { dir, bid, ask, digits, flag, ask_today, bid_today, change, change_percentage }
-    Query param category (optional): forex | shares | metals | indices | commodity | energy | menashares
+    Query param category (optional): forex | shares | metals | indices | commodity | energy | crypto | menashares
     When category is passed: only that category's symbols; exclude_flags not applied.
     When category is omitted: all symbols; exclude_flags applied.
     """

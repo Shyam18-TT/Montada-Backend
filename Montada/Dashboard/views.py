@@ -22,6 +22,7 @@ from Signals.models import TradingSignal, AssetClass, Timeframe
 from Signals.views import IsAnalystPermission
 from Subscriptions.access import check_active_subscription
 
+from .polls import PollError, active_polls_for_user, cast_vote
 from .serializers import ActivityLogSerializer, UserNotificationSerializer
 
 
@@ -295,45 +296,13 @@ class ActivePollsListView(APIView):
     GET: List active polls with their questions, options, and vote count per option.
     Same response shape as before: { polls: [...] }. Each question is standalone (no Poll model).
     Returns one logical "poll" containing all questions so frontend contract is unchanged.
+    Only questions whose current voting session is active (by schedule) are returned; vote counts
+    and is_voted refer to the current session only (see Dashboard/polls.py).
     """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        from django.db.models import Prefetch
-        from .models import PollQuestion, PollOption, PollResponse
-
-        options_with_votes = PollOption.objects.annotate(vote_count=Count('responses'))
-        questions_qs = (
-            PollQuestion.objects.filter(is_active=True)
-            .order_by('order')
-            .prefetch_related(Prefetch('options', queryset=options_with_votes))
-        )
-
-        voted_question_ids = set(
-            PollResponse.objects.filter(user=request.user).values_list('question_id', flat=True)
-        )
-
-        questions_data = []
-        for q in questions_qs:
-            opts = list(q.options.all())
-            total_votes = sum(getattr(opt, 'vote_count', 0) for opt in opts)
-            options_data = [
-                {
-                    'id': str(opt.id),
-                    'option_text': opt.option_text,
-                    'vote_count': getattr(opt, 'vote_count', 0),
-                    'vote_percentage': round((getattr(opt, 'vote_count', 0) / total_votes) * 100, 2) if total_votes else 0,
-                }
-                for opt in opts
-            ]
-            questions_data.append({
-                'id': str(q.id),
-                'question_text': q.question_text,
-                'question_type': q.question_type,
-                'order': q.order,
-                'options': options_data,
-                'is_voted': q.id in voted_question_ids,
-            })
+        questions_data = active_polls_for_user(request.user)
 
         # Only return a poll wrapper when there are questions; otherwise empty list
         if not questions_data:
@@ -350,96 +319,17 @@ class PollVoteView(APIView):
     poll_id is accepted for frontend compatibility but not used (questions are standalone).
     - Single-choice: option_ids must contain exactly one option.
     - Multiple-choice: option_ids may contain one or more options.
-    - User can vote only once per question.
+    - User can vote only once per question per voting session (again after an admin reset).
+    - Votes are rejected before the session start time and after its end time.
     """
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        from .models import PollQuestion, PollResponse
-
-        question_id = request.data.get('question_id')
-        option_ids = request.data.get('option_ids')
         # poll_id accepted but not used (frontend can keep sending it)
-
-        if not question_id:
-            return Response(
-                {'error': 'question_id is required.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        if not option_ids or not isinstance(option_ids, list):
-            return Response(
-                {'error': 'option_ids must be a non-empty list.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
         try:
-            q_uuid = uuid.UUID(str(question_id)) if isinstance(question_id, str) else question_id
-        except (ValueError, TypeError):
-            return Response(
-                {'error': 'Invalid question_id.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        try:
-            question = PollQuestion.objects.get(id=q_uuid)
-        except PollQuestion.DoesNotExist:
-            return Response(
-                {'error': 'Question not found.'},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-
-        if not getattr(question, 'is_active', True):
-            return Response(
-                {'error': 'This poll is closed.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        if PollResponse.objects.filter(question=question, user=request.user).exists():
-            return Response(
-                {'error': 'You have already voted for this question.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        valid_option_ids = {opt.id for opt in question.options.all()}
-        if question.question_type == 'single' and len(option_ids) != 1:
-            return Response(
-                {'error': 'This question allows only one option (single choice).'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        to_create = []
-        seen_options = set()
-        for oid in option_ids:
-            try:
-                o_uuid = uuid.UUID(str(oid)) if isinstance(oid, str) else oid
-            except (ValueError, TypeError):
-                return Response(
-                    {'error': f'Invalid option_id: {oid}.'},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            if o_uuid not in valid_option_ids:
-                return Response(
-                    {'error': 'One or more option_ids are not valid for this question.'},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            if o_uuid in seen_options:
-                continue
-            seen_options.add(o_uuid)
-            to_create.append(
-                PollResponse(
-                    question=question,
-                    option_id=o_uuid,
-                    user=request.user,
-                )
-            )
-
-        if not to_create:
-            return Response(
-                {'error': 'At least one valid option must be provided.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        PollResponse.objects.bulk_create(to_create)
+            cast_vote(request.user, request.data.get('question_id'), request.data.get('option_ids'))
+        except PollError as exc:
+            return Response({'error': exc.message}, status=exc.status_code)
         return Response(
             {'message': 'Vote recorded successfully.'},
             status=status.HTTP_201_CREATED,
@@ -448,7 +338,7 @@ class PollVoteView(APIView):
 
 
 
-# Market data symbols by category (used with ?category=forex|shares|metals|indices|commodity|energy|menashares)
+# Market data symbols by category (used with ?category=forex|shares|metals|indices|commodity|energy|crypto|menashares)
 MARKET_DATA_SYMBOLS_BY_CATEGORY = {
     'forex': [
         'EURUSD', 'GBPUSD', 'USDJPY', 'USDCHF', 'USDCAD', 'AUDUSD', 'NZDUSD', 'EURAUD', 'EURCAD', 'EURCHF',
@@ -476,6 +366,11 @@ MARKET_DATA_SYMBOLS_BY_CATEGORY = {
     ],
     'commodity': ['SOYBEAN', 'COCOA', 'COFFEE'],
     'energy': ['CL', 'USOIL', 'BRENT', 'UKOIL', 'NATGAS'],
+    'crypto': [
+        'AAVUSD', 'ADAUSD', 'BATUSD', 'BCHUSD', 'BTCUSD', 'DOGUSD', 'DOTUSD', 'DSHUSD', 'ETCUSD', 'ETHUSD',
+        'FILUSD', 'IOTUSD', 'LNKUSD', 'LTCUSD', 'NEOUSD', 'SUSUSD', 'TETUSD', 'TRXUSD', 'UNIUSD', 'XLMUSD',
+        'XRPUSD', 'XTZUSD', 'ZECUSD',
+    ],
     'menashares': [
         'CBD', 'DEWA', 'DIB', 'DU', 'Emaar.Devel', 'Emaar.Propt', 'GULFNAV', 'NBD.Bank', 'Parkin', 'Salik',
         'Taaleem', 'Tecom.Group', 'AD.Aviation', 'AD.Insuranc', 'AD.Natl.Tak', 'AD.Ship', 'ADCB', 'ADIB',
@@ -485,7 +380,7 @@ MARKET_DATA_SYMBOLS_BY_CATEGORY = {
 }
 
 # Categories for which flag is set to "" in live_quote (matches PHP exclude_flags)
-MARKET_DATA_EXCLUDE_FLAGS = ('shares', 'commodity', 'metals', 'indices', 'energy')
+MARKET_DATA_EXCLUDE_FLAGS = ('shares', 'commodity', 'metals', 'indices', 'energy', 'crypto')
 
 # Keys returned per symbol to match PHP GetLiveQuotesMT5 output
 LIVE_QUOTE_KEYS = ('dir', 'bid', 'ask', 'digits', 'flag', 'ask_today', 'bid_today', 'change', 'change_percentage')
@@ -579,7 +474,7 @@ class GetMarketDataFromMT5(APIView):
     - live_quote: dict of symbol -> { dir, bid, ask, digits, flag, ask_today, bid_today, change, change_percentage }
     Requires an active subscription (live market data is a premium feature).
 
-    Query param category (optional): forex | shares | metals | indices | commodity | energy | menashares
+    Query param category (optional): forex | shares | metals | indices | commodity | energy | crypto | menashares
     When category is passed: only that category's symbols; exclude_flags not applied.
     When category is omitted: all symbols; exclude_flags applied.
     """

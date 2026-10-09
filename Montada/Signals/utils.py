@@ -25,6 +25,11 @@ MARKET_DATA_SYMBOLS_BY_CATEGORY = {
     ],
     "commodity": ["SOYBEAN", "COCOA", "COFFEE"],
     "energy": ["CL", "USOIL", "BRENT", "UKOIL", "NATGAS"],
+    "crypto": [
+        "AAVUSD", "ADAUSD", "BATUSD", "BCHUSD", "BTCUSD", "DOGUSD", "DOTUSD", "DSHUSD", "ETCUSD", "ETHUSD",
+        "FILUSD", "IOTUSD", "LNKUSD", "LTCUSD", "NEOUSD", "SUSUSD", "TETUSD", "TRXUSD", "UNIUSD", "XLMUSD",
+        "XRPUSD", "XTZUSD", "ZECUSD",
+    ],
     "menashares": [
         "CBD", "DEWA", "DIB", "DU", "Emaar.Devel", "Emaar.Propt", "GULFNAV", "NBD.Bank", "Parkin", "Salik",
         "Taaleem", "Tecom.Group", "AD.Aviation", "AD.Insuranc", "AD.Natl.Tak", "AD.Ship", "ADCB", "ADIB",
@@ -41,6 +46,7 @@ ASSET_CLASS_DISPLAY_NAMES = {
     "indices": "Indices",
     "commodity": "Commodity",
     "energy": "Energy",
+    "crypto": "Crypto",
     "menashares": "Mena Shares",
 }
 

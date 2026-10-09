@@ -393,6 +393,11 @@ LOGGING = {
             'filename': str(LOG_DIR / 'exception.log'),
             'formatter': 'exception',
         },
+        'polls_file': {
+            'class': 'logging.FileHandler',
+            'filename': str(LOG_DIR / 'polls.log'),
+            'formatter': 'exception',
+        },
     },
     'loggers': {
         'django.db.backends': {
@@ -418,6 +423,12 @@ LOGGING = {
         'app.exceptions': {
             'handlers': ['exception_file'],
             'level': 'ERROR',
+            'propagate': False,
+        },
+        # Poll admin actions (create/update/reset/close/cancel/delete) and scheduler transitions.
+        'polls': {
+            'handlers': ['polls_file'],
+            'level': 'INFO',
             'propagate': False,
         },
     },

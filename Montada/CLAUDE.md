@@ -169,7 +169,12 @@ python manage.py run_market_data_stream
 
 # Stream Benzinga live news to WebSocket clients
 python manage.py run_fxstreet_news_stream
+
+# Move poll sessions scheduled -> active -> closed (PM2: montada-poll-scheduler)
+python manage.py update_poll_statuses [--loop --interval 60]
 ```
+
+Polls are session-based (scheduling, resets, history): see `Dashboard/polls_documentation.md`.
 
 ---
 
