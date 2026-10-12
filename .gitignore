@@ -17,6 +17,8 @@ venv/
 env/
 
 Montada/media/*
+!Montada/media/email/
+!Montada/media/email/**
 
 Montada/credentials/*
 Montada/credentials/*.json
