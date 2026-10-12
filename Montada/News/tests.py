@@ -1,11 +1,14 @@
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
-from django.test import SimpleTestCase, TestCase
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.urls import reverse
 
 from Mainapp.models import UserNotification
-from News.management.commands.run_fxstreet_news_stream import _flush_news_notification_batch
+from News.management.commands.run_fxstreet_news_stream import (
+    _claim_news_notification,
+    _flush_news_notification_batch,
+)
 from News.consumers import _get_user_live_news_languages
 from News.live_news_service import (
     detect_news_language,
@@ -635,6 +638,95 @@ class LiveNewsNotificationTests(TestCase):
         broadcast_mock.assert_called_once()
         sent_users = mock_send_push_to_users.call_args.kwargs["users"]
         self.assertEqual([user.id for user in sent_users], [second_user.id])
+
+    @patch("firebase.send_push_to_users")
+    def test_flush_skips_same_headline_from_other_provider_or_changed_teaser(self, mock_send_push_to_users):
+        user = User.objects.create_user(
+            email="dup@example.com",
+            username="dup@example.com",
+            password="Testpass123!",
+        )
+        UserNotification.objects.create(
+            user=user,
+            title="Gold hits record high",
+            message="Old teaser text.",
+            notification_type="INFO",
+            category="NEWS",
+            redirect_url="https://forexlive.example/gold",
+        )
+
+        from unittest.mock import Mock
+
+        broadcast_mock = Mock()
+        _flush_news_notification_batch(
+            [user],
+            title="Gold hits record high",
+            body="A different, re-scraped teaser.",
+            redirect_url="https://fxstreet.example/gold",
+            data={},
+            image_url=None,
+            broadcast_notifications=broadcast_mock,
+            user_notification_model=UserNotification,
+            instance=type("NewsInstance", (), {"provider_content_id": 1})(),
+        )
+
+        self.assertEqual(UserNotification.objects.filter(user=user).count(), 1)
+        broadcast_mock.assert_not_called()
+        mock_send_push_to_users.assert_not_called()
+
+
+@override_settings(CACHES={"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}})
+class LiveNewsNotificationClaimTests(SimpleTestCase):
+    def setUp(self):
+        from django.core.cache import cache
+
+        cache.clear()
+
+    def _news(self, **kwargs):
+        defaults = {"provider_content_id": 1, "title": "Gold hits record high", "source_url": "https://a.example/gold"}
+        defaults.update(kwargs)
+        return type("NewsInstance", (), defaults)()
+
+    def test_same_article_is_claimed_only_once(self):
+        self.assertTrue(_claim_news_notification(self._news()))
+        self.assertFalse(_claim_news_notification(self._news()))
+
+    def test_same_headline_with_different_url_is_not_claimed_again(self):
+        self.assertTrue(_claim_news_notification(self._news()))
+        self.assertFalse(_claim_news_notification(self._news(source_url="https://b.example/gold")))
+
+    def test_same_url_with_edited_headline_is_not_claimed_again(self):
+        self.assertTrue(_claim_news_notification(self._news()))
+        self.assertFalse(_claim_news_notification(self._news(title="Gold hits record high (updated)")))
+
+    def test_different_article_is_claimed(self):
+        self.assertTrue(_claim_news_notification(self._news()))
+        self.assertTrue(
+            _claim_news_notification(self._news(title="Oil slides", source_url="https://a.example/oil"))
+        )
+
+
+class LiveNewsPollCycleNotificationTests(SimpleTestCase):
+    def _run_cycle_with(self, created):
+        from News.management.commands import run_fxstreet_news_stream as stream
+
+        instance = type("NewsInstance", (), {"language": "en", "provider_content_id": 1})()
+        with patch.dict(stream.PROVIDER_FETCHERS, {"fxstreet": lambda feed_url: [{"title": "Gold"}]}), \
+                patch.object(stream, "save_live_news_payload", return_value=(instance, created, True)), \
+                patch.object(stream, "_notify_users_about_news") as notify:
+            stream.Command()._run_poll_cycle(
+                provider_names=["fxstreet"],
+                feed_urls={"fxstreet": "https://feed.example"},
+                limit=10,
+                broadcast=True,
+            )
+        return notify
+
+    def test_new_article_triggers_notification(self):
+        self._run_cycle_with(created=True).assert_called_once()
+
+    def test_updated_article_does_not_notify_again(self):
+        self._run_cycle_with(created=False).assert_not_called()
 
 
 class LiveNewsSocketRoutingTests(SimpleTestCase):

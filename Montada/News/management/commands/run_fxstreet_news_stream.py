@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import re
 import time
@@ -6,7 +7,9 @@ from html import unescape
 
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
+from django.core.cache import cache
 from django.db import ProgrammingError
+from django.db.models import Q
 from django.utils import timezone
 from django.utils.html import strip_tags
 from django.utils.text import Truncator
@@ -28,7 +31,10 @@ from News.management.commands.fetch_economic_calendar import is_skipped_event_na
 logger = logging.getLogger(__name__)
 User = get_user_model()
 NOTIFICATION_BATCH_SIZE = 500
-NEWS_NOTIFICATION_DEDUPLICATION_WINDOW = timedelta(minutes=30)
+# An article is pushed at most once in this window, even if it is re-scraped, edited,
+# deleted and re-created (language flip-flop), or syndicated by another provider.
+NEWS_NOTIFICATION_DEDUPLICATION_WINDOW = timedelta(hours=24)
+NEWS_NOTIFICATION_CLAIM_KEY_PREFIX = "live_news_notified"
 NEWS_LANGUAGE_RECIPIENT_FIELDS = {
     "ar": "news_notify_ar",
     "en": "news_notify_en",
@@ -81,10 +87,52 @@ def _get_news_notification_recipients(language):
     return list(User.objects.filter(is_active=True, **{preference_field: True}).only("id"))
 
 
+def _news_claim_key(kind, value):
+    digest = hashlib.sha1(str(value).strip().lower().encode("utf-8")).hexdigest()
+    return f"{NEWS_NOTIFICATION_CLAIM_KEY_PREFIX}:{kind}:{digest}"
+
+
+def _claim_news_notification(instance):
+    """
+    Atomically claim the right to notify about this article (Redis SET NX), keyed by
+    source URL and by title. Returns False if any process already claimed either key
+    in the dedup window, so a second stream instance or a re-created row is a no-op.
+    """
+    keys = []
+    source_url = str(getattr(instance, "source_url", "") or "").strip()
+    if source_url:
+        keys.append(_news_claim_key("url", source_url))
+    title = _clean_notification_text(getattr(instance, "title", None))
+    if title:
+        keys.append(_news_claim_key("title", title))
+    if not keys:
+        return True
+
+    timeout = int(NEWS_NOTIFICATION_DEDUPLICATION_WINDOW.total_seconds())
+    try:
+        # Evaluate every add() so all keys get claimed, not just the first.
+        claimed = [cache.add(key, "1", timeout=timeout) for key in keys]
+    except Exception:
+        # Redis unavailable: fall back to the per-user DB dedup in the flush step.
+        logger.exception(
+            "News notification claim failed for provider_content_id=%s",
+            getattr(instance, "provider_content_id", None),
+        )
+        return True
+    return all(claimed)
+
+
 def _notify_users_about_news(instance, *, event_name):
     if not instance:
         return
     if not _is_english_news_language(getattr(instance, "language", None)):
+        return
+    if not _claim_news_notification(instance):
+        logger.info(
+            "Skipping duplicate news notification provider_content_id=%s title=%r",
+            getattr(instance, "provider_content_id", None),
+            getattr(instance, "title", None),
+        )
         return
 
     try:
@@ -165,7 +213,6 @@ def _flush_news_notification_batch(
     users = _dedupe_recent_news_notification_users(
         users,
         title=title,
-        body=body,
         redirect_url=redirect_url,
         user_notification_model=user_notification_model,
     )
@@ -216,22 +263,25 @@ def _dedupe_recent_news_notification_users(
     users,
     *,
     title,
-    body,
     redirect_url,
     user_notification_model,
 ):
-    if not users or not redirect_url:
+    if not users:
         return list(users)
+
+    # Same article = same link OR same headline. The message is not compared: it is
+    # built from the teaser/body, which changes whenever the article is re-scraped.
+    same_article = Q(title=title)
+    if redirect_url:
+        same_article |= Q(redirect_url=redirect_url)
 
     user_ids = [user.id for user in users]
     recent_cutoff = timezone.now() - NEWS_NOTIFICATION_DEDUPLICATION_WINDOW
     already_notified_user_ids = set(
         user_notification_model.objects.filter(
+            same_article,
             user_id__in=user_ids,
-            title=title,
-            message=body,
-            notification_type="INFO",
-            redirect_url=redirect_url,
+            category="NEWS",
             created_at__gte=recent_cutoff,
         ).values_list("user_id", flat=True)
     )
@@ -444,11 +494,15 @@ class Command(BaseCommand):
                 else:
                     updated_count += 1
 
-                if broadcast and _is_english_news_language(getattr(instance, "language", None)):
-                    _notify_users_about_news(
-                        instance,
-                        event_name="created" if created else "updated",
-                    )
+                # Push only for brand-new articles. Updates (re-scraped body, edited
+                # teaser, new tags/image) still reach open apps via the websocket
+                # broadcast in save_live_news_payload, but must not re-notify.
+                if (
+                    broadcast
+                    and created
+                    and _is_english_news_language(getattr(instance, "language", None))
+                ):
+                    _notify_users_about_news(instance, event_name="created")
 
         return {
             "created": created_count,
