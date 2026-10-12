@@ -263,7 +263,6 @@ Logs written to `Montada/logs/` (auto-created):
 **Permissions** — default is `IsAuthenticated`. Admin endpoints enforce custom `IsAdminUser` or `IsMontadaAdmin` permission classes. Analyst-only endpoints check `request.user.user_type == 'analyst'`.
 
 **Media files** — uploaded to `MEDIA_ROOT` (`Montada/media/`). Absolute URLs use `PUBLIC_MEDIA_BASE_URL = 'https://api.themontada.com'`. In development, media is served via Django's static file server when `DEBUG=True`.
-
 **Database routing** — `mt5clients` DB is accessed by specifying `.using('mt5clients')` on querysets or via the `DATABASE_ROUTERS` setting if configured.
 
 ---
