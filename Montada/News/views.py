@@ -14,6 +14,7 @@ from rest_framework.views import APIView
 from .live_news_service import FRONTEND_LIVE_NEWS_LANGUAGES
 from .models import NewsArticle, NewsCategory, NewsArticleLike, NewsArticleComment, LiveNews, EconomicCalendarEvent, EconomicCalendarReminder, EconomicCalendarEventNotification
 from Subscriptions.models import AnalystContentPlan, UserAnalystPlanSubscription
+from Followers.models import Follow
 from .serializers import (
     NewsArticleCreateSerializer,
     NewsArticleListSerializer,
@@ -153,8 +154,18 @@ class NewsArticleListView(generics.ListAPIView):
             if analyst_id:
                 qs = qs.filter(author_id=analyst_id)
             else:
-                qs = qs.filter(author=self.request.user)
-                
+                # Own articles (any status) + published articles of analysts this user follows.
+                followed_analyst_ids = Follow.objects.filter(
+                    follower=self.request.user,
+                    status=Follow.Status.ACCEPTED,
+                    is_active=True,
+                    followed__user_type="analyst",
+                ).values("followed_id")
+                qs = qs.filter(
+                    Q(author=self.request.user)
+                    | Q(author_id__in=followed_analyst_ids, status="published")
+                )
+
             status_param = (self.request.query_params.get("status") or "").strip().lower()
             if status_param in ("draft", "published", "archived"):
                 qs = qs.filter(status=status_param)
