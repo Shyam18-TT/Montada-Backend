@@ -120,7 +120,7 @@ ROOT_URLCONF = 'Montada.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
+        'DIRS': [BASE_DIR / 'templates'],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -315,6 +315,8 @@ EMAIL_HOST_USER = "shanooj@trustlns.ae"
 EMAIL_HOST_PASSWORD = "W9r8UAC2EFfjxGLt"
 
 DEFAULT_FROM_EMAIL = "noreply@montada.com"
+# Shown in the HTML email templates (templates/*.html) as the contact address.
+SUPPORT_EMAIL = "support@trusttc.com"
 
 # For Gmail, you may need to use an App Password instead of your regular password
 # For other providers, adjust EMAIL_HOST, EMAIL_PORT, EMAIL_USE_TLS/EMAIL_USE_SSL accordingly

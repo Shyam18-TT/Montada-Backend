@@ -4,7 +4,6 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth import get_user_model
-from django.core.mail import send_mail
 from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
@@ -23,6 +22,7 @@ from .serializers import (
     DeleteAccountConfirmSerializer,
 )
 from .models import PasswordResetOTP, EmailVerificationOTP, AccountDeletionOTP, DeviceToken
+from .emails import send_templated_email, user_display_name
 
 User = get_user_model()
 
@@ -98,12 +98,12 @@ Montada Team
                 '''
 
                 try:
-                    send_mail(
+                    send_templated_email(
                         subject,
-                        message,
-                        settings.DEFAULT_FROM_EMAIL if hasattr(settings, 'DEFAULT_FROM_EMAIL') else 'noreply@montada.com',
                         [user.email],
-                        fail_silently=False,
+                        'acc-restored.html',
+                        {'name': user_display_name(user), 'otp': otp},
+                        message,
                     )
                 except Exception:
                     pass
@@ -157,12 +157,12 @@ Montada Team
             '''
             
             try:
-                send_mail(
+                send_templated_email(
                     subject,
-                    message,
-                    settings.DEFAULT_FROM_EMAIL if hasattr(settings, 'DEFAULT_FROM_EMAIL') else 'noreply@montada.com',
                     [user.email],
-                    fail_silently=False,
+                    'reg-details-updated.html',
+                    {'name': user_display_name(user), 'otp': otp},
+                    message,
                 )
             except Exception as e:
                 # Log the error in production, but still allow registration
@@ -214,12 +214,12 @@ Montada Team
         '''
         
         try:
-            send_mail(
+            send_templated_email(
                 subject,
-                message,
-                settings.DEFAULT_FROM_EMAIL if hasattr(settings, 'DEFAULT_FROM_EMAIL') else 'noreply@montada.com',
                 [user.email],
-                fail_silently=False,
+                'verify-email.html',
+                {'name': user_display_name(user), 'otp': otp},
+                message,
             )
         except Exception as e:
             # Log the error in production, but still allow registration
@@ -385,12 +385,12 @@ Montada Team
         '''
         
         try:
-            send_mail(
+            send_templated_email(
                 subject,
-                message,
-                settings.DEFAULT_FROM_EMAIL if hasattr(settings, 'DEFAULT_FROM_EMAIL') else 'noreply@montada.com',
                 [email],
-                fail_silently=False,
+                'forgot-psw.html',
+                {'name': user_display_name(user), 'otp': otp},
+                message,
             )
             
             return Response({
@@ -564,12 +564,12 @@ Montada Team
     '''
     
     try:
-        send_mail(
+        send_templated_email(
             subject,
-            message,
-            settings.DEFAULT_FROM_EMAIL if hasattr(settings, 'DEFAULT_FROM_EMAIL') else 'noreply@montada.com',
             [user.email],
-            fail_silently=False,
+            'verify-email.html',
+            {'name': user_display_name(user), 'otp': otp},
+            message,
         )
         
         return Response({
@@ -631,12 +631,12 @@ Montada Team
     '''
     
     try:
-        send_mail(
+        send_templated_email(
             subject,
-            message,
-            settings.DEFAULT_FROM_EMAIL if hasattr(settings, 'DEFAULT_FROM_EMAIL') else 'noreply@montada.com',
             [email],
-            fail_silently=False,
+            'forgot-psw.html',
+            {'name': user_display_name(user), 'otp': otp},
+            message,
         )
         
         return Response({
@@ -753,12 +753,12 @@ Montada Team
         '''
 
         try:
-            send_mail(
+            send_templated_email(
                 subject,
-                message,
-                settings.DEFAULT_FROM_EMAIL if hasattr(settings, 'DEFAULT_FROM_EMAIL') else 'noreply@montada.com',
                 [user.email],
-                fail_silently=False,
+                'delete-acc-conf.html',
+                {'name': user_display_name(user), 'otp': otp},
+                message,
             )
         except Exception:
             return Response(

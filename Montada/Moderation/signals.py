@@ -3,7 +3,6 @@ import logging
 from urllib.request import Request, urlopen
 
 from django.conf import settings
-from django.core.mail import send_mail
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 
@@ -18,36 +17,8 @@ def notify_team_on_new_report(sender, instance, created, **kwargs):
     if not created:
         return
 
-    subject = f"New moderation report: {instance.reason}"
-    body = (
-        f"A new moderation report was filed.\n\n"
-        f"Report ID: {instance.id}\n"
-        f"Reporter: {instance.reporter_id}\n"
-        f"Reported user: {instance.reported_user_id or 'deleted'}\n"
-        f"Content type: {instance.content_type}\n"
-        f"Content ID: {instance.content_id}\n"
-        f"Reason: {instance.reason}\n"
-        f"Platform: {instance.platform}\n"
-        f"Reported at: {instance.reported_at}\n"
-        f"Created at: {instance.created_at}\n\n"
-        f"Excerpt:\n{instance.content_excerpt}\n\n"
-        f"Details:\n{instance.details}\n"
-    )
-
-    recipients = getattr(settings, "MODERATION_SUPPORT_EMAILS", None) or [
-        email for _, email in getattr(settings, "ADMINS", [])
-    ]
-    if recipients:
-        try:
-            send_mail(
-                subject,
-                body,
-                settings.DEFAULT_FROM_EMAIL if hasattr(settings, 'DEFAULT_FROM_EMAIL') else 'noreply@montada.com',
-                recipients,
-                fail_silently=True,
-            )
-        except Exception:
-            logger.exception("Failed to send moderation report email.")
+    # The report email is sent by ModerationReportCreateView (_send_moderation_report_email);
+    # sending it here too would deliver every report twice.
 
     webhook_url = getattr(settings, "MODERATION_SLACK_WEBHOOK_URL", "")
     if webhook_url:

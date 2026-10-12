@@ -3,12 +3,12 @@ import logging
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.core.mail import send_mail
 from django.utils import timezone
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from Mainapp.emails import send_templated_email
 from .models import ModerationReport, UserBlock
 from .serializers import BlockedUserSerializer, ModerationReportSerializer, UserBlockSerializer
 
@@ -40,13 +40,14 @@ Details:
 Best regards,
 Montada Team
         '''
+    recipients = getattr(settings, "MODERATION_SUPPORT_EMAILS", None) or ['sumsubtestmail@gmail.com']
     try:
-        send_mail(
+        send_templated_email(
             subject,
+            recipients,
+            'new-moderation-repo-sub.html',
+            {'name': 'Moderation Team', 'report': report},
             message,
-            settings.DEFAULT_FROM_EMAIL if hasattr(settings, 'DEFAULT_FROM_EMAIL') else 'noreply@montada.com',
-            ['sumsubtestmail@gmail.com'],
-            fail_silently=False,
         )
     except Exception:
         logger.exception("Failed to send moderation report email.")

@@ -1,0 +1,420 @@
+<table
+  role="presentation"
+  data-outlook-wrap="1"
+  width="100%"
+  cellpadding="0"
+  cellspacing="0"
+  border="0"
+  bgcolor="#ffffff"
+  style="background-color: #ffffff; width: 100%"
+>
+  <tbody>
+    <tr>
+      <td align="center" bgcolor="#ffffff" style="background-color: #ffffff">
+        <table
+          border="0"
+          cellpadding="0"
+          cellspacing="0"
+          width="100%"
+          bgcolor="#ffffff"
+          style="background-color: #ffffff"
+        >
+          <tbody>
+            <tr>
+              <td align="center">
+                <table
+                  border="0"
+                  cellpadding="0"
+                  cellspacing="0"
+                  width="100%"
+                  style="max-width: 600px"
+                >
+                  <!-- Header Logo -->
+                  <tbody>
+                    <tr>
+                      <td
+                        style="
+                          padding: 28px 24px;
+                          background-color: #020202;
+                          text-align: center;
+                        "
+                      >
+                        <a
+                          href="https://trusttc.com/"
+                          target="_blank"
+                          style="text-decoration: none; display: inline-block"
+                        >
+                          <img
+                          src="https://api.themontada.com/media/email/montada-logo-header.png"
+                            style="
+                              display: block;
+                              border: 0;
+                              outline: none;
+                              text-decoration: none;
+                              height: auto;
+                              max-width: 160px;
+                              width: 100%;
+                            "
+                          />
+                        </a>
+                      </td>
+                    </tr>
+                    <!-- Headline Section -->
+
+                    <!-- Hero Image Section -->
+                    <tr>
+                      <td style="padding: 0; background-color: #ffffff">
+                        <img
+                        src="https://api.themontada.com/media/email/acc-restored-header.png"
+                          alt=""
+                          width="600"
+                          style="
+                            display: block;
+                            border: 0;
+                            outline: none;
+                            text-decoration: none;
+                            width: 100%;
+                            max-width: 600px;
+                            height: auto;
+                          "
+                        />
+                      </td>
+                    </tr>
+                    <tr>
+                      <td
+                        align="left"
+                        style="padding: 30px; background-color: #000000"
+                      >
+                        <p
+                          style="
+                            margin: 0;
+                            font-family: Arial, sans-serif;
+                            font-size: 30px;
+                            color: #fff;
+                            font-weight: 600;
+                            line-height: 1.2;
+                            text-transform: capitalize;
+                          "
+                        >
+                        Welcome back
+                        </p>
+                        <p
+                          style="
+                            margin: 0;
+                            padding: 20px 0 0 0;
+                            font-family: Arial, sans-serif;
+                            font-size: 18px;
+                            color: #a4a2a2;
+                            font-weight: 600;
+                            font-style: italic;
+                            line-height: 1.2;
+                            text-transform: capitalize;
+                          "
+                        >
+                        Verify to reactivate
+                        </p>
+                      </td>
+                    </tr>
+                    <!-- Intro Text -->
+                    <tr>
+                      <td
+                        align="left"
+                        style="
+                          padding: 30px;
+                          background-color: #171717;
+                          font-family: Arial, sans-serif;
+                          font-size: 16px;
+                          line-height: 22px;
+                          color: #7d7d7d;
+                        "
+                      >
+                        Hey
+                        <span style="color: #dddddd; font-weight: 600"
+                          >{{ name }},</span
+                        >
+                      </td>
+                    </tr>
+                    <tr>
+                      <td
+                        align="left"
+                        style="
+                          padding: 0 30px 30px 30px;
+                          background-color: #171717;
+                        "
+                      >
+                        <p
+                          style="
+                            font-family: Arial, sans-serif;
+                            font-size: 16px;
+                            line-height: 22px;
+                            color: #7d7d7d;
+                          "
+                        >
+                        Welcome back! We've restored your Montada account.
+                        </p>
+                        <p
+                          style="
+                            font-family: Arial, sans-serif;
+                            font-size: 16px;
+                            line-height: 22px;
+                            color: #7d7d7d;
+                          "
+                        >
+                        To reactivate it, verify your email with this code:
+                        </p>
+                        <p
+                          style="
+                            font-family: Arial, sans-serif;
+                            font-size: 30px;
+                            font-weight: 600;
+                            line-height: 22px;
+                            color: #ffffff;
+                          "
+                        >
+                          {{ otp }}
+                        </p>
+                        <p
+                          style="
+                            font-family: Arial, sans-serif;
+                            font-size: 16px;
+                            line-height: 22px;
+                            color: #7d7d7d;
+                          "
+                        >
+                          This code expires in
+                          <span style="color: #1e62bd"> {{ expiry_minutes }} minutes</span>
+                        </p>
+                        <p
+                          style="
+                            font-family: Arial, sans-serif;
+                            font-size: 16px;
+                            line-height: 22px;
+                            color: #7d7d7d;
+                          "
+                        >
+                        Any earlier codes no longer work.
+                        
+                        </p>
+                        <p
+                          style="
+                            font-family: Arial, sans-serif;
+                            font-size: 16px;
+                            line-height: 22px;
+                            color: #7d7d7d;
+                          "
+                        >
+                        Didn't try to register again? Ignore this email and your account will stay inactive. Questions? Reach us at 
+                          <span style="color: #dddddd; font-weight: 600">
+                            {{ support_email }}</span
+                          >.
+                        </p>
+                        <p
+                          style="
+                            font-family: Arial, sans-serif;
+                            font-size: 16px;
+                            line-height: 22px;
+                            color: #7d7d7d;
+                          "
+                        >
+                          See you inside,
+                          <br />
+                          <span style="color: #dddddd; font-weight: 600">
+                            The Montada Team</span
+                          >
+                        </p>
+                      </td>
+                    </tr>
+
+                    <tr>
+                      <td
+                        style="
+                          background: #000000;
+                          padding: 32px 26px 32px 26px;
+                          direction: ltr;
+                        "
+                        align="center"
+                      >
+                        <table
+                          role="presentation"
+                          cellpadding="0"
+                          cellspacing="0"
+                          border="0"
+                          width="100%"
+                          style="max-width: 600px"
+                        >
+                          <tbody>
+                            <tr>
+                              <td style="padding: 0">
+                                <table
+                                  role="presentation"
+                                  width="100%"
+                                  cellpadding="0"
+                                  cellspacing="0"
+                                  border="0"
+                                >
+                                  <tbody>
+                                    <tr>
+                                      <td
+                                        align="left"
+                                        valign="middle"
+                                        style="width: 33%"
+                                      >
+                                        <a
+                                          href="https://trusttc.com/"
+                                          style="text-decoration: none"
+                                          ><img
+                                            src="https://api.themontada.com/media/email/montada-logo-footer.png"
+                                            width="100"
+                                            style="
+                                              display: block;
+                                              height: 32px;
+                                            "
+                                        /></a>
+                                      </td>
+                                      <td
+                                        align="right"
+                                        valign="middle"
+                                        style="width: 33%"
+                                      >
+                                        <table
+                                          role="presentation"
+                                          cellpadding="0"
+                                          cellspacing="0"
+                                          border="0"
+                                        >
+                                          <tbody>
+                                            <tr>
+                                              <td>
+                                                <table
+                                                  role="presentation"
+                                                  width="100%"
+                                                  cellpadding="0"
+                                                  cellspacing="0"
+                                                  border="0"
+                                                >
+                                                  <tbody>
+                                                    <tr>
+                                                      <td
+                                                        valign="top"
+                                                        align="left"
+                                                      >
+                                                        <table
+                                                          role="presentation"
+                                                          cellpadding="0"
+                                                          cellspacing="0"
+                                                          border="0"
+                                                        >
+                                                          <tbody>
+                                                            <tr>
+                                                              <td
+                                                                valign="middle"
+                                                                style="
+                                                                  padding: 0 6px
+                                                                    0px 0;
+                                                                "
+                                                              >
+                                                                <img
+                                                                  src="https://api.themontada.com/media/email/web-icon.png"
+                                                                  alt="globe-logo"
+                                                                  width="10"
+                                                                  style="
+                                                                    display: block;
+                                                                  "
+                                                                />
+                                                              </td>
+                                                              <td
+                                                                valign="middle"
+                                                              >
+                                                                <a
+                                                                  href="https://trusttc.com/"
+                                                                  target="_blank"
+                                                                  style="
+                                                                    font-family:
+                                                                      Poppins,
+                                                                      Arial,
+                                                                      Helvetica,
+                                                                      sans-serif;
+                                                                    font-size: 12px;
+                                                                    font-weight: 400;
+                                                                    color: #ffffff;
+                                                                    line-height: 123%;
+                                                                    text-decoration: none;
+                                                                    white-space: nowrap;
+                                                                    padding: 0
+                                                                      6px 0px 0;
+                                                                  "
+                                                                  >https://trusttc.com/</a
+                                                                >
+                                                              </td>
+                                                            </tr>
+
+                                                            <tr>
+                                                              <td
+                                                                valign="middle"
+                                                                style="
+                                                                  padding: 10px
+                                                                    6px 0px 0;
+                                                                "
+                                                              >
+                                                                <img
+                                                                  src="https://api.themontada.com/media/email/email-icon.png"
+                                                                  alt="email-logo"
+                                                                  width="10"
+                                                                />
+                                                              </td>
+                                                              <td
+                                                                valign="middle"
+                                                                style="
+                                                                  padding: 10px
+                                                                    6px 0px 0;
+                                                                "
+                                                              >
+                                                                <a
+                                                                  href="mailto:support@trusttc.com"
+                                                                  style="
+                                                                    font-family:
+                                                                      Poppins,
+                                                                      Arial,
+                                                                      Helvetica,
+                                                                      sans-serif;
+                                                                    font-size: 12px;
+                                                                    font-weight: 400;
+                                                                    color: #ffffff;
+                                                                    line-height: 123%;
+                                                                    text-decoration: none;
+                                                                    white-space: nowrap;
+                                                                  "
+                                                                  >support@trusttc.com</a
+                                                                >
+                                                              </td>
+                                                            </tr>
+                                                          </tbody>
+                                                        </table>
+                                                      </td>
+                                                    </tr>
+                                                  </tbody>
+                                                </table>
+                                              </td>
+                                            </tr>
+                                          </tbody>
+                                        </table>
+                                      </td>
+                                    </tr>
+                                  </tbody>
+                                </table>
+                              </td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </td>
+    </tr>
+  </tbody>
+</table>
