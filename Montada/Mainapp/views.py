@@ -318,7 +318,15 @@ class ChangePasswordView(APIView):
 def logout_view(request):
     """
     API endpoint for user logout (blacklist refresh token)
+    Body: { "refresh_token": "...", "device_id": "..." (optional) }
+    device_id unregisters this device's FCM token so the phone stops getting the user's pushes.
     """
+    # Done before the refresh-token check: the user is already authenticated, and a
+    # stale refresh token must not leave the device subscribed.
+    device_id = str(request.data.get('device_id') or '').strip()
+    if device_id:
+        DeviceToken.objects.filter(user=request.user, device_id=device_id).delete()
+
     try:
         refresh_token = request.data.get('refresh_token')
         if refresh_token:

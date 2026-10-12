@@ -216,6 +216,29 @@ def android_channel_for(data: Optional[dict], sound: bool = True) -> str:
     return channel if sound else channel + ANDROID_SILENT_CHANNEL_SUFFIX
 
 
+def _is_dead_token_error(exc) -> bool:
+    """
+    True when FCM says the token itself will never work again (app uninstalled, token
+    rotated, or issued for another Firebase project). Payload/quota/server errors are
+    not token problems and must not delete anything.
+    """
+    if isinstance(exc, (messaging.UnregisteredError, messaging.SenderIdMismatchError)):
+        return True
+    # Malformed token: FCM returns INVALID_ARGUMENT with this exact wording.
+    return "not a valid fcm registration token" in str(exc or "").lower()
+
+
+def _remove_dead_tokens(tokens: list[str]) -> None:
+    try:
+        from Mainapp.models import DeviceToken
+
+        deleted, _ = DeviceToken.objects.filter(fcm_token__in=list(set(tokens))).delete()
+        if deleted:
+            logger.info("FCM: removed %d dead device token(s).", deleted)
+    except Exception:
+        logger.exception("FCM: failed to remove dead device tokens.")
+
+
 def send_push_to_tokens(
     tokens: list[str],
     title: str,
@@ -299,6 +322,7 @@ def send_push_to_tokens(
     total_failure = 0
     failed_tokens: list[str] = []
     errors: list[str] = []
+    dead_tokens: list[str] = []
 
     # Chunk into groups of ≤500 (FCM multicast limit)
     for i in range(0, len(tokens), _FCM_MULTICAST_CHUNK):
@@ -318,6 +342,8 @@ def send_push_to_tokens(
                 if not resp.success:
                     failed_tokens.append(chunk[idx])
                     errors.append(str(resp.exception))
+                    if _is_dead_token_error(resp.exception):
+                        dead_tokens.append(chunk[idx])
         except Exception as exc:
             logger.error("FCM multicast send failed for chunk starting at %d: %s", i, exc)
             total_failure += len(chunk)
@@ -336,6 +362,8 @@ def send_push_to_tokens(
             "; ".join(errors),
             extra={"fcm_errors": errors, "failed_token_count": len(failed_tokens)},
         )
+    if dead_tokens:
+        _remove_dead_tokens(dead_tokens)
     return {
         "success_count": total_success,
         "failure_count": total_failure,
