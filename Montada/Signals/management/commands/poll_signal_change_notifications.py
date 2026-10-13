@@ -28,6 +28,11 @@ _EXCLUDED_FOREX_MINOR_SYMBOLS = (
 # Broker variants of each minor: AUDNOK, AUDNOK.p, AUDNOK., AUDNOKp.
 _FOREX_MINOR_SUFFIXES = ("", ".p", ".", "p")
 
+_EXCLUDED_CRYPTO_SYMBOLS = ("LTCUSD", "LNKUSD","DOTUSD","XLMUSD","DSHUSD",
+    "AAVUSD","BATUSD","ETCUSD","FILUSD","IOTUSD","NEOUSD","SUSUSD","XTZUSD",
+    "TETUSD", "TRXUSD","UNIUSD","ZECUSD","ETHUSD",
+)
+
 # Symbols that must never trigger change notifications, uppercased to match _normalize_symbol.
 _EXCLUDED_STOCK_SYMBOLS = frozenset(
     {symbol.upper() for symbol in _EXCLUDED_FX2_SYMBOLS}
@@ -36,6 +41,7 @@ _EXCLUDED_STOCK_SYMBOLS = frozenset(
         for symbol in _EXCLUDED_FOREX_MINOR_SYMBOLS
         for suffix in _FOREX_MINOR_SUFFIXES
     }
+    | {symbol.upper() for symbol in _EXCLUDED_CRYPTO_SYMBOLS}
 )
 
 # Symbols where the live-quote feed uses a different name than Instrument.symbol in the DB
