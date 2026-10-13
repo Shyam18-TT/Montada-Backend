@@ -14,7 +14,7 @@ from django.conf import settings as django_settings
 from django.core.cache import cache
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils import timezone
-from django.db import connections
+from django.db import connections, transaction
 from django.db.models import (
     Avg,
     BooleanField,
@@ -4462,3 +4462,213 @@ class BannedUsersListView(generics.ListAPIView):
         return qs
 
 
+
+
+# ---------------------------------------------------------------------------
+# Symbol %-move notifications ("EURUSD up 0.5%") sent by poll_signal_change_notifications.
+# Saves/deletes bump the config version on commit (Signals.price_move_config), and the
+# worker re-reads the tables on its next check (within a few seconds). Symbols whose
+# levels change are re-baselined from their current % change, so a change never sends
+# the levels that were already crossed.
+# ---------------------------------------------------------------------------
+
+from Signals.models import PriceMoveNotificationRule, PriceMoveNotificationSettings
+from Signals.price_move_config import format_percent, load_config_from_db, normalize_symbol
+from .serializers import (
+    AdminPriceMoveMuteSerializer,
+    AdminPriceMoveRuleSerializer,
+    AdminPriceMoveSettingsSerializer,
+)
+
+
+def _effective_rule_payload(symbol, config=None):
+    config = config or load_config_from_db()
+    rule = config.resolve(symbol)
+    return {
+        "symbol": symbol,
+        "enabled": rule.enabled,
+        "threshold_percent": format_percent(rule.threshold),
+        "step_percent": format_percent(rule.step),
+        "reset_percent": format_percent(rule.reset),
+        "cooldown_seconds": rule.cooldown_seconds,
+        "next_levels_percent": [format_percent(level) for level in rule.levels()],
+        "source": rule.source,
+        "warnings": list(rule.warnings),
+        "global_enabled": config.enabled,
+    }
+
+
+class AdminPriceMoveSettingsView(APIView):
+    """
+    GET: Global defaults for symbol %-move notifications.
+    PATCH: Update any of is_enabled (global switch), default_threshold_percent,
+    default_step_percent (null = same as threshold), reset_percent, cooldown_seconds,
+    poll_interval_seconds, max_notification_batches.
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request):
+        obj = PriceMoveNotificationSettings.load()
+        return Response(AdminPriceMoveSettingsSerializer(obj).data, status=status.HTTP_200_OK)
+
+    def patch(self, request):
+        obj = PriceMoveNotificationSettings.load()
+        ser = AdminPriceMoveSettingsSerializer(obj, data=request.data, partial=True)
+        ser.is_valid(raise_exception=True)
+        ser.save(updated_by=request.user)
+        return Response(
+            {
+                "message": "Price move notification settings updated.",
+                "settings": AdminPriceMoveSettingsSerializer(obj).data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class AdminPriceMoveRuleListCreateView(APIView):
+    """
+    GET: All asset-class and symbol rules.
+      Query params: scope (asset_class|symbol), asset_class (UUID),
+      status (muted|enabled|inherit), search (symbol or asset class name).
+    POST: Create a rule.
+      { "scope": "symbol", "symbol": "BTCUSD", "threshold_percent": "3" }
+      { "scope": "asset_class", "asset_class": "<uuid>", "is_enabled": false }
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request):
+        qs = PriceMoveNotificationRule.objects.select_related("asset_class", "updated_by").order_by(
+            "scope", "asset_class__name", "symbol"
+        )
+        scope = request.query_params.get("scope")
+        if scope:
+            qs = qs.filter(scope=scope)
+        asset_class_id = request.query_params.get("asset_class")
+        if asset_class_id:
+            qs = qs.filter(asset_class_id=asset_class_id)
+        status_filter = (request.query_params.get("status") or "").strip().lower()
+        if status_filter == "muted":
+            qs = qs.filter(is_enabled=False)
+        elif status_filter == "enabled":
+            qs = qs.filter(is_enabled=True)
+        elif status_filter == "inherit":
+            qs = qs.filter(is_enabled__isnull=True)
+        search = (request.query_params.get("search") or "").strip()
+        if search:
+            qs = qs.filter(
+                Q(symbol__icontains=normalize_symbol(search)) | Q(asset_class__name__icontains=search)
+            )
+        rules = AdminPriceMoveRuleSerializer(qs, many=True).data
+        return Response({"count": len(rules), "rules": rules}, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        ser = AdminPriceMoveRuleSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        rule = ser.save(updated_by=request.user)
+        return Response(
+            {"message": "Rule created.", "rule": AdminPriceMoveRuleSerializer(rule).data},
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class AdminPriceMoveRuleDetailView(APIView):
+    """
+    GET / PATCH / DELETE one rule. The target (scope, asset_class, symbol) cannot be changed;
+    delete the rule and create a new one instead.
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request, pk):
+        rule = get_object_or_404(PriceMoveNotificationRule.objects.select_related("asset_class"), pk=pk)
+        return Response(AdminPriceMoveRuleSerializer(rule).data, status=status.HTTP_200_OK)
+
+    def patch(self, request, pk):
+        rule = get_object_or_404(PriceMoveNotificationRule, pk=pk)
+        ser = AdminPriceMoveRuleSerializer(rule, data=request.data, partial=True)
+        ser.is_valid(raise_exception=True)
+        rule = ser.save(updated_by=request.user)
+        return Response(
+            {"message": "Rule updated.", "rule": AdminPriceMoveRuleSerializer(rule).data},
+            status=status.HTTP_200_OK,
+        )
+
+    def delete(self, request, pk):
+        rule = get_object_or_404(PriceMoveNotificationRule, pk=pk)
+        rule.delete()
+        return Response({"message": "Rule deleted."}, status=status.HTTP_200_OK)
+
+
+class AdminPriceMoveMuteView(APIView):
+    """
+    POST: Mute or unmute notifications for one asset class or symbol.
+      { "scope": "asset_class", "asset_class": "<uuid>", "muted": true }
+      { "scope": "symbol", "symbol": "XAUUSD", "muted": false }
+    Unmuting a symbol whose asset class is muted marks the symbol as explicitly enabled.
+    The global switch (settings is_enabled) still overrides everything.
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def post(self, request):
+        ser = AdminPriceMoveMuteSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        scope = ser.validated_data["scope"]
+        muted = ser.validated_data["muted"]
+        if scope == PriceMoveNotificationRule.Scope.ASSET_CLASS:
+            lookup = {"scope": scope, "asset_class": ser.validated_data["asset_class"]}
+        else:
+            lookup = {"scope": scope, "symbol": ser.validated_data["symbol"]}
+
+        with transaction.atomic():
+            rule = PriceMoveNotificationRule.objects.select_for_update().filter(**lookup).first()
+            if muted:
+                rule = rule or PriceMoveNotificationRule(**lookup)
+                rule.is_enabled = False
+                rule.updated_by = request.user
+                rule.save()
+            elif rule is not None:
+                rule.is_enabled = None
+                rule.updated_by = request.user
+                has_overrides = any(
+                    getattr(rule, name) is not None
+                    for name in ("threshold_percent", "step_percent", "reset_percent", "cooldown_seconds")
+                )
+                if has_overrides:
+                    rule.save()
+                else:
+                    rule.delete()  # a pure mute rule has nothing left to say
+                    rule = None
+
+        effective = None
+        if scope == PriceMoveNotificationRule.Scope.SYMBOL:
+            config = load_config_from_db()
+            effective = _effective_rule_payload(lookup["symbol"], config)
+            if not muted and config.enabled and not effective["enabled"]:
+                # Still muted by its asset class: enable this symbol explicitly.
+                rule = rule or PriceMoveNotificationRule(**lookup)
+                rule.is_enabled = True
+                rule.updated_by = request.user
+                rule.save()
+                effective = _effective_rule_payload(lookup["symbol"])
+
+        return Response(
+            {
+                "message": "Muted." if muted else "Unmuted.",
+                "rule": AdminPriceMoveRuleSerializer(rule).data if rule is not None else None,
+                "effective": effective,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class AdminPriceMoveResolveView(APIView):
+    """
+    GET ?symbol=XAUUSD: The settings that apply to a feed symbol right now (after symbol,
+    asset class and global layers), its next notification levels and which rules matched.
+    """
+    permission_classes = [IsAuthenticated, IsAdminUser]
+
+    def get(self, request):
+        symbol = normalize_symbol(request.query_params.get("symbol"))
+        if not symbol:
+            return Response({"error": "symbol is required."}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(_effective_rule_payload(symbol), status=status.HTTP_200_OK)

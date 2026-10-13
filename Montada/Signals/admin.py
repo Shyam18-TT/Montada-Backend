@@ -1,5 +1,8 @@
 from django.contrib import admin
-from .models import TradingSignal, AssetClass, Instrument, Timeframe, PriceAlert
+from .models import (
+    TradingSignal, AssetClass, Instrument, Timeframe, PriceAlert,
+    PriceMoveNotificationRule, PriceMoveNotificationSettings,
+)
 
 
 @admin.register(AssetClass)
@@ -70,3 +73,37 @@ class PriceAlertAdmin(admin.ModelAdmin):
     search_fields = ('user__email', 'instrument__symbol', 'label')
     readonly_fields = ('created_at', 'updated_at', 'triggered_at')
     ordering = ('-created_at',)
+
+
+@admin.register(PriceMoveNotificationSettings)
+class PriceMoveNotificationSettingsAdmin(admin.ModelAdmin):
+    list_display = (
+        'id', 'is_enabled', 'default_threshold_percent', 'default_step_percent', 'reset_percent',
+        'cooldown_seconds', 'poll_interval_seconds', 'max_notification_batches', 'updated_at',
+    )
+    readonly_fields = ('updated_at', 'updated_by')
+
+    def has_add_permission(self, request):
+        return not PriceMoveNotificationSettings.objects.exists()
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def save_model(self, request, obj, form, change):
+        obj.updated_by = request.user
+        super().save_model(request, obj, form, change)
+
+
+@admin.register(PriceMoveNotificationRule)
+class PriceMoveNotificationRuleAdmin(admin.ModelAdmin):
+    list_display = (
+        'scope', 'asset_class', 'symbol', 'is_enabled', 'threshold_percent', 'step_percent',
+        'reset_percent', 'cooldown_seconds', 'updated_at',
+    )
+    list_filter = ('scope', 'is_enabled', 'asset_class')
+    search_fields = ('symbol', 'asset_class__name', 'note')
+    readonly_fields = ('created_at', 'updated_at', 'updated_by')
+
+    def save_model(self, request, obj, form, change):
+        obj.updated_by = request.user
+        super().save_model(request, obj, form, change)

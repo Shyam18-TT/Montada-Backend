@@ -162,6 +162,9 @@ python manage.py run_economic_calendar_reminders --background
 python manage.py fetch_economic_calendar
 
 # Poll for signal status changes and notify followers
+# Thresholds, poll interval and muted symbols/asset classes are admin-managed
+# (/api/admin/signals/move-notifications/, Signals/price_move_config.py); CLI tuning
+# flags are only a fallback when those tables cannot be read.
 python manage.py poll_signal_change_notifications
 
 # Stream live market data to WebSocket clients

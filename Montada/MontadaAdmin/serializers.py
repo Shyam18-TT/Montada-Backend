@@ -976,3 +976,193 @@ class ModerationReportSerializer(serializers.ModelSerializer):
             })
 
         return attrs
+
+
+# ---------------------------------------------------------------------------
+# Symbol %-move notifications (poll_signal_change_notifications)
+# ---------------------------------------------------------------------------
+
+from decimal import Decimal
+
+from Signals.models import AssetClass, PriceMoveNotificationRule, PriceMoveNotificationSettings
+from Signals.price_move_config import (
+    MAX_COOLDOWN_SECONDS,
+    MAX_NOTIFICATION_BATCHES,
+    MAX_PERCENT,
+    MAX_POLL_INTERVAL_SECONDS,
+    MIN_PERCENT,
+    MIN_POLL_INTERVAL_SECONDS,
+    normalize_symbol,
+)
+
+
+def _percent_field(**kwargs):
+    return serializers.DecimalField(
+        max_digits=7, decimal_places=3, min_value=MIN_PERCENT, max_value=MAX_PERCENT, **kwargs
+    )
+
+
+class AdminPriceMoveSettingsSerializer(serializers.ModelSerializer):
+    """Global defaults for symbol %-move notifications (singleton)."""
+
+    default_threshold_percent = _percent_field()
+    default_step_percent = _percent_field(allow_null=True, required=False)
+    reset_percent = serializers.DecimalField(
+        max_digits=7, decimal_places=3, min_value=Decimal("0"), max_value=MAX_PERCENT
+    )
+    cooldown_seconds = serializers.IntegerField(min_value=0, max_value=MAX_COOLDOWN_SECONDS)
+    poll_interval_seconds = serializers.IntegerField(
+        min_value=MIN_POLL_INTERVAL_SECONDS, max_value=MAX_POLL_INTERVAL_SECONDS
+    )
+    max_notification_batches = serializers.IntegerField(min_value=1, max_value=MAX_NOTIFICATION_BATCHES)
+    updated_by_email = serializers.EmailField(source="updated_by.email", read_only=True, default=None)
+
+    class Meta:
+        model = PriceMoveNotificationSettings
+        fields = (
+            "is_enabled",
+            "default_threshold_percent",
+            "default_step_percent",
+            "reset_percent",
+            "cooldown_seconds",
+            "poll_interval_seconds",
+            "max_notification_batches",
+            "updated_at",
+            "updated_by_email",
+        )
+        read_only_fields = ("updated_at", "updated_by_email")
+
+    def validate(self, attrs):
+        threshold = attrs.get("default_threshold_percent", getattr(self.instance, "default_threshold_percent", None))
+        reset = attrs.get("reset_percent", getattr(self.instance, "reset_percent", None))
+        if threshold is not None and reset is not None and reset >= threshold:
+            raise serializers.ValidationError(
+                {"reset_percent": "Must be lower than default_threshold_percent (%s)." % threshold}
+            )
+        return attrs
+
+
+class AdminPriceMoveRuleSerializer(serializers.ModelSerializer):
+    """
+    One asset-class or symbol override. Empty fields inherit (symbol -> asset class -> global).
+    is_enabled: null = inherit, false = muted, true = notify even if the asset class is muted.
+    """
+
+    asset_class = serializers.PrimaryKeyRelatedField(
+        queryset=AssetClass.objects.all(), allow_null=True, required=False
+    )
+    asset_class_name = serializers.CharField(source="asset_class.name", read_only=True, default=None)
+    symbol = serializers.CharField(max_length=50, allow_null=True, required=False)
+    is_enabled = serializers.BooleanField(allow_null=True, required=False)
+    threshold_percent = _percent_field(allow_null=True, required=False)
+    step_percent = _percent_field(allow_null=True, required=False)
+    reset_percent = serializers.DecimalField(
+        max_digits=7, decimal_places=3, min_value=Decimal("0"), max_value=MAX_PERCENT, allow_null=True, required=False
+    )
+    cooldown_seconds = serializers.IntegerField(
+        min_value=0, max_value=MAX_COOLDOWN_SECONDS, allow_null=True, required=False
+    )
+    status = serializers.SerializerMethodField()
+    updated_by_email = serializers.EmailField(source="updated_by.email", read_only=True, default=None)
+
+    class Meta:
+        model = PriceMoveNotificationRule
+        fields = (
+            "id",
+            "scope",
+            "asset_class",
+            "asset_class_name",
+            "symbol",
+            "is_enabled",
+            "status",
+            "threshold_percent",
+            "step_percent",
+            "reset_percent",
+            "cooldown_seconds",
+            "note",
+            "created_at",
+            "updated_at",
+            "updated_by_email",
+        )
+        read_only_fields = ("id", "status", "created_at", "updated_at", "updated_by_email")
+
+    def get_status(self, obj):
+        return {None: "inherit", True: "enabled", False: "muted"}[obj.is_enabled]
+
+    def validate_symbol(self, value):
+        if value is None:
+            return None
+        normalized = normalize_symbol(value)
+        if not normalized:
+            raise serializers.ValidationError("Symbol cannot be empty.")
+        return normalized
+
+    def validate(self, attrs):
+        if self.instance is not None:
+            # The target identifies the rule; changing it would silently move an override to
+            # another symbol. Delete and create a new rule instead.
+            for name in ("scope", "asset_class", "symbol"):
+                if name in attrs and attrs[name] != getattr(self.instance, name):
+                    raise serializers.ValidationError(
+                        {name: "Cannot be changed. Delete this rule and create a new one."}
+                    )
+        else:
+            scope = attrs.get("scope")
+            if scope == PriceMoveNotificationRule.Scope.ASSET_CLASS:
+                if not attrs.get("asset_class"):
+                    raise serializers.ValidationError({"asset_class": "Required for an asset_class rule."})
+                attrs["symbol"] = None
+                if PriceMoveNotificationRule.objects.filter(scope=scope, asset_class=attrs["asset_class"]).exists():
+                    raise serializers.ValidationError(
+                        {"asset_class": "A rule for this asset class already exists; edit it instead."}
+                    )
+            elif scope == PriceMoveNotificationRule.Scope.SYMBOL:
+                if not attrs.get("symbol"):
+                    raise serializers.ValidationError({"symbol": "Required for a symbol rule."})
+                attrs["asset_class"] = None
+                if PriceMoveNotificationRule.objects.filter(scope=scope, symbol=attrs["symbol"]).exists():
+                    raise serializers.ValidationError(
+                        {"symbol": "A rule for this symbol already exists; edit it instead."}
+                    )
+
+        def current(name):
+            return attrs[name] if name in attrs else getattr(self.instance, name, None)
+
+        reset = current("reset_percent")
+        if reset is not None:
+            limit = current("threshold_percent")
+            if limit is None:
+                limit = PriceMoveNotificationSettings.load().default_threshold_percent
+            if reset >= limit:
+                raise serializers.ValidationError(
+                    {"reset_percent": "Must be lower than the threshold that applies (%s%%)." % limit}
+                )
+        values = [
+            current(name)
+            for name in ("is_enabled", "threshold_percent", "step_percent", "reset_percent", "cooldown_seconds")
+        ]
+        if all(value is None for value in values):
+            raise serializers.ValidationError(
+                "Set is_enabled or at least one of threshold_percent, step_percent, "
+                "reset_percent, cooldown_seconds; or delete the rule."
+            )
+        return attrs
+
+
+class AdminPriceMoveMuteSerializer(serializers.Serializer):
+    """Mute or unmute one asset class or symbol."""
+
+    scope = serializers.ChoiceField(choices=PriceMoveNotificationRule.Scope.choices)
+    asset_class = serializers.PrimaryKeyRelatedField(queryset=AssetClass.objects.all(), required=False)
+    symbol = serializers.CharField(max_length=50, required=False)
+    muted = serializers.BooleanField()
+
+    def validate(self, attrs):
+        if attrs["scope"] == PriceMoveNotificationRule.Scope.ASSET_CLASS and not attrs.get("asset_class"):
+            raise serializers.ValidationError({"asset_class": "Required for scope asset_class."})
+        if attrs["scope"] == PriceMoveNotificationRule.Scope.SYMBOL:
+            symbol = normalize_symbol(attrs.get("symbol"))
+            if not symbol:
+                raise serializers.ValidationError({"symbol": "Required for scope symbol."})
+            attrs["symbol"] = symbol
+        return attrs

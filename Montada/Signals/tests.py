@@ -39,10 +39,19 @@ User = get_user_model()
 
 class SignalChangeNotificationThresholdTests(TestCase):
     def setUp(self):
-        self.command = Command()
-        self.command.threshold = Decimal("0.5")
-        self.command.share_threshold = Decimal("5.0")
-        self.command.share_step = Decimal("5.0")
+        from Signals.price_move_config import build_fallback_config
+
+        self.command = Command(stdout=Mock(), stderr=Mock())
+        self.command.verbose = False
+        self.command._config = build_fallback_config()
+
+    def _threshold(self, symbol, signals=()):
+        return self.command._resolve_rule(symbol, signals).threshold
+
+    def _use_db_config(self):
+        from Signals.price_move_config import load_config_from_db
+
+        self.command._config = load_config_from_db()
 
     def test_share_levels_start_at_five_percent_then_every_five_percent(self):
         from Signals.management.commands.poll_signal_change_notifications import (
@@ -74,34 +83,46 @@ class SignalChangeNotificationThresholdTests(TestCase):
 
         for symbol in ("USDSAR", "USDAED", "AUDNOK", "AUDNOK.P", "AUDNOK.", "AUDNOKP", "ZARJPY.P"):
             self.assertIn(symbol, _EXCLUDED_STOCK_SYMBOLS)
-        for symbol in ("EURUSD", "GBPUSD", "USDJPY", "GOLD"):
+            self.assertFalse(self.command._resolve_rule(symbol).enabled, symbol)
+        for symbol in ("ETHUSD", "LTCUSD", "DSHUSD", "ZECUSD"):
+            self.assertIn(symbol, _EXCLUDED_STOCK_SYMBOLS)
+            self.assertFalse(self.command._resolve_rule(symbol).enabled, symbol)
+        for symbol in ("EURUSD", "GBPUSD", "USDJPY", "GOLD", "BTCUSD", "XRPUSD"):
             self.assertNotIn(symbol, _EXCLUDED_STOCK_SYMBOLS)
+            self.assertTrue(self.command._resolve_rule(symbol).enabled, symbol)
 
     def test_agricultural_cfds_use_five_percent_threshold(self):
-        self.command._share_symbols = set()
         for symbol in ("WHEAT_Z26", "COCOA_Z26", "SUGAR_H27", "SOYBEAN_X26", "COFFEE"):
-            self.assertEqual(self.command._get_notification_threshold(symbol, []), Decimal("5.0"))
-        self.assertEqual(self.command._get_notification_threshold("NATGAS_X26", []), Decimal("0.5"))
+            self.assertEqual(self._threshold(symbol), Decimal("5.0"))
+        self.assertEqual(self._threshold("NATGAS_X26"), Decimal("0.5"))
 
     def test_crypto_and_metals_thresholds(self):
-        self.command._share_symbols = {"BTCUSD", "ETHUSD"}
-        self.assertEqual(self.command._get_notification_threshold("BTCUSD", []), Decimal("5.0"))
-        self.assertEqual(self.command._get_notification_threshold("GOLD", []), Decimal("0.5"))
-        self.assertEqual(self.command._get_notification_threshold("SILVER", []), Decimal("0.5"))
+        self.assertEqual(self._threshold("BTCUSD"), Decimal("5.0"))
+        self.assertEqual(self._threshold("GOLD"), Decimal("0.5"))
+        self.assertEqual(self._threshold("SILVER"), Decimal("0.5"))
 
-    def test_share_asset_class_uses_five_percent_threshold(self):
-        asset_class = AssetClass.objects.create(name="Shares")
-        instrument = Instrument.objects.create(asset_class=asset_class, symbol="AAPL")
-        signal = TradingSignal.objects.create(
+    def test_seeded_db_config_matches_legacy_thresholds(self):
+        _ensure_seeded()
+        self._use_db_config()
+        for symbol in ("BTCUSD", "AAPL", "DEWA", "ADNOC.GAS", "WHEAT_Z26", "COFFEE"):
+            self.assertEqual(self._threshold(symbol), Decimal("5.0"), symbol)
+        for symbol in ("EURUSD", "GOLD", "US500", "NATGAS_X26"):
+            self.assertEqual(self._threshold(symbol), Decimal("0.5"), symbol)
+        for symbol in ("USDSAR", "AUDNOK", "AUDNOK.P", "AUDNOKP", "ETHUSD", "LTCUSD", "DSHUSD"):
+            self.assertFalse(self.command._resolve_rule(symbol).enabled, symbol)
+
+    def _signal_on(self, asset_class, symbol, email):
+        instrument = Instrument.objects.create(asset_class=asset_class, symbol=symbol)
+        return TradingSignal.objects.create(
             analyst=User.objects.create_user(
-                email="analyst@example.com",
-                username="analyst@example.com",
+                email=email,
+                username=email,
                 password="Testpass123!",
                 user_type="analyst",
             ),
             asset_class=asset_class,
             instrument=instrument,
-            timeframe=Timeframe.objects.create(code="H1", name="1 Hour"),
+            timeframe=Timeframe.objects.get_or_create(code="H1", defaults={"name": "1 Hour"})[0],
             direction=TradingSignal.Direction.BUY,
             entry_price="1.00000",
             stop_loss="0.95000",
@@ -110,61 +131,45 @@ class SignalChangeNotificationThresholdTests(TestCase):
             status=TradingSignal.Status.OPEN,
         )
 
-        self.assertEqual(self.command._get_notification_threshold("AAPL", [signal]), Decimal("5.0"))
+    def _share_class_rule(self, asset_class):
+        from Signals.models import PriceMoveNotificationRule
+
+        PriceMoveNotificationRule.objects.create(
+            scope="asset_class", asset_class=asset_class,
+            threshold_percent=Decimal("5"), step_percent=Decimal("5"),
+        )
+
+    def test_share_asset_class_uses_five_percent_threshold(self):
+        asset_class = AssetClass.objects.create(name="Shares")
+        self._share_class_rule(asset_class)
+        signal = self._signal_on(asset_class, "NEWCO", "analyst@example.com")
+        self._use_db_config()
+
+        self.assertEqual(self._threshold("NEWCO", [signal]), Decimal("5.0"))
 
     def test_non_share_asset_class_keeps_half_percent_threshold(self):
         asset_class = AssetClass.objects.create(name="Forex")
-        instrument = Instrument.objects.create(asset_class=asset_class, symbol="EURUSD")
-        signal = TradingSignal.objects.create(
-            analyst=User.objects.create_user(
-                email="analyst2@example.com",
-                username="analyst2@example.com",
-                password="Testpass123!",
-                user_type="analyst",
-            ),
-            asset_class=asset_class,
-            instrument=instrument,
-            timeframe=Timeframe.objects.create(code="H4", name="4 Hours"),
-            direction=TradingSignal.Direction.SELL,
-            entry_price="1.10000",
-            stop_loss="1.05000",
-            take_profit="1.00000",
-            confidence_level=75,
-            status=TradingSignal.Status.OPEN,
-        )
+        signal = self._signal_on(asset_class, "EURUSD", "analyst2@example.com")
+        self._use_db_config()
 
-        self.assertEqual(self.command._get_notification_threshold("EURUSD", [signal]), Decimal("0.5"))
+        self.assertEqual(self._threshold("EURUSD", [signal]), Decimal("0.5"))
 
     def test_mena_share_asset_class_uses_five_percent_threshold(self):
         asset_class = AssetClass.objects.create(name="Mena Shares")
-        instrument = Instrument.objects.create(asset_class=asset_class, symbol="DEWA")
-        signal = TradingSignal.objects.create(
-            analyst=User.objects.create_user(
-                email="analyst3@example.com",
-                username="analyst3@example.com",
-                password="Testpass123!",
-                user_type="analyst",
-            ),
-            asset_class=asset_class,
-            instrument=instrument,
-            timeframe=Timeframe.objects.create(code="D1", name="1 Day"),
-            direction=TradingSignal.Direction.BUY,
-            entry_price="10.00000",
-            stop_loss="9.50000",
-            take_profit="11.00000",
-            confidence_level=70,
-            status=TradingSignal.Status.OPEN,
-        )
+        self._share_class_rule(asset_class)
+        signal = self._signal_on(asset_class, "NEWMENA", "analyst3@example.com")
+        self._use_db_config()
 
-        self.assertEqual(self.command._get_notification_threshold("DEWA", [signal]), Decimal("5.0"))
+        self.assertEqual(self._threshold("NEWMENA", [signal]), Decimal("5.0"))
 
     def test_share_without_open_signal_uses_five_percent_threshold(self):
         asset_class = AssetClass.objects.create(name="Mena Shares")
-        Instrument.objects.create(asset_class=asset_class, symbol="ADNOC.Gas")
-        self.command._share_symbols = self.command._load_share_symbols()
+        self._share_class_rule(asset_class)
+        Instrument.objects.create(asset_class=asset_class, symbol="New.Listing")
+        self._use_db_config()
 
-        self.assertEqual(self.command._get_notification_threshold("ADNOC.GAS", []), Decimal("5.0"))
-        self.assertEqual(self.command._get_notification_threshold("EURUSD", []), Decimal("0.5"))
+        self.assertEqual(self._threshold("NEW.LISTING"), Decimal("5.0"))
+        self.assertEqual(self._threshold("EURUSD"), Decimal("0.5"))
 
     def test_level_notification_does_not_repeat_within_cooldown_window(self):
         self.command.notification_cooldown_seconds = 300
@@ -178,24 +183,23 @@ class SignalChangeNotificationThresholdTests(TestCase):
         self.assertTrue(self.command._is_level_notification_in_cooldown("up", "1", previous_state, current_time))
         self.assertFalse(self.command._is_level_notification_in_cooldown("up", "1", previous_state, current_time + 600))
 
-    def _make_poll_command(self):
+    def _make_poll_command(self, config=None):
         from django.core.cache import cache
+        from Signals.management.commands.poll_signal_change_notifications import BASELINE_DONE_CACHE_KEY
+        from Signals.price_move_config import build_fallback_config
 
         cache.clear()
+        cache.set(BASELINE_DONE_CACHE_KEY, True, timeout=None)
         command = Command(stdout=Mock(), stderr=Mock())
         command.url = "https://example.invalid/prices"
         command.timeout = 1
         command.verbose = False
-        command.threshold = Decimal("0.5")
-        command.share_threshold = Decimal("5.0")
-        command.share_step = Decimal("5.0")
-        command.reset_threshold = Decimal("0.3")
+        command._config_provider = Mock()
+        command._config_provider.get.return_value = config or build_fallback_config()
         command.state_ttl = 3600
         command.lock_ttl = 60
-        command.max_notification_batches = 200
         command.max_users_per_notification = 0
         command.reset_daily = True
-        command.notification_cooldown_seconds = 300
         command.symbol_filter = set()
         command.excluded_symbols = set()
         command._fallback_state_by_symbol = {}
@@ -290,6 +294,437 @@ class SignalChangeNotificationThresholdTests(TestCase):
         payload_bytes = len(json.dumps({k: str(v) for k, v in data.items()}).encode("utf-8"))
         self.assertLess(payload_bytes, 4096)
         self.assertEqual(data["signal_count"], "300")
+
+
+def _ensure_seeded():
+    """Seed rows from migration 0013 (no-op when the migration already ran)."""
+    from Signals.models import PriceMoveNotificationRule, PriceMoveNotificationSettings
+    from Signals.price_move_config import seed_price_move_config
+
+    seed_price_move_config(PriceMoveNotificationSettings, PriceMoveNotificationRule, AssetClass, Instrument)
+
+
+def _move_rule(enabled=None, threshold=None, step=None, reset=None, cooldown_seconds=None, label="test"):
+    from Signals.price_move_config import _rule_dict
+
+    return _rule_dict(
+        enabled=enabled,
+        threshold=None if threshold is None else Decimal(threshold),
+        step=None if step is None else Decimal(step),
+        reset=None if reset is None else Decimal(reset),
+        cooldown_seconds=cooldown_seconds,
+        label=label,
+    )
+
+
+class PriceMoveConfigResolveTests(SimpleTestCase):
+    def test_symbol_rule_overrides_muted_asset_class_only_when_explicitly_enabled(self):
+        from Signals.price_move_config import PriceMoveConfig
+
+        config = PriceMoveConfig()
+        config.asset_class_rules["crypto"] = _move_rule(enabled=False)
+        config.instrument_asset_classes = {"BTCUSD": {"crypto"}, "ETHUSD": {"crypto"}}
+        config.symbol_rules["BTCUSD"] = _move_rule(enabled=True)
+        config.symbol_rules["ETHUSD"] = _move_rule(threshold="2")
+
+        self.assertTrue(config.resolve("BTCUSD").enabled)
+        eth = config.resolve("ETHUSD")
+        self.assertFalse(eth.enabled)  # threshold-only rule inherits the class mute
+        self.assertEqual((eth.threshold, eth.step), (Decimal("2"), Decimal("2")))
+
+        config.enabled = False  # global switch beats everything
+        self.assertFalse(config.resolve("BTCUSD").enabled)
+
+    def test_symbol_in_several_asset_classes_takes_strictest_values(self):
+        from Signals.price_move_config import PriceMoveConfig
+
+        config = PriceMoveConfig()
+        config.asset_class_rules = {"a": _move_rule(threshold="1"), "b": _move_rule(threshold="3")}
+        config.instrument_asset_classes = {"XYZ": {"a", "b"}}
+        self.assertEqual(config.resolve("XYZ").threshold, Decimal("3"))
+        config.asset_class_rules["a"] = _move_rule(enabled=False)
+        self.assertFalse(config.resolve("XYZ").enabled)
+
+    def test_reset_not_below_threshold_is_clamped_with_warning(self):
+        from Signals.price_move_config import PriceMoveConfig
+
+        config = PriceMoveConfig(reset=Decimal("0.3"))
+        config.symbol_rules["EURUSD"] = _move_rule(threshold="0.2")
+        rule = config.resolve("EURUSD")
+        self.assertEqual(rule.reset, Decimal("0.12"))
+        self.assertTrue(rule.warnings)
+
+    def test_rules_match_futures_aliases_and_broker_variants(self):
+        from Signals.price_move_config import PriceMoveConfig
+
+        config = PriceMoveConfig()
+        config.symbol_rules = {
+            "WHEAT": _move_rule(threshold="5"),
+            "AUDNOK": _move_rule(enabled=False),
+            "GOLD": _move_rule(threshold="1"),
+            "SHO": _move_rule(enabled=False),
+        }
+        self.assertEqual(config.resolve("WHEAT_Z26").threshold, Decimal("5"))
+        self.assertEqual(config.resolve("XAUUSD").threshold, Decimal("1"))
+        for variant in ("AUDNOK.P", "AUDNOK.", "AUDNOKP"):
+            self.assertFalse(config.resolve(variant).enabled, variant)
+        self.assertTrue(config.resolve("SHOP").enabled)  # short names keep their trailing P
+
+    def test_exact_symbol_rule_wins_over_alias_rule(self):
+        from Signals.price_move_config import PriceMoveConfig
+
+        config = PriceMoveConfig()
+        config.symbol_rules = {"XAUUSD": _move_rule(threshold="2"), "GOLD": _move_rule(threshold="1")}
+        self.assertEqual(config.resolve("XAUUSD").threshold, Decimal("2"))
+        self.assertEqual(config.resolve("GOLD").threshold, Decimal("1"))
+
+
+class PriceMoveMidDayChangeTests(TestCase):
+    """Admin changes, mutes, cache flushes and Redis outages must never send a burst of pushes."""
+
+    def setUp(self):
+        User.objects.create_user(
+            email="midday@example.com", username="midday@example.com",
+            password="Testpass123!", user_type="trader",
+        )
+        self.push = Mock(return_value={"success_count": 1, "failure_count": 0, "failed_tokens": [], "errors": []})
+
+    def _command(self, config=None):
+        return SignalChangeNotificationThresholdTests._make_poll_command(self, config)
+
+    def _poll(self, command, change, symbol="EURUSD"):
+        direction = "down" if str(change).startswith("-") else "up"
+        quotes = {symbol: {"change_percentage": change, "dir": direction, "bid": "1.1", "ask": "1.1001"}}
+        with patch(
+            "Signals.management.commands.poll_signal_change_notifications._fetch_live_quotes",
+            return_value=quotes,
+        ), patch("firebase.send_push_to_users", self.push):
+            command._run_poll()
+
+    def _set_config(self, command, config):
+        command._config_provider.get.return_value = config
+
+    def test_lowered_threshold_rebaselines_from_current_change(self):
+        from Signals.price_move_config import build_fallback_config
+
+        command = self._command()
+        self._poll(command, "1.3")
+        self.assertEqual(self.push.call_count, 1)
+        self.assertEqual(self.push.call_args.kwargs["title"], "EURUSD up 1%")
+
+        # 0.25% grid: 0.25..1.25 are already behind the price, so nothing is sent for them.
+        self._set_config(command, build_fallback_config(threshold=Decimal("0.25"), reset=Decimal("0.15")))
+        self._poll(command, "1.3")
+        self.assertEqual(self.push.call_count, 1)
+
+        self._poll(command, "1.55")
+        self.assertEqual(self.push.call_count, 2)
+        self.assertEqual(self.push.call_args.kwargs["title"], "EURUSD up 1.5%")
+
+    def test_raised_threshold_waits_for_next_new_level(self):
+        from Signals.price_move_config import build_fallback_config
+
+        command = self._command()
+        self._poll(command, "0.7")
+        self.assertEqual(self.push.call_count, 1)
+
+        self._set_config(command, build_fallback_config(threshold=Decimal("1")))
+        self._poll(command, "0.8")
+        self.assertEqual(self.push.call_count, 1)
+        self._poll(command, "1.1")
+        self.assertEqual(self.push.call_count, 2)
+        self.assertEqual(self.push.call_args.kwargs["title"], "EURUSD up 1%")
+
+    def test_muted_symbol_is_tracked_silently_and_unmute_starts_from_current_level(self):
+        from Signals.price_move_config import build_fallback_config
+
+        muted = build_fallback_config()
+        muted.symbol_rules["EURUSD"] = _move_rule(enabled=False)
+        command = self._command(muted)
+        self._poll(command, "0.6")
+        self._poll(command, "2.1")
+        self.assertEqual(self.push.call_count, 0)
+
+        self._set_config(command, build_fallback_config())
+        self._poll(command, "2.1")  # unmuted at 2.1%: 0.5..2 are not sent
+        self.assertEqual(self.push.call_count, 0)
+        self._poll(command, "2.6")
+        self.assertEqual(self.push.call_count, 1)
+        self.assertEqual(self.push.call_args.kwargs["title"], "EURUSD up 2.5%")
+
+    def test_global_switch_off_sends_nothing(self):
+        from Signals.price_move_config import build_fallback_config
+
+        config = build_fallback_config()
+        config.enabled = False
+        command = self._command(config)
+        self._poll(command, "3.2")
+        self.assertEqual(self.push.call_count, 0)
+
+    def test_flushed_cache_records_levels_silently_then_notifies_next_level(self):
+        from django.core.cache import cache
+        from Signals.management.commands.poll_signal_change_notifications import BASELINE_DONE_CACHE_KEY
+
+        command = self._command()
+        cache.delete(BASELINE_DONE_CACHE_KEY)
+        self._poll(command, "1.3")
+        self.assertEqual(self.push.call_count, 0)
+        self.assertTrue(cache.get(BASELINE_DONE_CACHE_KEY))
+
+        self._poll(command, "1.6")
+        self.assertEqual(self.push.call_count, 1)
+        self.assertEqual(self.push.call_args.kwargs["title"], "EURUSD up 1.5%")
+
+    def test_redis_outage_does_not_resend_levels(self):
+        command = self._command()
+        broken_cache = Mock()
+        for name in ("get", "set", "add", "delete"):
+            getattr(broken_cache, name).side_effect = ConnectionError("redis down")
+        with patch("Signals.management.commands.poll_signal_change_notifications.cache", broken_cache):
+            self._poll(command, "1.3")  # no state readable anywhere: recorded silently
+            self.assertEqual(self.push.call_count, 0)
+            self.assertIn("EURUSD", command._fallback_state_by_symbol)
+
+            self._poll(command, "1.6")  # in-process state is used for the next level
+            self.assertEqual(self.push.call_count, 1)
+
+            command._fallback_state_last_cleanup = 0
+            command._cleanup_fallback_state()  # today's state survives the periodic cleanup
+            self._poll(command, "1.7")
+            self.assertEqual(self.push.call_count, 1)
+
+    def test_fallback_cleanup_drops_only_previous_days(self):
+        command = self._command()
+        today = command._current_state_day()
+        command._fallback_state_by_symbol = {
+            "EURUSD": {"trading_day": today},
+            "GBPUSD": {"trading_day": "2000-01-01"},
+        }
+        command._fallback_state_last_cleanup = 0
+        command._cleanup_fallback_state()
+        self.assertEqual(set(command._fallback_state_by_symbol), {"EURUSD"})
+
+
+class PriceMoveConfigCacheTests(TestCase):
+    def setUp(self):
+        from django.core.cache import cache
+
+        cache.clear()
+
+    def test_provider_reads_db_only_after_version_changes(self):
+        from django.core.cache import cache
+        from Signals.price_move_config import (
+            VERSION_CACHE_KEY,
+            PriceMoveConfig,
+            PriceMoveConfigProvider,
+            build_fallback_config,
+        )
+
+        with patch(
+            "Signals.price_move_config.load_config_from_db",
+            side_effect=lambda version=None: PriceMoveConfig(version=version),
+        ) as load:
+            provider = PriceMoveConfigProvider(build_fallback_config)
+            provider.get()
+            provider.get()
+            self.assertEqual(load.call_count, 1)
+
+            cache.set(VERSION_CACHE_KEY, "v2")
+            self.assertEqual(provider.get().version, "v2")
+            provider.get()
+            self.assertEqual(load.call_count, 2)
+
+    def test_provider_keeps_last_good_config_when_db_fails(self):
+        from django.core.cache import cache
+        from Signals.price_move_config import (
+            VERSION_CACHE_KEY,
+            PriceMoveConfig,
+            PriceMoveConfigProvider,
+            build_fallback_config,
+        )
+
+        good = PriceMoveConfig(threshold=Decimal("2"))
+        with patch("Signals.price_move_config.load_config_from_db", side_effect=[good, RuntimeError("db down")]):
+            provider = PriceMoveConfigProvider(build_fallback_config)
+            self.assertIs(provider.get(), good)
+            cache.set(VERSION_CACHE_KEY, "v2")
+            self.assertIs(provider.get(), good)
+
+        with patch("Signals.price_move_config.load_config_from_db", side_effect=RuntimeError("no table")):
+            self.assertEqual(PriceMoveConfigProvider(build_fallback_config).get().source, "fallback")
+
+    def test_version_is_bumped_only_after_commit(self):
+        from django.core.cache import cache
+        from Signals.models import PriceMoveNotificationRule
+        from Signals.price_move_config import VERSION_CACHE_KEY
+
+        with self.captureOnCommitCallbacks(execute=False) as callbacks:
+            PriceMoveNotificationRule.objects.create(scope="symbol", symbol="NEWSYM", is_enabled=False)
+        self.assertIsNone(cache.get(VERSION_CACHE_KEY))
+        self.assertTrue(callbacks)
+
+        with self.captureOnCommitCallbacks(execute=True):
+            PriceMoveNotificationRule.objects.filter(symbol="NEWSYM").first().delete()
+        self.assertIsNotNone(cache.get(VERSION_CACHE_KEY))
+
+    def test_seed_creates_settings_and_legacy_rules(self):
+        from Signals.models import PriceMoveNotificationRule, PriceMoveNotificationSettings
+
+        _ensure_seeded()
+        _ensure_seeded()  # idempotent
+        self.assertEqual(PriceMoveNotificationRule.objects.filter(scope="symbol", symbol="AUDNOK").count(), 1)
+
+        settings_row = PriceMoveNotificationSettings.objects.get(pk=1)
+        self.assertEqual(settings_row.default_threshold_percent, Decimal("0.5"))
+        self.assertEqual(settings_row.reset_percent, Decimal("0.3"))
+        self.assertFalse(PriceMoveNotificationRule.objects.get(scope="symbol", symbol="AUDNOK").is_enabled)
+        # Excluded crypto pairs get only the mute rule, not also a 5% threshold rule.
+        eth = PriceMoveNotificationRule.objects.get(scope="symbol", symbol="ETHUSD")
+        self.assertEqual((eth.is_enabled, eth.threshold_percent), (False, None))
+        btc = PriceMoveNotificationRule.objects.get(scope="symbol", symbol="BTCUSD")
+        self.assertEqual((btc.threshold_percent, btc.step_percent), (Decimal("5"), Decimal("5")))
+        self.assertTrue(PriceMoveNotificationRule.objects.filter(scope="symbol", symbol="WHEAT").exists())
+
+
+class SeedPriceMoveRulesCommandTests(TestCase):
+    def _run(self, *args):
+        from io import StringIO
+        from django.core.management import call_command
+
+        out = StringIO()
+        call_command("seed_price_move_rules", *args, stdout=out)
+        return out.getvalue()
+
+    def test_fills_missing_rules_and_mutes_untouched_seeded_rules_only(self):
+        from Signals.models import PriceMoveNotificationRule
+
+        PriceMoveNotificationRule.objects.all().delete()
+        # State left by an earlier seed: ETHUSD as a 5% rule, LTCUSD edited by an admin.
+        PriceMoveNotificationRule.objects.create(
+            scope="symbol", symbol="ETHUSD", threshold_percent=Decimal("5"), step_percent=Decimal("5"),
+            note="Seeded: share/crypto symbol uses 5%, then every 5%.",
+        )
+        admin = User.objects.create_user(email="seedadmin@example.com", username="seedadmin@example.com",
+                                         password="Testpass123!", is_staff=True)
+        PriceMoveNotificationRule.objects.create(
+            scope="symbol", symbol="LTCUSD", threshold_percent=Decimal("3"), updated_by=admin,
+            note="Seeded: share/crypto symbol uses 5%, then every 5%.",
+        )
+
+        output = self._run("--dry-run")
+        self.assertIn("would mute seeded symbol rule ETHUSD", output)
+        self.assertIsNone(PriceMoveNotificationRule.objects.get(symbol="ETHUSD").is_enabled)
+        self.assertFalse(PriceMoveNotificationRule.objects.filter(symbol="AUDNOK").exists())
+
+        self._run()
+        eth = PriceMoveNotificationRule.objects.get(symbol="ETHUSD")
+        self.assertEqual((eth.is_enabled, eth.threshold_percent), (False, None))
+        ltc = PriceMoveNotificationRule.objects.get(symbol="LTCUSD")
+        self.assertEqual((ltc.is_enabled, ltc.threshold_percent), (None, Decimal("3")))  # admin edit kept
+        self.assertFalse(PriceMoveNotificationRule.objects.get(symbol="AUDNOK").is_enabled)
+
+        self.assertIn("0 rule(s) created, 0 seeded rule(s) muted", self._run())  # re-run is a no-op
+
+
+class AdminPriceMoveApiTests(TestCase):
+    BASE = "/api/admin/signals/move-notifications/"
+
+    def setUp(self):
+        from rest_framework.test import APIClient
+
+        self.admin = User.objects.create_user(
+            email="moveadmin@example.com", username="moveadmin@example.com",
+            password="Testpass123!", is_staff=True,
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(self.admin)
+
+    def test_non_admin_is_rejected(self):
+        from rest_framework.test import APIClient
+
+        trader = User.objects.create_user(
+            email="movetrader@example.com", username="movetrader@example.com",
+            password="Testpass123!", user_type="trader",
+        )
+        client = APIClient()
+        client.force_authenticate(trader)
+        self.assertEqual(client.get(self.BASE + "settings/").status_code, 403)
+
+    def test_settings_validation_and_update(self):
+        response = self.client.patch(self.BASE + "settings/", {"reset_percent": "0.6"}, format="json")
+        self.assertEqual(response.status_code, 400)
+        response = self.client.patch(self.BASE + "settings/", {"poll_interval_seconds": 1}, format="json")
+        self.assertEqual(response.status_code, 400)
+
+        response = self.client.patch(
+            self.BASE + "settings/",
+            {"default_threshold_percent": "0.25", "reset_percent": "0.1", "poll_interval_seconds": 60},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["settings"]["default_threshold_percent"], "0.250")
+        self.assertEqual(response.data["settings"]["updated_by_email"], self.admin.email)
+
+    def test_rule_create_normalizes_and_rejects_duplicates_and_empty_rules(self):
+        response = self.client.post(
+            self.BASE + "rules/", {"scope": "symbol", "symbol": "eur/usd", "threshold_percent": "1"}, format="json"
+        )
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data["rule"]["symbol"], "EURUSD")
+        rule_id = response.data["rule"]["id"]
+
+        duplicate = self.client.post(
+            self.BASE + "rules/", {"scope": "symbol", "symbol": "EURUSD", "is_enabled": False}, format="json"
+        )
+        self.assertEqual(duplicate.status_code, 400)
+        empty = self.client.post(self.BASE + "rules/", {"scope": "symbol", "symbol": "GBPUSD"}, format="json")
+        self.assertEqual(empty.status_code, 400)
+        bad_reset = self.client.post(
+            self.BASE + "rules/",
+            {"scope": "symbol", "symbol": "GBPUSD", "threshold_percent": "1", "reset_percent": "1"},
+            format="json",
+        )
+        self.assertEqual(bad_reset.status_code, 400)
+
+        retarget = self.client.patch(self.BASE + "rules/%s/" % rule_id, {"symbol": "GBPUSD"}, format="json")
+        self.assertEqual(retarget.status_code, 400)
+        update = self.client.patch(self.BASE + "rules/%s/" % rule_id, {"threshold_percent": "2"}, format="json")
+        self.assertEqual(update.status_code, 200)
+        self.assertEqual(self.client.delete(self.BASE + "rules/%s/" % rule_id).status_code, 200)
+
+    def test_mute_asset_class_then_unmute_one_symbol(self):
+        from Signals.models import PriceMoveNotificationRule
+
+        crypto = AssetClass.objects.create(name="Crypto Test")
+        Instrument.objects.create(asset_class=crypto, symbol="NEWCOIN")
+        response = self.client.post(
+            self.BASE + "mute/", {"scope": "asset_class", "asset_class": str(crypto.id), "muted": True}, format="json"
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        resolved = self.client.get(self.BASE + "resolve/", {"symbol": "NEWCOIN"})
+        self.assertFalse(resolved.data["enabled"])
+
+        response = self.client.post(self.BASE + "mute/", {"scope": "symbol", "symbol": "newcoin", "muted": False}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertTrue(response.data["effective"]["enabled"])
+        self.assertTrue(PriceMoveNotificationRule.objects.get(scope="symbol", symbol="NEWCOIN").is_enabled)
+
+    def test_unmuting_a_pure_mute_rule_deletes_it(self):
+        from Signals.models import PriceMoveNotificationRule
+
+        self.client.post(self.BASE + "mute/", {"scope": "symbol", "symbol": "XYZUSD", "muted": True}, format="json")
+        self.assertFalse(PriceMoveNotificationRule.objects.get(symbol="XYZUSD").is_enabled)
+        response = self.client.post(self.BASE + "mute/", {"scope": "symbol", "symbol": "XYZUSD", "muted": False}, format="json")
+        self.assertIsNone(response.data["rule"])
+        self.assertFalse(PriceMoveNotificationRule.objects.filter(symbol="XYZUSD").exists())
+
+    def test_resolve_shows_seeded_mutes_and_levels(self):
+        _ensure_seeded()
+        muted = self.client.get(self.BASE + "resolve/", {"symbol": "AUDNOKp"})
+        self.assertEqual(muted.status_code, 200)
+        self.assertFalse(muted.data["enabled"])
+        btc = self.client.get(self.BASE + "resolve/", {"symbol": "BTCUSD"})
+        self.assertEqual(btc.data["next_levels_percent"][:3], ["5", "10", "15"])
 
 
 class MarketStreamTests(SimpleTestCase):

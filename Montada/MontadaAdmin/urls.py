@@ -15,6 +15,11 @@ from .views import (
     AdminSignalAssetsView,
     AdminSignalInstrumentsView,
     AdminSignalTimeframesView,
+    AdminPriceMoveSettingsView,
+    AdminPriceMoveRuleListCreateView,
+    AdminPriceMoveRuleDetailView,
+    AdminPriceMoveMuteView,
+    AdminPriceMoveResolveView,
     AdminNewsCategoryListView,
     AdminNewsCategoryCreateView,
     AdminNewsArticleStatsView,
@@ -99,6 +104,31 @@ urlpatterns = [
     path("signals/filters/assets/", AdminSignalAssetsView.as_view(), name="admin_signal_assets"),
     path("signals/filters/instruments/", AdminSignalInstrumentsView.as_view(), name="admin_signal_instruments"),
     path("signals/filters/timeframes/", AdminSignalTimeframesView.as_view(), name="admin_signal_timeframes"),
+    path(
+        "signals/move-notifications/settings/",
+        AdminPriceMoveSettingsView.as_view(),
+        name="admin_price_move_settings",
+    ),
+    path(
+        "signals/move-notifications/rules/",
+        AdminPriceMoveRuleListCreateView.as_view(),
+        name="admin_price_move_rules",
+    ),
+    path(
+        "signals/move-notifications/rules/<uuid:pk>/",
+        AdminPriceMoveRuleDetailView.as_view(),
+        name="admin_price_move_rule_detail",
+    ),
+    path(
+        "signals/move-notifications/mute/",
+        AdminPriceMoveMuteView.as_view(),
+        name="admin_price_move_mute",
+    ),
+    path(
+        "signals/move-notifications/resolve/",
+        AdminPriceMoveResolveView.as_view(),
+        name="admin_price_move_resolve",
+    ),
 
     path("news/categories/", AdminNewsCategoryListView.as_view(), name="admin_news_category_list"),
     path("news/categories/create/", AdminNewsCategoryCreateView.as_view(), name="admin_news_category_create"),
