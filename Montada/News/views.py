@@ -1272,12 +1272,23 @@ class TradaysEconomicCalendarView(generics.ListAPIView):
                       allowed, comma-separated (high,low) or repeated (&importance=low)
         currency    : e.g. USD, EUR — filter by currency code (case-insensitive)
         search      : free-text search against event_name and country_name
+        upcoming    : true | 1 | yes — only events whose release time is later than now.
+                      Without date_from/date_to the window is now .. now + 20 days; any
+                      other filter still applies on top.
         page        : page number (default 1)
         page_size   : items per page (default 50, max 200)
     """
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = EconomicCalendarEventSerializer
     pagination_class = EconomicCalendarPagination
+
+    # "upcoming" is relative to the current time, so it is cached for less time: with the
+    # normal TTL an event that just started could still be listed as upcoming for 90s.
+    _UPCOMING_CACHE_TTL_SECONDS = 30
+
+    def _wants_upcoming(self):
+        value = self.request.query_params.get("upcoming", "")
+        return value.strip().lower() in ("true", "1", "yes")
 
     # Content isn't user-specific — every caller with the same filters/page sees
     # the same events. Both dashboards poll this on a 5-min timer, plus the
@@ -1295,7 +1306,8 @@ class TradaysEconomicCalendarView(generics.ListAPIView):
             return Response(cached)
         response = super().list(request, *args, **kwargs)
         if response.status_code == 200:
-            cache.set(cache_key, response.data, self._CACHE_TTL_SECONDS)
+            ttl = self._UPCOMING_CACHE_TTL_SECONDS if self._wants_upcoming() else self._CACHE_TTL_SECONDS
+            cache.set(cache_key, response.data, ttl)
         return response
 
     def get_queryset(self):
@@ -1326,6 +1338,11 @@ class TradaysEconomicCalendarView(generics.ListAPIView):
                 release_date__gte=now - datetime.timedelta(days=1),
                 release_date__lte=now + datetime.timedelta(days=20),
             )
+
+        # Upcoming only: event time strictly after the current time. Applied on top of the
+        # date filters / default window above, so the default becomes now .. now + 20 days.
+        if self._wants_upcoming():
+            qs = qs.filter(release_date__gt=tz.now())
 
         # Importance filter: one or more levels, comma-separated and/or repeated
         # (?importance=high,low or ?importance=high&importance=low). Unknown values are ignored.
