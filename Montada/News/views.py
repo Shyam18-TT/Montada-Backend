@@ -11,6 +11,7 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from Mainapp.audit import audit
 from .live_news_service import FRONTEND_LIVE_NEWS_LANGUAGES
 from .models import NewsArticle, NewsCategory, NewsArticleLike, NewsArticleComment, LiveNews, EconomicCalendarEvent, EconomicCalendarReminder, EconomicCalendarEventNotification
 from Subscriptions.models import AnalystContentPlan, UserAnalystPlanSubscription
@@ -63,6 +64,9 @@ class AnalystNewsArticleCreateView(generics.CreateAPIView):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
+        article = serializer.instance
+        audit("article.created", request=request, article=article.pk, status=article.status,
+              content_access=article.content_access)
         return Response(
             {
                 "message": "News article created successfully.",
@@ -228,8 +232,13 @@ class AnalystNewsArticleDetailView(generics.RetrieveUpdateDestroyAPIView):
         partial = kwargs.pop("partial", False)
         instance = self.get_object()
         serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        old_status = instance.status
         serializer.is_valid(raise_exception=True)
         serializer.save()
+        audit("article.updated", request=request, article=instance.pk,
+              fields=",".join(sorted(serializer.validated_data)),
+              old_status=old_status if old_status != instance.status else None,
+              new_status=instance.status if old_status != instance.status else None)
         return Response(
             {"message": "Article updated successfully.", "article": serializer.data},
             status=status.HTTP_200_OK,
@@ -239,6 +248,7 @@ class AnalystNewsArticleDetailView(generics.RetrieveUpdateDestroyAPIView):
         instance = self.get_object()
         instance.is_deleted = True
         instance.save(update_fields=["is_deleted", "updated_at"])
+        audit("article.deleted", request=request, article=instance.pk)
         return Response(
             {"message": "Article deleted successfully."},
             status=status.HTTP_200_OK,
@@ -286,6 +296,8 @@ class ArticleLikeView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
         _, created = NewsArticleLike.objects.get_or_create(user=request.user, article=article)
+        if created:
+            audit("article.liked", request=request, article=article.pk)
         return Response(
             {"message": "Liked." if created else "Already liked.", "liked": True},
             status=status.HTTP_200_OK,
@@ -299,6 +311,8 @@ class ArticleLikeView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
         deleted, _ = NewsArticleLike.objects.filter(user=request.user, article=article).delete()
+        if deleted:
+            audit("article.unliked", request=request, article=article.pk)
         return Response(
             {"message": "Unliked." if deleted else "Was not liked.", "liked": False},
             status=status.HTTP_200_OK,
@@ -356,6 +370,7 @@ class ArticleCommentListCreateView(APIView):
             article=article,
             content=content,
         )
+        audit("article.comment_added", request=request, article=article.pk, comment=comment.pk, length=len(content))
         serializer = NewsArticleCommentSerializer(comment)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
@@ -386,6 +401,7 @@ class ArticleCommentDestroyView(APIView):
             )
         comment.is_deleted = True
         comment.save(update_fields=["is_deleted"])
+        audit("article.comment_removed", request=request, article=article.pk, comment=comment.pk)
         return Response({"message": "Comment removed."}, status=status.HTTP_200_OK)
 
 
@@ -1016,6 +1032,8 @@ class EconomicCalendarReminderCreateView(generics.CreateAPIView):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
+        audit("calendar_reminder.created", request=request, reminder=serializer.instance.pk,
+              event=serializer.instance.event_id)
         return Response(
             {
                 "message": "Economic calendar reminder created successfully.",
@@ -1098,6 +1116,7 @@ class EconomicCalendarReminderDetailView(generics.RetrieveUpdateDestroyAPIView):
         serializer.validated_data["reminder_time"] = reminder_time
         
         self.perform_update(serializer)
+        audit("calendar_reminder.updated", request=request, reminder=instance.pk)
         return Response(
             {
                 "message": "Reminder updated successfully.",
@@ -1108,7 +1127,9 @@ class EconomicCalendarReminderDetailView(generics.RetrieveUpdateDestroyAPIView):
 
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()
+        reminder_id = instance.pk
         self.perform_destroy(instance)
+        audit("calendar_reminder.deleted", request=request, reminder=reminder_id)
         return Response(
             {"message": "Reminder deleted successfully."},
             status=status.HTTP_204_NO_CONTENT,

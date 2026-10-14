@@ -83,6 +83,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'Mainapp.middleware.RequestAuditMiddleware',
 ]
 
 # CORS: allow localhost on any port + your web origins (no trailing slashes)
@@ -383,6 +384,10 @@ LOGGING = {
         'exception': {
             'format': '%(asctime)s %(levelname)s %(message)s',
         },
+        # pid distinguishes the PM2 workers that share one audit file.
+        'audit': {
+            'format': '%(asctime)s %(levelname)s pid=%(process)d %(name)s %(message)s',
+        },
     },
     'handlers': {
         'file': {
@@ -398,6 +403,28 @@ LOGGING = {
         'polls_file': {
             'class': 'logging.FileHandler',
             'filename': str(LOG_DIR / 'polls.log'),
+            'formatter': 'exception',
+        },
+        # Not a RotatingFileHandler: several PM2 workers append to this file and
+        # in-process rotation would corrupt it. Rotate with logrotate/copytruncate.
+        'audit_file': {
+            'class': 'logging.FileHandler',
+            'filename': str(LOG_DIR / 'audit.log'),
+            'formatter': 'audit',
+            'encoding': 'utf-8',
+        },
+        # Application logs from our own modules (logging.getLogger(__name__)): FCM results,
+        # price-alert worker, notification delivery, ... Same single-file caveat as audit.log.
+        'app_file': {
+            'class': 'logging.FileHandler',
+            'filename': str(LOG_DIR / 'app.log'),
+            'formatter': 'audit',
+            'encoding': 'utf-8',
+        },
+        # Keeps warnings/errors visible in the PM2 stderr log as before.
+        'console': {
+            'class': 'logging.StreamHandler',
+            'level': 'WARNING',
             'formatter': 'exception',
         },
     },
@@ -432,6 +459,25 @@ LOGGING = {
             'handlers': ['polls_file'],
             'level': 'INFO',
             'propagate': False,
+        },
+        # Business events (login, signals, subscriptions, admin actions, ...) and
+        # request-level traffic. See Mainapp/audit.py and Mainapp/middleware.py.
+        'audit': {
+            'handlers': ['audit_file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        # First-party module loggers. Without these, INFO from e.g. firebase.py was dropped.
+        **{
+            name: {
+                'handlers': ['app_file', 'console'],
+                'level': 'INFO',
+                'propagate': False,
+            }
+            for name in (
+                'firebase', 'Mainapp', 'Subscriptions', 'Signals', 'Followers', 'Dashboard',
+                'MontadaAdmin', 'News', 'chat', 'Moderation',
+            )
         },
     },
 }

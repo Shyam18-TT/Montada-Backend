@@ -1,3 +1,5 @@
+import logging
+
 from rest_framework import status, generics, permissions
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
@@ -23,6 +25,7 @@ from .serializers import (
 )
 from .models import PasswordResetOTP, EmailVerificationOTP, AccountDeletionOTP, DeviceToken
 from .emails import send_templated_email, user_display_name
+from .audit import audit
 
 User = get_user_model()
 
@@ -108,6 +111,7 @@ Montada Team
                 except Exception:
                     pass
 
+                audit("auth.account_restored", request=request, actor=user, user=user.pk)
                 return Response({
                     'message': 'Soft-deleted account restored. Please check your email for verification OTP to complete registration.',
                     'email': user.email,
@@ -165,9 +169,10 @@ Montada Team
                     message,
                 )
             except Exception as e:
-                # Log the error in production, but still allow registration
-                pass
-            
+                # Still allow registration; the failure is recorded for follow-up.
+                audit("auth.verification_email_failed", request=request, level=logging.ERROR, user=user.pk, error=type(e).__name__)
+
+            audit("auth.register_updated_unverified", request=request, actor=user, user=user.pk, user_type=user.user_type)
             return Response({
                 'message': 'Registration details updated. Please check your email for verification OTP to complete registration.',
                 'email': user.email,
@@ -222,10 +227,10 @@ Montada Team
                 message,
             )
         except Exception as e:
-            # Log the error in production, but still allow registration
-            # The user can request a new OTP later
-            pass
-        
+            # Still allow registration; the user can request a new OTP later.
+            audit("auth.verification_email_failed", request=request, level=logging.ERROR, user=user.pk, error=type(e).__name__)
+
+        audit("auth.registered", request=request, actor=user, user=user.pk, user_type=user.user_type)
         return Response({
             'message': 'Registration successful. Please check your email for verification OTP to complete registration.',
             'email': user.email,
@@ -251,6 +256,7 @@ def login_view(request):
             
             # Generate JWT tokens
             refresh = RefreshToken.for_user(user)
+            audit("auth.login_success", request=request, actor=user, user=user.pk, user_type=user.user_type)
             log_manual_timing(
                 "login_view_success",
                 start,
@@ -267,6 +273,10 @@ def login_view(request):
                 'message': 'Login successful'
             }, status=status.HTTP_200_OK)
 
+        audit(
+            "auth.login_failed", request=request, level=logging.WARNING,
+            email=email, reason=dict(serializer.errors),
+        )
         log_manual_timing("login_view_invalid", start, email=email)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     except Exception:
@@ -281,6 +291,14 @@ class UserProfileView(generics.RetrieveUpdateAPIView):
 
     def get_object(self):
         return self.request.user
+
+    def perform_update(self, serializer):
+        serializer.save()
+        # Field names only; values (phone, DOB, ...) are personal data.
+        audit(
+            "user.profile_updated", request=self.request, user=self.request.user.pk,
+            fields=",".join(sorted(serializer.validated_data)),
+        )
 
 
 class ChangePasswordView(APIView):
@@ -307,6 +325,7 @@ class ChangePasswordView(APIView):
         )
         serializer.is_valid(raise_exception=True)
         serializer.save()
+        audit("auth.password_changed", request=request, user=request.user.pk)
         return Response(
             {'message': 'Password changed successfully.'},
             status=status.HTTP_200_OK,
@@ -332,6 +351,7 @@ def logout_view(request):
         if refresh_token:
             token = RefreshToken(refresh_token)
             token.blacklist()
+            audit("auth.logout", request=request, user=request.user.pk, device_id=device_id or None)
             return Response({
                 'message': 'Logout successful'
             }, status=status.HTTP_200_OK)
@@ -340,6 +360,7 @@ def logout_view(request):
                 'error': 'Refresh token is required'
             }, status=status.HTTP_400_BAD_REQUEST)
     except Exception as e:
+        audit("auth.logout_failed", request=request, level=logging.WARNING, user=request.user.pk, error=type(e).__name__)
         return Response({
             'error': 'Invalid token'
         }, status=status.HTTP_400_BAD_REQUEST)
@@ -361,6 +382,7 @@ def forgot_password_view(request):
         try:
             user = User.objects.get(email=email)
         except User.DoesNotExist:
+            audit("auth.password_reset_requested_unknown_email", request=request, level=logging.WARNING, email=email)
             # Return success message even if user doesn't exist (security best practice)
             return Response({
                 'message': 'User email not exists. Please register with the email provided!'
@@ -401,10 +423,12 @@ Montada Team
                 message,
             )
             
+            audit("auth.password_reset_otp_sent", request=request, actor=user, user=user.pk)
             return Response({
                 'message': 'OTP has been sent to your email address.'
             }, status=status.HTTP_200_OK)
         except Exception as e:
+            audit("auth.password_reset_otp_email_failed", request=request, level=logging.ERROR, user=user.pk, error=type(e).__name__)
             # Log the error in production
             print(f"Exception on forget password is {str(e)}")
             return Response({
@@ -458,11 +482,13 @@ def reset_password_view(request):
         
         # Invalidate all other OTPs for this email
         PasswordResetOTP.objects.filter(email=user.email, is_used=False).update(is_used=True)
-        
+
+        audit("auth.password_reset", request=request, actor=user, user=user.pk)
         return Response({
             'message': 'Password has been reset successfully.'
         }, status=status.HTTP_200_OK)
-    
+
+    audit("auth.password_reset_failed", request=request, level=logging.WARNING, reason=dict(serializer.errors))
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -500,13 +526,15 @@ def verify_email_view(request):
         if Subscription and getattr(user, "free_trial_eligible", True):
             try:
                 Subscription.create_free_trial(user)
+                audit("subscription.free_trial_created", request=request, actor=user, user=user.pk)
             except Exception as e:
-                # Log error but don't fail registration
-                pass
-        
+                # Don't fail registration, but record it: the user ends up without a trial.
+                audit("subscription.free_trial_failed", request=request, level=logging.ERROR, user=user.pk, error=type(e).__name__)
+
         # Generate JWT tokens after email verification
         refresh = RefreshToken.for_user(user)
-        
+        audit("auth.email_verified", request=request, actor=user, user=user.pk)
+
         return Response({
             'message': 'Email verified successfully.',
             'tokens': {
@@ -515,7 +543,8 @@ def verify_email_view(request):
             },
             'user': UserProfileSerializer(user).data
         }, status=status.HTTP_200_OK)
-    
+
+    audit("auth.email_verification_failed", request=request, level=logging.WARNING, reason=dict(serializer.errors))
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -580,10 +609,12 @@ Montada Team
             message,
         )
         
+        audit("auth.verification_otp_resent", request=request, actor=user, user=user.pk)
         return Response({
             'message': 'Verification OTP has been sent to your email address.'
         }, status=status.HTTP_200_OK)
     except Exception as e:
+        audit("auth.verification_email_failed", request=request, level=logging.ERROR, user=user.pk, error=type(e).__name__)
         return Response({
             'error': 'Failed to send email. Please try again later.'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -647,10 +678,12 @@ Montada Team
             message,
         )
         
+        audit("auth.password_reset_otp_resent", request=request, actor=user, user=user.pk)
         return Response({
             'message': 'Password reset OTP has been sent to your email address.'
         }, status=status.HTTP_200_OK)
     except Exception as e:
+        audit("auth.password_reset_otp_email_failed", request=request, level=logging.ERROR, user=user.pk, error=type(e).__name__)
         return Response({
             'error': 'Failed to send email. Please try again later.'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -720,6 +753,7 @@ class SaveFCMToken(APIView):
                     device_id=device_id,
                 )
 
+        audit("device.fcm_token_saved", request=request, user=user.pk, device_id=device_id, token_id=device_token.id)
         return Response(
             {"message": "Token saved", "token_id": str(device_token.id)},
             status=status.HTTP_200_OK,
@@ -768,12 +802,14 @@ Montada Team
                 {'name': user_display_name(user), 'otp': otp},
                 message,
             )
-        except Exception:
+        except Exception as e:
+            audit("account.deletion_otp_email_failed", request=request, level=logging.ERROR, user=user.pk, error=type(e).__name__)
             return Response(
                 {"error": "Failed to send email. Please try again later."},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
+        audit("account.deletion_otp_sent", request=request, user=user.pk)
         return Response(
             {"message": "Account deletion OTP has been sent to your email address."},
             status=status.HTTP_200_OK,
@@ -810,6 +846,7 @@ class ConfirmAccountDeletionView(APIView):
             AccountDeletionOTP.objects.filter(email=user.email, is_used=False).update(is_used=True)
             DeviceToken.objects.filter(user=user).delete()
 
+        audit("account.deleted_by_user", request=request, user=user.pk, user_type=user.user_type)
         return Response(
             {"message": "Account deleted successfully."},
             status=status.HTTP_200_OK,
@@ -877,6 +914,8 @@ class NotificationPreferencesView(APIView):
         serializer = NotificationPreferencesUpdateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         save_user_modes(request.user, serializer.validated_data["preferences"])
+        audit("user.notification_preferences_updated", request=request, user=request.user.pk,
+              categories=",".join(serializer.validated_data["preferences"]))
         return Response(self._payload(request.user), status=status.HTTP_200_OK)
 
     def patch(self, request):

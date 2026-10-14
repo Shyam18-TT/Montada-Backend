@@ -1,3 +1,4 @@
+import logging
 import uuid
 import urllib.request
 import urllib.parse
@@ -16,6 +17,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from Mainapp.audit import audit
 from Mainapp.models import ActivityLog, UserNotification
 from Followers.models import Follow
 from Signals.models import TradingSignal, AssetClass, Timeframe
@@ -326,10 +328,14 @@ class PollVoteView(APIView):
 
     def post(self, request):
         # poll_id accepted but not used (frontend can keep sending it)
+        question_id = request.data.get('question_id')
         try:
-            cast_vote(request.user, request.data.get('question_id'), request.data.get('option_ids'))
+            cast_vote(request.user, question_id, request.data.get('option_ids'))
         except PollError as exc:
+            audit("poll.vote_rejected", request=request, level=logging.WARNING,
+                  question=question_id, reason=exc.message)
             return Response({'error': exc.message}, status=exc.status_code)
+        audit("poll.vote_cast", request=request, question=question_id)
         return Response(
             {'message': 'Vote recorded successfully.'},
             status=status.HTTP_201_CREATED,

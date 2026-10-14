@@ -13,6 +13,8 @@ from rest_framework.exceptions import NotFound
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from Mainapp.audit import audit
+
 from .models import (
     AnalystContentPlan,
     UserAnalystPlanSubscription,
@@ -127,7 +129,9 @@ class AnalystContentPlanListCreateView(generics.ListCreateAPIView):
         return AnalystContentPlan.objects.filter(analyst=user).order_by("-created_at")
 
     def perform_create(self, serializer):
-        serializer.save(analyst=self.request.user)
+        plan = serializer.save(analyst=self.request.user)
+        audit("analyst_plan.created", request=self.request, plan=plan.pk, title=plan.title,
+              scope=plan.scope, billing_period=plan.billing_period)
 
     def create(self, request, *args, **kwargs):
         if getattr(request.user, "user_type", "") != "analyst":
@@ -153,6 +157,16 @@ class AnalystContentPlanDetailView(generics.RetrieveUpdateDestroyAPIView):
 
     def get_queryset(self):
         return AnalystContentPlan.objects.filter(analyst=self.request.user)
+
+    def perform_update(self, serializer):
+        plan = serializer.save()
+        audit("analyst_plan.updated", request=self.request, plan=plan.pk,
+              fields=",".join(sorted(serializer.validated_data)))
+
+    def perform_destroy(self, instance):
+        plan_id = instance.pk
+        instance.delete()
+        audit("analyst_plan.deleted", request=self.request, plan=plan_id)
 
 
 class PublicAnalystContentPlanCatalogView(generics.ListAPIView):
@@ -254,6 +268,9 @@ class SubscribeToAnalystPlanView(APIView):
 
         follow_info = _ensure_follow_analyst_after_subscribe(request.user, plan.analyst)
 
+        audit("analyst_plan.subscribed", request=request, subscription=sub.pk, plan=plan.pk,
+              analyst=plan.analyst_id, end_date=end_date.isoformat(), payment_intent=payment_intent_id,
+              follow_action=follow_info.get("action"))
         return Response(
             {
                 "message": "Subscribed to analyst plan.",
@@ -289,6 +306,7 @@ class CancelAnalystPlanSubscriptionView(APIView):
             pk=pk,
         )
         sub.cancel()
+        audit("analyst_plan.subscription_cancelled", request=request, subscription=sub.pk, plan=sub.plan_id)
         return Response(
             {
                 "message": "Subscription cancelled.",

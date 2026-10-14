@@ -16,6 +16,7 @@ from .serializers import (
 )
 from .analyst_plan_serializers import UserAnalystPlanSubscriptionSerializer
 from .analyst_plan_views import IsAnalystUser
+from Mainapp.audit import audit
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
@@ -55,6 +56,7 @@ class SubscriptionStatusView(APIView):
         except Subscription.DoesNotExist:
             if getattr(user, "free_trial_eligible", True):
                 subscription = Subscription.create_free_trial(user)
+                audit("subscription.free_trial_created", request=request, user=user.pk, subscription=subscription.pk)
                 return Response(SubscriptionSerializer(subscription).data, status=status.HTTP_200_OK)
             return Response(_basic_subscription_payload(user), status=status.HTTP_200_OK)
 
@@ -64,6 +66,8 @@ class SubscriptionStatusView(APIView):
             subscription.save()
             user.is_subscribed = False
             user.save(update_fields=['is_subscribed'])
+            audit("subscription.expired", request=request, user=user.pk, subscription=subscription.pk,
+                  plan_type=subscription.plan_type)
 
         return Response(SubscriptionSerializer(subscription).data, status=status.HTTP_200_OK)
 
@@ -100,6 +104,8 @@ def subscribe_view(request):
             else:
                 user.save(update_fields=['is_subscribed'])
 
+        audit("subscription.subscribed", request=request, user=user.pk, subscription=subscription.pk,
+              plan_type=plan_type, months=months)
         return Response({
             'message': f'Successfully subscribed to {plan_type} plan.',
             'subscription': SubscriptionSerializer(subscription).data
@@ -125,7 +131,9 @@ def cancel_subscription_view(request):
             }, status=status.HTTP_200_OK)
         
         subscription.cancel()
-        
+        audit("subscription.cancelled", request=request, user=user.pk, subscription=subscription.pk,
+              plan_type=subscription.plan_type)
+
         return Response({
             'message': 'Subscription cancelled successfully.',
             'subscription': SubscriptionSerializer(subscription).data
@@ -195,6 +203,8 @@ def confirm_subscription_view(request):
     """
     serializer = ConfirmSubscriptionSerializer(data=request.data)
     if not serializer.is_valid():
+        audit("payment.confirm_rejected", request=request, level=logging.WARNING,
+              user=request.user.pk, reason=dict(serializer.errors))
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     data = serializer.validated_data
@@ -243,6 +253,9 @@ def confirm_subscription_view(request):
     else:
         user.save(update_fields=['is_subscribed'])
 
+    audit("payment.subscription_confirmed", request=request, user=user.pk, subscription=subscription.pk,
+          plan_type=plan_id, amount=data.get('amount'), currency=data.get('currency', 'usd'),
+          payment_intent=data.get('payment_intent_id'), end_date=end_date.isoformat())
     return Response(
         {
             'message': 'Subscription confirmed and saved.',

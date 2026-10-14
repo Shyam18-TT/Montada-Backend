@@ -44,8 +44,9 @@ from django.utils.decorators import method_decorator
 
 from News.views import eodhd_category_news_response_for_request
 from Dashboard.realtime import broadcast_notifications
+from Mainapp.audit import audit
 from Mainapp.db_timing import log_manual_exception, log_manual_timing
-from MontadaAdmin.user_status import STATUS_FILTERS, USER_STATUS_CHOICES, filter_users_by_status
+from MontadaAdmin.user_status import STATUS_FILTERS, USER_STATUS_CHOICES, filter_users_by_status, user_status
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
@@ -177,11 +178,15 @@ class AdminLoginView(APIView):
         try:
             serializer = AdminLoginSerializer(data=request.data, context={"request": request})
             if not serializer.is_valid():
+                audit("admin.login_failed", request=request, level=logging.WARNING,
+                      email=email, reason=dict(serializer.errors))
                 log_manual_timing("admin_login_invalid", start, email=email)
                 return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
             user = serializer.validated_data["user"]
             if not (user.is_staff or user.is_superuser):
+                audit("admin.login_forbidden", request=request, level=logging.WARNING,
+                      actor=user, user=user.pk, email=email)
                 log_manual_timing(
                     "admin_login_forbidden",
                     start,
@@ -201,6 +206,8 @@ class AdminLoginView(APIView):
                 )
 
             refresh = RefreshToken.for_user(user)
+            audit("admin.login_success", request=request, actor=user, user=user.pk,
+                  is_superuser=user.is_superuser)
             log_manual_timing(
                 "admin_login_success",
                 start,
@@ -244,12 +251,15 @@ class AdminChangeUserPasswordView(APIView):
         new_password = serializer.validated_data["new_password"]
         user = get_object_or_404(User, id=user_id)
         if user.is_superuser:
+            audit("admin.password_change_denied", request=request, level=logging.WARNING,
+                  target_user=user.pk, reason="superuser")
             return Response(
                 {"error": "Cannot change password of a superuser account."},
                 status=status.HTTP_403_FORBIDDEN,
             )
         user.set_password(new_password)
         user.save(update_fields=["password"])
+        audit("admin.user_password_changed", request=request, target_user=user.pk)
         return Response(
             {"message": "Password updated successfully."},
             status=status.HTTP_200_OK,
@@ -275,13 +285,21 @@ class AdminSuspendUserView(APIView):
                 {"error": "Cannot suspend a superuser account."},
                 status=status.HTTP_403_FORBIDDEN,
             )
+        if user.is_soft_deleted:
+            return Response(
+                {"error": "This account is deleted; it cannot be suspended or activated."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         user.is_active = not suspend
         user.save(update_fields=["is_active"])
+        audit("admin.user_suspended" if suspend else "admin.user_activated", request=request,
+              target_user=user.pk, target_type=user.user_type)
         return Response(
             {
                 "message": "User suspended." if suspend else "User activated.",
                 "user_id": str(user.id),
                 "is_active": user.is_active,
+                "status": user_status(user),
             },
             status=status.HTTP_200_OK,
         )
@@ -311,6 +329,8 @@ class AdminUserProfileView(generics.RetrieveUpdateDestroyAPIView):
         serializer = self.get_serializer(instance, data=request.data, partial=partial)
         serializer.is_valid(raise_exception=True)
         serializer.save()
+        audit("admin.user_updated", request=request, target_user=instance.pk,
+              fields=",".join(sorted(serializer.validated_data)))
         return Response(
             {"message": "User updated successfully.", "user": serializer.data},
             status=status.HTTP_200_OK,
@@ -327,6 +347,7 @@ class AdminUserProfileView(generics.RetrieveUpdateDestroyAPIView):
         instance.soft_deleted_at = timezone.now()
         instance.is_active = False
         instance.save(update_fields=["is_soft_deleted", "soft_deleted_at", "is_active"])
+        audit("admin.user_deleted", request=request, target_user=instance.pk, target_type=instance.user_type)
         return Response(
             {"message": "User deleted successfully."},
             status=status.HTTP_200_OK,
@@ -345,6 +366,7 @@ class AdminCreateAnalystView(APIView):
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         user = serializer.save()
+        audit("admin.analyst_created", request=request, target_user=user.pk, is_verified=user.is_verified)
         return Response(
             {
                 "message": "Analyst created successfully.",
@@ -384,6 +406,8 @@ class AdminCreateTraderView(APIView):
                 subscription_label = "free_trial"
             elif is_active_sub:
                 subscription_label = "premium"
+        audit("admin.trader_created", request=request, target_user=user.pk,
+              is_verified=user.is_verified, subscription=subscription_label)
         return Response(
             {
                 "message": "Trader created successfully.",
@@ -1252,6 +1276,9 @@ class AdminAssignAnalystPlanSubscriptionView(APIView):
             .get(pk=sub.pk)
         )
 
+        audit("admin.analyst_plan_assigned", request=request, subscription=sub.pk, plan=plan.pk,
+              analyst=analyst.pk, subscriber=subscriber.pk, end_date=end_date.isoformat(),
+              ensure_follow=ensure_follow, revenue_excluded=True)
         return Response(
             {
                 "message": "Subscription assigned. No purchase record was created; this is excluded from revenue analytics.",
@@ -1323,6 +1350,8 @@ class AdminRemoveAnalystPlanSubscriptionView(APIView):
             .get(pk=sub.pk)
         )
 
+        audit("admin.analyst_plan_removed", request=request, subscription=sub.pk, plan=plan.pk,
+              analyst=analyst.pk, subscriber=subscriber.pk)
         return Response(
             {
                 "message": "Subscription removed (cancelled) successfully.",
@@ -1647,6 +1676,8 @@ class AdminCreateSignalView(generics.CreateAPIView):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         serializer.save()
+        audit("admin.signal_created", request=request, signal=serializer.instance.pk,
+              analyst=serializer.instance.analyst_id)
         return Response(
             {
                 "message": "Signal created successfully.",
@@ -1691,8 +1722,13 @@ class AdminSignalDetailView(generics.RetrieveUpdateDestroyAPIView):
         partial = kwargs.get("partial", False)
         instance = self.get_object()
         serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        old_status = instance.status
         serializer.is_valid(raise_exception=True)
         serializer.save()
+        audit("admin.signal_updated", request=request, signal=instance.pk,
+              fields=",".join(sorted(serializer.validated_data)),
+              old_status=old_status if old_status != instance.status else None,
+              new_status=instance.status if old_status != instance.status else None)
         return Response(
             {"message": "Signal updated successfully.", "signal": serializer.data},
             status=status.HTTP_200_OK,
@@ -1706,6 +1742,7 @@ class AdminSignalDetailView(generics.RetrieveUpdateDestroyAPIView):
             )
         instance = self.get_object()
         instance.soft_delete()
+        audit("admin.signal_deleted", request=request, signal=instance.pk)
         return Response(
             {"message": "Signal deleted successfully."},
             status=status.HTTP_200_OK,
@@ -1753,6 +1790,8 @@ class AdminNewsCategoryCreateView(generics.CreateAPIView):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
+        audit("admin.news_category_created", request=request, category=serializer.instance.pk,
+              name=serializer.instance.name)
         return Response(
             {
                 "message": "News category created successfully.",
@@ -2317,6 +2356,8 @@ class AdminNewsArticleCreateView(generics.CreateAPIView):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
+        audit("admin.article_created", request=request, article=serializer.instance.pk,
+              status=serializer.instance.status)
         return Response(
             {
                 "message": "News article created successfully.",
@@ -2361,8 +2402,13 @@ class AdminNewsArticleDetailView(generics.RetrieveUpdateDestroyAPIView):
         partial = kwargs.get("partial", False)
         instance = self.get_object()
         serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        old_status = instance.status
         serializer.is_valid(raise_exception=True)
         serializer.save()
+        audit("admin.article_updated", request=request, article=instance.pk,
+              fields=",".join(sorted(serializer.validated_data)),
+              old_status=old_status if old_status != instance.status else None,
+              new_status=instance.status if old_status != instance.status else None)
         return Response(
             {"message": "Article updated successfully.", "article": serializer.data},
             status=status.HTTP_200_OK,
@@ -2377,6 +2423,7 @@ class AdminNewsArticleDetailView(generics.RetrieveUpdateDestroyAPIView):
         instance = self.get_object()
         instance.is_deleted = True
         instance.save(update_fields=["is_deleted"])
+        audit("admin.article_deleted", request=request, article=instance.pk)
         return Response(
             {"message": "Article deleted successfully."},
             status=status.HTTP_200_OK,
@@ -2405,6 +2452,7 @@ class AdminNewsArticleUnpublishView(APIView):
         article.status = "draft"
         article.published_at = None
         article.save(update_fields=["status", "published_at"])
+        audit("admin.article_unpublished", request=request, article=article.pk)
         return Response(
             {"message": "Article unpublished successfully.", "status": article.status},
             status=status.HTTP_200_OK,
@@ -2446,6 +2494,8 @@ class AdminNewsArticleCommentDetailView(APIView):
         )
         serializer.is_valid(raise_exception=True)
         serializer.save()
+        audit("admin.comment_edited", request=request, comment=comment.pk, article=comment.article_id,
+              comment_author=comment.user_id)
         return Response(
             {"message": "Comment updated successfully.", "comment": serializer.data},
             status=status.HTTP_200_OK,
@@ -2462,6 +2512,8 @@ class AdminNewsArticleCommentDetailView(APIView):
         comment = self._get_comment(pk)
         comment.is_deleted = True
         comment.save(update_fields=["is_deleted", "updated_at"])
+        audit("admin.comment_deleted", request=request, comment=comment.pk, article=comment.article_id,
+              comment_author=comment.user_id)
         return Response(
             {"message": "Comment deleted successfully."},
             status=status.HTTP_200_OK,
@@ -3336,6 +3388,8 @@ class AdminFCMBroadcastView(APIView):
                 category,
                 recipient_count,
             )
+            audit("admin.broadcast_failed", request=request, level=logging.ERROR, segment=segment,
+                  category=category, recipients=recipient_count, error=type(db_exc).__name__)
             return Response(
                 {"error": f"Failed to save notifications to DB: {db_exc}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -3377,6 +3431,9 @@ class AdminFCMBroadcastView(APIView):
                 )
                 fcm_failure = device_tokens_found
 
+        audit("admin.broadcast_sent", request=request, segment=segment, category=category,
+              recipients=recipient_count, device_tokens=device_tokens_found,
+              push_queue_failed=bool(fcm_failure) or None, title=title)
         return Response(
             {
                 "message": "Notification saved and push queued." if device_tokens_found else "Notification saved. No device tokens registered for recipients.",
@@ -4017,6 +4074,9 @@ class AdminInAppSubscriptionSettingsView(APIView):
         ser = AdminInAppSubscriptionSettingsSerializer(obj, data=request.data, partial=True)
         ser.is_valid(raise_exception=True)
         ser.save()
+        audit("admin.in_app_settings_updated", request=request,
+              fields=",".join(sorted(ser.validated_data)),
+              values=dict(ser.validated_data))
         return Response(
             {
                 "message": "In-app subscription settings updated.",
@@ -4049,6 +4109,8 @@ class AdminUserInAppFullAccessView(APIView):
                 admin_in_app_access_expires_at=(expires_at if grant else None),
                 updated_at=now,
             )
+            audit("admin.in_app_access_all_users", request=request, level=logging.WARNING,
+                  grant=grant, expires_at=expires_at, updated_count=n)
             return Response(
                 {
                     "message": (
@@ -4078,6 +4140,8 @@ class AdminUserInAppFullAccessView(APIView):
                 "updated_at",
             ]
         )
+        audit("admin.in_app_access_user", request=request, target_user=user.pk, grant=grant,
+              expires_at=expires_at)
         return Response(
             {
                 "message": "In-app full access granted." if grant else "In-app full access revoked.",
@@ -4130,6 +4194,8 @@ class AdminEconomicCalendarReminderSettingsView(APIView):
         )
         ser.is_valid(raise_exception=True)
         ser.save()
+        audit("admin.calendar_reminder_settings_updated", request=request,
+              values=dict(ser.validated_data))
         return Response(
             {
                 "message": "Economic calendar reminder settings updated.",
@@ -4175,6 +4241,7 @@ class UserBlockCreateView(APIView):
                     reported_at=timezone.now(),
                     platform=str(request.data.get("platform") or "")[:16],
                 )
+                audit("admin.user_blocked", request=request, blocker=request.user.pk, blocked=blocked_user.pk)
 
             else:
                 return Response({"message":"User is already in block"})
@@ -4197,6 +4264,7 @@ class UserBlockCreateView(APIView):
                 )
 
             block.delete()
+            audit("admin.user_unblocked", request=request, blocker=request.user.pk, unblocked=blocked_user.pk)
 
             return Response(
                 {"message": "User has been unblocked successfully."},
@@ -4235,9 +4303,13 @@ class ContentBlockView(APIView):
                 chat_message.save()
 
             ModerationReport.objects.filter(id=report_id).update(status="Content removed")
+            audit("admin.content_removed", request=request, content_type=content_type,
+                  content_id=content_id, report=report_id)
             return Response({'message':'Content has been removed successfully!'})
 
         except Exception as e:
+            log_manual_exception("admin_content_block_exception", content_type=request.data.get('content_type'),
+                                 content_id=request.data.get('content_id'))
             print(f"Excepiton on the content block is {str(e)}")
             return Response({'message':str(e)}, status=status.HTTP_400_BAD_REQUEST)
     
@@ -4407,12 +4479,16 @@ class ModerationChangeStatusView(APIView):
             if not moderation_report:
                 return Response({'message':'Invalid report id'}, status=status.HTTP_400_BAD_REQUEST)
 
+            old_report_status = moderation_report.status
             moderation_report.status = report_status
             moderation_report.save()
+            audit("admin.moderation_status_changed", request=request, report=report_id,
+                  old_status=old_report_status, new_status=report_status)
 
             return Response({'message':'Status of the moderation have successfully updated'})
 
         except Exception as e:
+            log_manual_exception("admin_moderation_status_exception", report_id=request.data.get('report_id'))
             return Response({'message':'Something went wrong!'}, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -4516,6 +4592,7 @@ class AdminPriceMoveSettingsView(APIView):
         ser = AdminPriceMoveSettingsSerializer(obj, data=request.data, partial=True)
         ser.is_valid(raise_exception=True)
         ser.save(updated_by=request.user)
+        audit("admin.price_move_settings_updated", request=request, values=dict(ser.validated_data))
         return Response(
             {
                 "message": "Price move notification settings updated.",
@@ -4565,6 +4642,8 @@ class AdminPriceMoveRuleListCreateView(APIView):
         ser = AdminPriceMoveRuleSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         rule = ser.save(updated_by=request.user)
+        audit("admin.price_move_rule_created", request=request, rule=rule.pk, scope=rule.scope,
+              symbol=rule.symbol, asset_class=rule.asset_class_id)
         return Response(
             {"message": "Rule created.", "rule": AdminPriceMoveRuleSerializer(rule).data},
             status=status.HTTP_201_CREATED,
@@ -4587,6 +4666,8 @@ class AdminPriceMoveRuleDetailView(APIView):
         ser = AdminPriceMoveRuleSerializer(rule, data=request.data, partial=True)
         ser.is_valid(raise_exception=True)
         rule = ser.save(updated_by=request.user)
+        audit("admin.price_move_rule_updated", request=request, rule=rule.pk,
+              fields=",".join(sorted(ser.validated_data)))
         return Response(
             {"message": "Rule updated.", "rule": AdminPriceMoveRuleSerializer(rule).data},
             status=status.HTTP_200_OK,
@@ -4594,7 +4675,9 @@ class AdminPriceMoveRuleDetailView(APIView):
 
     def delete(self, request, pk):
         rule = get_object_or_404(PriceMoveNotificationRule, pk=pk)
+        rule_id, rule_scope, rule_symbol = rule.pk, rule.scope, rule.symbol
         rule.delete()
+        audit("admin.price_move_rule_deleted", request=request, rule=rule_id, scope=rule_scope, symbol=rule_symbol)
         return Response({"message": "Rule deleted."}, status=status.HTTP_200_OK)
 
 
@@ -4650,6 +4733,8 @@ class AdminPriceMoveMuteView(APIView):
                 rule.save()
                 effective = _effective_rule_payload(lookup["symbol"])
 
+        audit("admin.price_move_muted" if muted else "admin.price_move_unmuted", request=request,
+              scope=scope, symbol=lookup.get("symbol"), asset_class=lookup.get("asset_class"))
         return Response(
             {
                 "message": "Muted." if muted else "Unmuted.",

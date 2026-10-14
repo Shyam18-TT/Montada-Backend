@@ -11,6 +11,7 @@ from rest_framework.pagination import PageNumberPagination
 
 from Followers.models import Follow
 from Dashboard.realtime import broadcast_notifications
+from Mainapp.audit import audit
 from Mainapp.notification_preferences import Category as NotificationCategory
 from Subscriptions.analyst_plan_access import (
     filter_visible_analyst_ids_for_signals,
@@ -67,6 +68,17 @@ def _log_signal_closed(user, signal):
         entity_type=ActivityLog.EntityType.SIGNAL,
         metadata={"signal_id": str(signal.id), "instrument": instrument_symbol, "direction": signal.direction},
     )
+
+
+def _audit_signal_update(request, signal, old_status, fields):
+    """One audit line per signal edit; a status change is recorded as its own event."""
+    audit("signal.updated", request=request, signal=signal.pk, fields=",".join(fields))
+    if old_status != signal.status:
+        audit(
+            "signal.status_changed", request=request, signal=signal.pk,
+            old_status=old_status, new_status=signal.status,
+            is_win=signal.is_win, is_loss=signal.is_loss, is_neutral=signal.is_neutral,
+        )
 
 
 def _reset_signal_lifecycle_if_needed(signal, *, old_status, old_direction, old_entry_price, old_instrument_id):
@@ -340,6 +352,8 @@ class CreateTradingSignalView(generics.CreateAPIView):
                 entity_type=ActivityLog.EntityType.SIGNAL,
                 metadata={"signal_id": str(signal.id), "instrument": instrument_symbol, "direction": signal.direction},
             )
+        audit("signal.created", request=request, signal=signal.pk, instrument=signal.instrument_id,
+              direction=signal.direction, status=signal.status, entry_price=signal.entry_price)
         _notify_signal_published(signal)
         return Response({
             'message': 'Trading signal created successfully.',
@@ -526,6 +540,7 @@ class AnalystSignalUpdateView(generics.RetrieveUpdateAPIView):
         _notify_signal_closed(instance, old_status=old_status)
         if ActivityLog and old_status != TradingSignal.Status.CLOSED and instance.status == TradingSignal.Status.CLOSED:
             _log_signal_closed(request.user, instance)
+        _audit_signal_update(request, instance, old_status, fields=sorted(serializer.validated_data))
         return Response({
             'message': 'Trading signal updated successfully.',
             'signal': serializer.data
@@ -562,6 +577,7 @@ class AnalystSignalUpdateView(generics.RetrieveUpdateAPIView):
         _notify_signal_closed(instance, old_status=old_status)
         if ActivityLog and old_status != TradingSignal.Status.CLOSED and instance.status == TradingSignal.Status.CLOSED:
             _log_signal_closed(request.user, instance)
+        _audit_signal_update(request, instance, old_status, fields=sorted(data))
         return Response({
             'message': 'Signal updated successfully.',
             'signal': serializer.data
@@ -596,7 +612,8 @@ class AnalystSignalSoftDeleteView(generics.RetrieveAPIView):
         """
         instance = self.get_object()
         instance.soft_delete()
-        
+        audit("signal.deleted", request=request, signal=instance.pk, status=instance.status)
+
         return Response({
             'message': 'Trading signal deleted successfully.'
         }, status=status.HTTP_200_OK)
@@ -871,6 +888,8 @@ class TraderApplySignalView(generics.GenericAPIView):
             signal=signal,
             note=note or None
         )
+        audit("signal.applied", request=request, signal=signal.pk, analyst=signal.analyst_id,
+              applied_signal=applied.pk)
         _notify_analyst_signal_applied(applied)
         out_serializer = AppliedSignalSerializer(applied)
         return Response(
@@ -906,6 +925,11 @@ class PriceAlertCreateView(generics.CreateAPIView):
     serializer_class = PriceAlertCreateSerializer
     permission_classes = [permissions.IsAuthenticated]
 
+    def perform_create(self, serializer):
+        alert = serializer.save()
+        audit("price_alert.created", request=self.request, alert=alert.pk,
+              instrument=alert.instrument_id, condition=alert.condition, target_price=alert.target_price)
+
 
 class PriceAlertListView(generics.ListAPIView):
     """
@@ -931,6 +955,11 @@ class PriceAlertDestroyView(generics.DestroyAPIView):
 
     def get_queryset(self):
         return PriceAlert.objects.filter(user=self.request.user, is_triggered=False)
+
+    def perform_destroy(self, instance):
+        alert_id = instance.pk
+        instance.delete()
+        audit("price_alert.deleted", request=self.request, alert=alert_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1150,6 +1179,13 @@ class SignalPushNotificationView(generics.GenericAPIView):
         if fcm_error:
             response_data["fcm_error"] = fcm_error
 
+        audit(
+            "signal.push_notification_sent", request=request,
+            level=logging.ERROR if fcm_error else logging.INFO,
+            signal=signal.pk, audience=audience, category=category,
+            recipients=recipient_count, device_tokens=device_tokens_found,
+            queue_error=fcm_error, token_error=tokens_error,
+        )
         return Response(response_data, status=status.HTTP_200_OK)
 
 

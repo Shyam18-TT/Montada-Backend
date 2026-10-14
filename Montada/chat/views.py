@@ -15,6 +15,9 @@ from django.contrib.auth import get_user_model
 
 logger = logging.getLogger(__name__)
 
+from Mainapp.audit import audit
+from Mainapp.user_visibility import is_listable_user
+
 from .models import Conversation, ConversationParticipant, ChatMessage
 from .serializers import (
     ConversationListSerializer,
@@ -256,10 +259,15 @@ class ConversationListCreateView(APIView):
         # One query for every block relationship involving this user, instead of
         # one block-check query per conversation per other participant.
         blocked_ids = _blocked_user_ids_for(request.user)
+        # Conversations with a suspended or deleted user are hidden from the list.
         convos = [
             convo for convo in convos
             if not blocked_ids.intersection(
                 p.pk for p in convo.participants.all() if p.pk != request.user.pk
+            )
+            and all(
+                is_listable_user(p)
+                for p in convo.participants.all() if p.pk != request.user.pk
             )
         ]
         paginator = self.pagination_class()
@@ -289,6 +297,11 @@ class ConversationListCreateView(APIView):
                 {"error": "User not found."},
                 status=status.HTTP_404_NOT_FOUND,
             )
+        if not is_listable_user(other):
+            return Response(
+                {"error": "User not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
         if other.pk == request.user.pk:
             return Response(
                 {"error": "Cannot start a conversation with yourself."},
@@ -303,6 +316,8 @@ class ConversationListCreateView(APIView):
             conv, created = Conversation.get_or_create_direct(request.user, other)
         except ValueError as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        if created:
+            audit("chat.conversation_created", request=request, conversation=conv.pk, other_user=other.pk)
         serializer = ConversationDetailSerializer(conv)
         data = dict(serializer.data)
         # Explicit conversation_id so frontend always has it (existing or new)
@@ -390,6 +405,8 @@ class MessageListCreateView(APIView):
         conv.updated_at = timezone.now()
         conv.save(update_fields=["updated_at"])
         payload = ChatMessageSerializer(msg).data
+        # Message content is never logged, only its size.
+        audit("chat.message_sent", request=request, conversation=conv.pk, message=msg.pk, length=len(msg.content))
         _broadcast_new_message(str(conv.id), payload)
         _broadcast_chat_notification(conv, msg, list(conv.participants.exclude(pk=request.user.pk)))
         return Response(payload, status=status.HTTP_201_CREATED)
@@ -509,6 +526,8 @@ class AnalystBroadcastMessageView(APIView):
             _broadcast_chat_notification(conv, msg, [recipient])
             sent += 1
 
+        audit("chat.broadcast_sent", request=request, audience=audience,
+              recipients=len(recipient_ids), sent=sent, length=len(content))
         return Response(
             {
                 "audience": audience,

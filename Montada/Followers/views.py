@@ -11,6 +11,9 @@ from django.db.models.functions import Coalesce, NullIf, TruncMonth
 from django.utils import timezone
 from django.conf import settings as django_settings
 
+from Mainapp.audit import audit
+from Mainapp.user_visibility import listable_users_q
+
 from .models import AnalystReview, Follow, Mute
 
 try:
@@ -48,6 +51,8 @@ User = get_user_model()
 
 def _notify_analyst_follow(analyst_user, follower_user, title, message=None):
     """Create a UserNotification for the analyst when someone follows them."""
+    # Called on every path that establishes a follow (direct, re-follow, accept).
+    audit("follow.established", actor=follower_user, follower=follower_user.pk, followed=analyst_user.pk)
     if UserNotification is None:
         return
     UserNotification.objects.create(
@@ -266,6 +271,7 @@ class FollowRejectView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         follow.reject()
+        audit("follow.rejected", request=request, follower=follow.follower_id, followed=request.user.pk)
         if ActivityLog:
             follower_name = (follow.follower.name or follow.follower.email or str(follow.follower.id))[:255]
             ActivityLog.objects.create(
@@ -305,6 +311,7 @@ class UnfollowView(APIView):
             )
         unfollowed_user = follow.followed
         follow.unfollow()
+        audit("follow.unfollowed", request=request, follower=request.user.pk, followed=unfollowed_user.pk)
         if ActivityLog:
             other_name = (unfollowed_user.name or unfollowed_user.email or str(unfollowed_user.id))[:255]
             ActivityLog.objects.create(
@@ -344,6 +351,7 @@ class BlockUserView(APIView):
         )
         if not created:
             follow.block()
+        audit("follow.blocked_user", request=request, blocker=request.user.pk, blocked=target.pk)
         if ActivityLog:
             target_name = (target.name or target.email or str(target.id))[:255]
             ActivityLog.objects.create(
@@ -381,6 +389,7 @@ class UnblockUserView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         follow.delete()
+        audit("follow.unblocked_user", request=request, blocker=request.user.pk, unblocked=user_id)
         return Response({"message": "User unblocked."}, status=status.HTTP_200_OK)
 
 
@@ -403,6 +412,8 @@ class MuteUserView(APIView):
             )
         target = get_object_or_404(User, id=user_id)
         mute, created = Mute.objects.get_or_create(muter=request.user, muted=target)
+        if created:
+            audit("follow.muted", request=request, muter=request.user.pk, muted=target.pk)
         return Response(
             {"message": "User muted." if created else "User was already muted.", "mute": MuteSerializer(mute).data},
             status=status.HTTP_200_OK,
@@ -424,6 +435,7 @@ class UnmuteUserView(APIView):
                 {"error": "User is not muted."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        audit("follow.unmuted", request=request, muter=request.user.pk, unmuted=user_id)
         return Response({"message": "User unmuted."}, status=status.HTTP_200_OK)
 
 
@@ -442,7 +454,7 @@ def _base_followers_queryset(user):
         followed=user,
         status=Follow.Status.ACCEPTED,
         is_active=True,
-    )
+    ).filter(listable_users_q("follower__"))
 
 
 def _premium_followers_filter(now):
@@ -534,7 +546,7 @@ class FollowingListView(APIView):
             follower=request.user,
             status=Follow.Status.ACCEPTED,
             is_active=True,
-        ).select_related("followed").order_by("-accepted_at")
+        ).filter(listable_users_q("followed__")).select_related("followed").order_by("-accepted_at")
         users = [f.followed for f in qs]
         return Response({
             "count": len(users),
@@ -550,7 +562,7 @@ class PendingReceivedListView(APIView):
         qs = Follow.objects.filter(
             followed=request.user,
             status=Follow.Status.PENDING,
-        ).select_related("follower").order_by("-requested_at")
+        ).filter(listable_users_q("follower__")).select_related("follower").order_by("-requested_at")
         return Response({
             "count": qs.count(),
             "pending_requests": FollowSerializer(qs, many=True).data,
@@ -565,7 +577,7 @@ class PendingSentListView(APIView):
         qs = Follow.objects.filter(
             follower=request.user,
             status=Follow.Status.PENDING,
-        ).select_related("followed").order_by("-requested_at")
+        ).filter(listable_users_q("followed__")).select_related("followed").order_by("-requested_at")
         return Response({
             "count": qs.count(),
             "pending_sent": FollowSerializer(qs, many=True).data,
@@ -577,7 +589,12 @@ class MutedListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        qs = Mute.objects.filter(muter=request.user).select_related("muted").order_by("-muted_at")
+        qs = (
+            Mute.objects.filter(muter=request.user)
+            .filter(listable_users_q("muted__"))
+            .select_related("muted")
+            .order_by("-muted_at")
+        )
         users = [m.muted for m in qs]
         return Response({
             "count": len(users),
@@ -612,6 +629,7 @@ class AnalystsListView(APIView):
                 status=Follow.Status.ACCEPTED,
                 is_active=True,
             )
+            .filter(listable_users_q("follower__"))
             .values("followed_id")
             .annotate(c=Count("id"))
             .values("c")
@@ -636,7 +654,7 @@ class AnalystsListView(APIView):
                 posted_signals__is_loss=True,
             )
             qs = (
-                User.objects.filter(user_type="analyst", is_active=True)
+                User.objects.filter(listable_users_q(), user_type="analyst")
                 .annotate(
                     followers_count=Coalesce(Subquery(followers_subq), 0),
                     signals_count=Coalesce(Subquery(signals_subq), 0),
@@ -656,7 +674,7 @@ class AnalystsListView(APIView):
             )
         else:
             qs = (
-                User.objects.filter(user_type="analyst", is_active=True)
+                User.objects.filter(listable_users_q(), user_type="analyst")
                 .annotate(
                     followers_count=Coalesce(Subquery(followers_subq), 0),
                     signals_count=Count(
@@ -767,21 +785,25 @@ class CountsView(APIView):
             followed=target,
             status=Follow.Status.ACCEPTED,
             is_active=True,
-        ).count()
+        ).filter(listable_users_q("follower__")).count()
         following_count = Follow.objects.filter(
             follower=target,
             status=Follow.Status.ACCEPTED,
             is_active=True,
-        ).count()
+        ).filter(listable_users_q("followed__")).count()
         pending_received_count = Follow.objects.filter(
             followed=target,
             status=Follow.Status.PENDING,
-        ).count()
+        ).filter(listable_users_q("follower__")).count()
         pending_sent_count = Follow.objects.filter(
             follower=target,
             status=Follow.Status.PENDING,
-        ).count()
-        muted_count = Mute.objects.filter(muter=target).count() if target == request.user else 0
+        ).filter(listable_users_q("followed__")).count()
+        muted_count = (
+            Mute.objects.filter(muter=target).filter(listable_users_q("muted__")).count()
+            if target == request.user
+            else 0
+        )
 
         return Response({
             "followers_count": followers_count,
@@ -899,7 +921,7 @@ class AnalystPublicProfileView(APIView):
         User = get_user_model()
 
         analyst = get_object_or_404(
-            User, id=analyst_id, user_type="analyst", is_active=True
+            User.objects.filter(listable_users_q()), id=analyst_id, user_type="analyst"
         )
 
         if users_are_blocked(request.user, analyst):
@@ -965,7 +987,7 @@ class AnalystPublicProfileView(APIView):
             followed=analyst,
             status=Follow.Status.ACCEPTED,
             is_active=True,
-        ).count()
+        ).filter(listable_users_q("follower__")).count()
 
         # ── signals by asset class ────────────────────────────────────────────
         by_asset = list(
@@ -1239,6 +1261,8 @@ class AnalystReviewSubmitView(APIView):
             },
         )
 
+        audit("review.submitted" if created else "review.updated", request=request,
+              review=review.pk, analyst=analyst.pk, rating=data["rating"], is_public=review.is_public)
         out = AnalystReviewReadSerializer(review)
         return Response(
             {

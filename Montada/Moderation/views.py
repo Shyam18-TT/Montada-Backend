@@ -8,6 +8,7 @@ from rest_framework import generics, permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from Mainapp.audit import audit
 from Mainapp.emails import send_templated_email
 from .models import ModerationReport, UserBlock
 from .serializers import BlockedUserSerializer, ModerationReportSerializer, UserBlockSerializer
@@ -63,6 +64,9 @@ class ModerationReportCreateView(APIView):
         )
         serializer.is_valid(raise_exception=True)
         report = serializer.save()
+        audit("moderation.report_submitted", request=request, report=report.pk,
+              reported_user=report.reported_user_id, content_type=report.content_type,
+              content_id=report.content_id, reason=report.reason)
 
         _send_moderation_report_email(report)
 
@@ -97,6 +101,8 @@ class UserBlockCreateView(APIView):
             blocker=request.user,
             blocked=blocked_user,
         )
+        if created:
+            audit("moderation.user_blocked", request=request, blocker=request.user.pk, blocked=blocked_user.pk)
 
         return Response(
             UserBlockSerializer(block).data,
@@ -131,4 +137,5 @@ class UserUnblockView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
+        audit("moderation.user_unblocked", request=request, blocker=request.user.pk, unblocked=blocked_user_id)
         return Response(status=status.HTTP_204_NO_CONTENT)

@@ -2,7 +2,7 @@
 Account status used by the admin user lists (traders and analysts).
 
 Each user has exactly one status, checked in this order:
-    inactive  - account deleted (soft-deleted) by the user or an admin
+    inactive  - account deleted (soft-deleted) by the user or an admin; shown as "Deleted"
     suspended - blocked by an admin (is_active=False)
     pending   - email not yet verified via OTP
     active    - everything else
@@ -20,8 +20,11 @@ USER_STATUS_CHOICES = (
     (ACTIVE, "Active"),
     (PENDING, "Pending"),
     (SUSPENDED, "Suspended"),
-    (INACTIVE, "Inactive"),
+    (INACTIVE, "Deleted"),
 )
+
+# ``?status=deleted`` is accepted as a clearer spelling of ``inactive``.
+STATUS_ALIASES = {"deleted": INACTIVE}
 
 STATUS_FILTERS = {
     INACTIVE: Q(is_soft_deleted=True),
@@ -33,7 +36,8 @@ STATUS_FILTERS = {
 
 def filter_users_by_status(qs, status_param):
     """Apply ?status=<value>; unknown or empty values leave the queryset unfiltered."""
-    condition = STATUS_FILTERS.get((status_param or "").strip().lower())
+    key = (status_param or "").strip().lower()
+    condition = STATUS_FILTERS.get(STATUS_ALIASES.get(key, key))
     return qs.filter(condition) if condition is not None else qs
 
 

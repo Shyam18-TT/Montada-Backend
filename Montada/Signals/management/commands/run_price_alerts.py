@@ -396,6 +396,9 @@ def _close_signal_and_notify(signal, hit_type, current_price):
     signal.is_loss = is_loss
     signal.save(update_fields=["status", "is_win", "is_loss", "updated_at"])
     print("[CHECK] Step 4a: Signal closed in DB (status=CLOSED, is_win=%s, is_loss=%s)." % (is_win, is_loss))
+    from Mainapp.audit import audit
+    audit("signal.auto_closed", actor="system", signal=signal.pk, analyst=signal.analyst_id,
+          hit=hit_type, symbol=symbol, price=current_price, is_win=is_win, is_loss=is_loss)
 
     title = f"{label} reached – {symbol}"
     message = (
@@ -467,6 +470,9 @@ def _trigger_user_price_alert(alert, current_price):
     alert.is_triggered = True
     alert.triggered_at = now
     alert.save(update_fields=["is_triggered", "triggered_at", "updated_at"])
+    from Mainapp.audit import audit
+    audit("price_alert.triggered", actor="system", alert=alert.pk, user=alert.user_id, symbol=symbol,
+          condition=cond, price=current_price, effective_target=effective)
 
     title = f"Price alert – {symbol}"
     message = f"{symbol} reached your target: price is {current_price} ({cond} {target_desc})."
