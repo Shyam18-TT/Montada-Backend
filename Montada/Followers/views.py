@@ -1,3 +1,5 @@
+import logging
+
 from rest_framework import status, generics
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -47,21 +49,51 @@ from .serializers import (
 )
 
 User = get_user_model()
+logger = logging.getLogger(__name__)
 
 
 def _notify_analyst_follow(analyst_user, follower_user, title, message=None):
-    """Create a UserNotification for the analyst when someone follows them."""
+    """Notify the analyst (in-app row + FCM push) when someone follows them."""
     # Called on every path that establishes a follow (direct, re-follow, accept).
     audit("follow.established", actor=follower_user, follower=follower_user.pk, followed=analyst_user.pk)
-    if UserNotification is None:
-        return
-    UserNotification.objects.create(
-        user=analyst_user,
-        title=title,
-        message=message or title,
-        notification_type="SUCCESS",
-        category="FOLLOWER",
-    )
+    body = message or title
+    if UserNotification is not None:
+        UserNotification.objects.create(
+            user=analyst_user,
+            title=title,
+            message=body,
+            notification_type="SUCCESS",
+            category="FOLLOWER",
+        )
+    _push_analyst_follow(analyst_user, follower_user, title, body)
+
+
+def _push_analyst_follow(analyst_user, follower_user, title, body):
+    """
+    FCM push for a new follower. The in-app row above never reached the device on its own:
+    nothing else sends a push for it. Queued on the push worker so the follow request is not
+    held up by FCM, and any failure is logged without failing the follow.
+    """
+    try:
+        from firebase import send_push_to_users_in_background
+
+        send_push_to_users_in_background(
+            users=[analyst_user],
+            title=title,
+            body=body,
+            data={
+                "type": "new_follower",
+                "follower_id": str(follower_user.pk),
+                # Lets firebase.py skip the push if the analyst has blocked this follower.
+                "source_user_id": str(follower_user.pk),
+            },
+        )
+    except Exception:
+        logger.exception(
+            "Follow push failed to queue. analyst=%s follower=%s", analyst_user.pk, follower_user.pk,
+        )
+        audit("follow.push_queue_failed", actor=follower_user, level=logging.ERROR,
+              follower=follower_user.pk, followed=analyst_user.pk)
 
 
 # ---------- Follow request / accept / reject / unfollow / block ----------
