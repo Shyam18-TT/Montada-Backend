@@ -6,7 +6,9 @@ chooses a mode:
 
     sound  - push plays a sound
     silent - push is delivered without sound
-    off    - no push (default: users opt in from settings)
+    off    - no push (users opt out from settings)
+
+Every category defaults to "sound" for every user, existing and new.
 
 In-app notifications are not affected: every user always gets them.
 
@@ -26,7 +28,11 @@ SOUND = "sound"
 SILENT = "silent"
 OFF = "off"
 MODES = (SOUND, SILENT, OFF)
-DEFAULT_MODE = OFF
+# A missing NotificationPreference row means this mode, so changing it changes the
+# behaviour of every user without a stored choice. Rows saved while the default was OFF
+# only ever hold "sound"/"silent" (an "off" choice was stored as no row); clear them with
+# `manage.py reset_notification_preferences` when changing the default.
+DEFAULT_MODE = SOUND
 
 
 class Category:

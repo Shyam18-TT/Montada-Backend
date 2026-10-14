@@ -178,12 +178,14 @@ class NotificationPreferenceTests(TestCase):
     def _modes(self, response):
         return {item["category"]: item["mode"] for item in response.data["preferences"]}
 
-    def test_defaults_to_off_and_hides_analyst_only_categories_from_traders(self):
+    def test_defaults_to_sound_and_hides_analyst_only_categories_from_traders(self):
         response = self.client.get(self.url)
         self.assertEqual(response.status_code, 200)
         modes = self._modes(response)
-        self.assertEqual(set(modes.values()), {"off"})
-        self.assertFalse(any(item["enabled"] for item in response.data["preferences"]))
+        self.assertEqual(set(modes.values()), {"sound"})
+        self.assertTrue(all(
+            item["enabled"] and item["sound"] for item in response.data["preferences"]
+        ))
         self.assertIn("NEWS", modes)
         self.assertNotIn("MY_SIGNAL_ACTIVITY", modes)
         self.assertEqual(response.data["modes"], ["sound", "silent", "off"])
@@ -194,7 +196,7 @@ class NotificationPreferenceTests(TestCase):
         )
         self.assertEqual(response.status_code, 200)
         modes = self._modes(response)
-        self.assertEqual((modes["NEWS"], modes["MESSAGES"], modes["SYMBOL_MOVES"]), ("silent", "off", "off"))
+        self.assertEqual((modes["NEWS"], modes["MESSAGES"], modes["SYMBOL_MOVES"]), ("silent", "off", "sound"))
 
         response = self.client.patch(
             self.url,
@@ -229,8 +231,9 @@ class NotificationPreferenceTests(TestCase):
         users = [self.user, quiet, muted]
 
         self.assertEqual(split_by_sound(users, Category.NEWS), ([self.user], [quiet]))
-        # Nobody enabled messages, and push is off by default.
-        self.assertEqual(split_by_sound(users, Category.MESSAGES), ([], []))
+        # Nobody changed messages, so everyone gets it with sound (the default).
+        self.assertEqual(split_by_sound(users, Category.MESSAGES), (users, []))
+        self.assertEqual(set(User.objects.filter(enabled_users_q(Category.MESSAGES))), set(users))
         self.assertEqual(
             set(User.objects.filter(enabled_users_q(Category.NEWS))), {self.user, quiet},
         )
@@ -251,9 +254,9 @@ class NotificationPreferenceTests(TestCase):
         muted = User.objects.create_user(email="m2@example.com", username="m2@example.com", password="x")
         for user, token in ((self.user, "tok-loud"), (quiet, "tok-quiet"), (muted, "tok-muted")):
             DeviceToken.objects.create(user=user, fcm_token=token, device_id=token)
-        save_user_modes(self.user, {Category.NEWS: "sound"})
+        # self.user keeps the default (sound); quiet and muted opted down.
         save_user_modes(quiet, {Category.NEWS: "silent"})
-        # muted never enabled news, so it stays off by default.
+        save_user_modes(muted, {Category.NEWS: "off"})
 
         calls = []
 
@@ -269,6 +272,24 @@ class NotificationPreferenceTests(TestCase):
 
         self.assertEqual(calls, [(["tok-loud"], True, "NEWS"), (["tok-quiet"], False, "NEWS")])
         self.assertEqual(result["success_count"], 2)
+
+    def test_reset_command_returns_everyone_to_sound(self):
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        from .notification_preferences import Category, get_user_modes, save_user_modes
+
+        other = User.objects.create_user(email="o@example.com", username="o@example.com", password="x")
+        save_user_modes(self.user, {Category.NEWS: "silent", Category.MESSAGES: "off"})
+        save_user_modes(other, {Category.NEWS: "silent"})
+
+        call_command("reset_notification_preferences", stdout=StringIO())  # dry run
+        self.assertEqual(self.user.notification_preferences.count(), 2)
+
+        call_command("reset_notification_preferences", "--apply", stdout=StringIO())
+        self.assertEqual(set(get_user_modes(self.user).values()), {"sound"})
+        self.assertEqual(set(get_user_modes(other).values()), {"sound"})
 
     def test_silent_push_uses_silent_channel_and_no_ios_sound(self):
         import firebase

@@ -363,7 +363,7 @@ class UserNotification(models.Model):
 class NotificationPreference(models.Model):
     """
     A user's push choice for one notification category (see Mainapp.notification_preferences).
-    Only categories the user changed have a row; a missing row means the default (off).
+    Only categories the user changed have a row; a missing row means the default (sound).
     """
 
     class Mode(models.TextChoices):
