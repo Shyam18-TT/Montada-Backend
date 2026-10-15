@@ -343,8 +343,15 @@ def logout_view(request):
     # Done before the refresh-token check: the user is already authenticated, and a
     # stale refresh token must not leave the device subscribed.
     device_id = str(request.data.get('device_id') or '').strip()
+    # Optional fallback for clients that don't send device_id: unregister by FCM token.
+    fcm_token = str(request.data.get('fcm_token') or request.data.get('token') or '').strip()
+    device_filter = Q()
     if device_id:
-        DeviceToken.objects.filter(user=request.user, device_id=device_id).delete()
+        device_filter |= Q(device_id=device_id)
+    if fcm_token:
+        device_filter |= Q(fcm_token=fcm_token)
+    if device_filter:
+        DeviceToken.objects.filter(user=request.user).filter(device_filter).delete()
 
     try:
         refresh_token = request.data.get('refresh_token')
