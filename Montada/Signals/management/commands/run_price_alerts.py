@@ -445,6 +445,21 @@ def _close_signal_and_notify(signal, hit_type, current_price):
     logger.info("Signal %s %s hit for %s at %s – analyst notified", signal.id, hit_type, symbol, current_price)
 
 
+_PUSH_MAX_ATTEMPTS = 3
+_push_attempts = {}  # alert pk -> failed push attempts so far (this worker process)
+
+
+def _format_price(value):
+    """Readable price for notification text: no float noise, at most 5 decimals, min 2."""
+    try:
+        text = format(Decimal(str(value)).quantize(Decimal("0.00001")), "f")
+    except Exception:
+        return str(value)
+    whole, _, frac = text.partition(".")
+    frac = frac.rstrip("0").ljust(2, "0")
+    return "%s.%s" % (whole, frac)
+
+
 def _trigger_user_price_alert(alert, current_price):
     """Mark alert as triggered, create UserNotification and send FCM to the user who set the alert."""
     from Mainapp.models import UserNotification
@@ -465,28 +480,12 @@ def _trigger_user_price_alert(alert, current_price):
         target_desc = f"{alert.target_percentage}% {cond} {alert.reference_price}"
     label = alert.label or f"{symbol} {cond} {target_desc}"
 
-    from django.utils import timezone as tz
-    now = tz.now()
-    alert.is_triggered = True
-    alert.triggered_at = now
-    alert.save(update_fields=["is_triggered", "triggered_at", "updated_at"])
-    from Mainapp.audit import audit
-    audit("price_alert.triggered", actor="system", alert=alert.pk, user=alert.user_id, symbol=symbol,
-          condition=cond, price=current_price, effective_target=effective)
-
     title = f"Price alert – {symbol}"
-    message = f"{symbol} reached your target: price is {current_price} ({cond} {target_desc})."
-
-    try:
-        UserNotification.objects.create(
-            user=alert.user,
-            title=title,
-            message=message,
-            notification_type="SUCCESS",
-            category="PRICE_ALERT",
-        )
-    except Exception as e:
-        logger.warning("UserNotification create for price alert failed: %s", e)
+    direction_word = "above" if cond == "above" else "below"
+    message = (
+        f"{symbol} is now {direction_word} your target of {_format_price(effective)}. "
+        f"Current price: {_format_price(current_price)}."
+    )
 
     fcm_data = {
         "type": "user_price_alert",
@@ -501,6 +500,10 @@ def _trigger_user_price_alert(alert, current_price):
     else:
         fcm_data["target_percentage"] = str(alert.target_percentage)
         fcm_data["reference_price"] = str(alert.reference_price)
+    # Push first. A transient FCM failure (every send failed) leaves the alert untriggered so the
+    # next check retries it, up to _PUSH_MAX_ATTEMPTS. No registered devices / user opted out is a
+    # final outcome and not retried.
+    push_failed = False
     try:
         from firebase import send_push_to_users
         push_result = send_push_to_users(
@@ -510,9 +513,39 @@ def _trigger_user_price_alert(alert, current_price):
             data=fcm_data,
         )
         print("[CHECK] PriceAlert %s FCM push to user %s: %s" % (alert.id, alert.user_id, _describe_push_result(push_result)))
+        if isinstance(push_result, dict):
+            push_failed = not push_result.get("success_count", 0) and bool(push_result.get("failure_count", 0))
     except Exception as e:
         logger.warning("FCM push for user price alert failed: %s", e)
         print("[CHECK] PriceAlert %s FCM push FAILED: %s" % (alert.id, e))
+        push_failed = True
+
+    if push_failed:
+        attempts = _push_attempts.get(alert.pk, 0) + 1
+        if attempts < _PUSH_MAX_ATTEMPTS:
+            _push_attempts[alert.pk] = attempts
+            logger.warning("PriceAlert %s push failed (attempt %d/%d); will retry.", alert.id, attempts, _PUSH_MAX_ATTEMPTS)
+            return
+    _push_attempts.pop(alert.pk, None)
+
+    from django.utils import timezone as tz
+    alert.is_triggered = True
+    alert.triggered_at = tz.now()
+    alert.save(update_fields=["is_triggered", "triggered_at", "updated_at"])
+    from Mainapp.audit import audit
+    audit("price_alert.triggered", actor="system", alert=alert.pk, user=alert.user_id, symbol=symbol,
+          condition=cond, price=current_price, effective_target=effective)
+
+    try:
+        UserNotification.objects.create(
+            user=alert.user,
+            title=title,
+            message=message,
+            notification_type="SUCCESS",
+            category="PRICE_ALERT",
+        )
+    except Exception as e:
+        logger.warning("UserNotification create for price alert failed: %s", e)
 
     logger.info("PriceAlert %s triggered for %s at %s – user %s notified", alert.id, symbol, current_price, alert.user_id)
 
@@ -582,6 +615,17 @@ def _ensure_user_alert_activation_state(alert, bid):
         alert.save(update_fields=list(dict.fromkeys(update_fields)))
         logger.info("PriceAlert %s armed at %s (between activation %s and target %s)", alert.id, current_price, activation_price, target)
         return True, current_price, True
+
+    # Market is already past the target in the alert's direction: arm now, otherwise it would wait
+    # for a pull-back to the reference price and the alert would never fire.
+    if target is not None:
+        cond = (alert.condition or "above").lower()
+        if (cond == "above" and current_price >= target) or (cond == "below" and current_price <= target):
+            alert.armed_at = timezone.now()
+            update_fields.extend(["armed_at", "updated_at"])
+            alert.save(update_fields=list(dict.fromkeys(update_fields)))
+            logger.info("PriceAlert %s armed at %s (already past target %s)", alert.id, current_price, target)
+            return True, current_price, True
 
     if watch_direction not in {ENTRY_WATCH_UP, ENTRY_WATCH_DOWN}:
         alert.activation_watch_direction = (
