@@ -144,10 +144,13 @@ def build_data(
     sound: bool = True,
     notification_id: Optional[str] = None,
     preference_category: Optional[str] = None,
+    include_text: bool = False,
 ) -> dict:
     """
     Final FCM ``data`` map: every value a string, always carrying the fields the app reads
-    (type, notification_id, preference_category, title, body, silent, sent_at).
+    (type, notification_id, preference_category, silent, sent_at). ``title`` and ``body`` are
+    only included when ``include_text`` is True: the notification block already carries them,
+    and the released app draws a duplicate local notification when it finds them in ``data``.
     Producer-supplied keys are kept as given.
     """
     out = {str(k): "" if v is None else str(v) for k, v in (data or {}).items()}
@@ -155,8 +158,12 @@ def build_data(
     category = preference_category or out.get("preference_category") or out.get("notification_category") or ""
     if category:
         out["preference_category"] = str(category)
-    out["title"] = str(title or "")
-    out["body"] = str(body or "")
+    if include_text:
+        out["title"] = str(title or "")
+        out["body"] = str(body or "")
+    else:
+        out.pop("title", None)
+        out.pop("body", None)
     out["silent"] = "false" if sound else "true"
     out["sent_at"] = out.get("sent_at") or utc_now_iso()
     out["source"] = "montada-app"

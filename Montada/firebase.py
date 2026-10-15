@@ -73,6 +73,15 @@ _ensure_firebase_app()
 _FCM_MULTICAST_CHUNK = 500  # FCM limit per MulticastMessage
 
 
+def _setting(name: str, default):
+    try:
+        from django.conf import settings
+
+        return getattr(settings, name, default)
+    except Exception:
+        return default
+
+
 def push_enabled() -> bool:
     """Master switch: settings.FCM_PUSH_ENABLED (env FCM_PUSH_ENABLED). Defaults to on if unset."""
     try:
@@ -155,12 +164,19 @@ def _resolve_push_targets(users, preference_category=None):
     skipped: list = []
     seen_devices: set[str] = set()
     seen_tokens: set[str] = set()
+    seen_installs: set[str] = set()
     for token, platform, device_id, user_id, _updated, _created, _pk in rows:
         token = str(token or "").strip()
         if not token or token in seen_tokens:
             continue
         device_key = str(device_id or "").strip().lower() or "token:" + token
         if device_key in seen_devices:
+            continue
+        # An FCM token is "<firebase installation id>:<secret>". Two rows with the same
+        # installation id are the same app install (registered under two device ids), so
+        # pushing to both would show every notification twice on that phone.
+        install_key = token.split(":", 1)[0] if ":" in token else ""
+        if install_key and install_key in seen_installs:
             continue
         mode = modes.get(user_id, prefs.DEFAULT_MODE)
         if mode == prefs.OFF:
@@ -169,6 +185,8 @@ def _resolve_push_targets(users, preference_category=None):
             continue
         seen_devices.add(device_key)
         seen_tokens.add(token)
+        if install_key:
+            seen_installs.add(install_key)
         targets.append(PushTarget(
             token=token,
             platform=platform if platform in ("android", "ios") else "unknown",
@@ -322,6 +340,46 @@ def _send_chunk(chunk: list[str], message_kwargs: dict) -> list:
     return outcome
 
 
+def _claim_key(notification_id: str, token: str) -> str:
+    from Mainapp.models import hash_push_token
+
+    return "push_sent:%s:%s" % (notification_id, hash_push_token(token)[:32])
+
+
+def _claim_devices(notification_id: str, tokens: list[str], ttl_seconds: int):
+    """
+    Atomically claim (notification, device) pairs so the same notification is never sent to the
+    same device twice, whichever process, retry or code path triggers it.
+    Returns (tokens_to_send, claimed_keys). Fails open: if the cache is down everything is sent.
+    """
+    try:
+        from django.core.cache import cache
+
+        to_send, keys = [], []
+        for token in tokens:
+            key = _claim_key(notification_id, token)
+            if cache.add(key, "1", timeout=ttl_seconds):
+                to_send.append(token)
+                keys.append((token, key))
+        return to_send, dict(keys)
+    except Exception:
+        logger.exception("FCM: duplicate-send claim failed; sending without it.")
+        return list(tokens), {}
+
+
+def _release_claims(failed_tokens: list[str], claims: dict) -> None:
+    """A device that did not get the push must be allowed to receive it on a later attempt."""
+    keys = [claims[t] for t in failed_tokens if t in claims]
+    if not keys:
+        return
+    try:
+        from django.core.cache import cache
+
+        cache.delete_many(keys)
+    except Exception:
+        logger.exception("FCM: releasing duplicate-send claims failed.")
+
+
 def _record_outcomes(results: dict, payload: dict, platform: str) -> None:
     """
     Per-token bookkeeping after a send: delivery log, last_success_at / failure_count /
@@ -455,7 +513,10 @@ def _apns_config(payload: dict, data: Optional[dict], sound: bool, image_url, ti
                 # No aps.sound = iOS shows the notification silently.
                 sound=push_contract.ios_sound_for(data, sound=sound),
                 mutable_content=True,
-                content_available=True,
+                # Wakes the app's background handler on iOS even though the system already shows the
+                # notification. Switch off (PUSH_IOS_CONTENT_AVAILABLE=False) if the app draws a
+                # second copy from that handler.
+                content_available=True if _setting("PUSH_IOS_CONTENT_AVAILABLE", True) else None,
                 thread_id=push_contract.thread_id_for(data),
                 custom_data={"interruption-level": "active"},
             )
@@ -472,6 +533,8 @@ def send_push_to_tokens(
     image_url: Optional[str] = None,
     sound: bool = True,
     platform: str = "unknown",
+    notification_id: Optional[str] = None,
+    dedupe: bool = False,
 ) -> dict:
     """
     Send an FCM push notification to a list of device tokens.
@@ -486,6 +549,10 @@ def send_push_to_tokens(
     image_url : optional URL to an image shown in the notification.
     sound     : False delivers the notification silently (silent Android channel, no iOS sound).
     platform  : "android" or "ios" sends only that platform's block; anything else sends both.
+    notification_id : stable id of the event (defaults to data["notification_id"]). It is also the
+                Android tag / iOS collapse-id, so a repeated send replaces the shown notification.
+    dedupe    : when True, a device that already received this notification_id inside its TTL is
+                skipped. Only meaningful for ids that identify an event (e.g. "chat:<message id>").
 
     Transient FCM errors are retried (exponential backoff + jitter, max 3). Dead tokens are
     deleted; payload errors and APNs credential errors never delete a token.
@@ -512,7 +579,32 @@ def send_push_to_tokens(
             "errors": ["Firebase Admin SDK not initialised"] * len(tokens),
         }
 
-    payload = push_contract.build_data(data, title=title, body=body, sound=sound)
+    notification_id = notification_id or (data or {}).get("notification_id") or None
+    claims: dict = {}
+    skipped_duplicates = 0
+    if dedupe and notification_id:
+        before = len(tokens)
+        tokens, claims = _claim_devices(
+            str(notification_id), tokens, max(push_contract.ttl_seconds_for(data), 3600),
+        )
+        skipped_duplicates = before - len(tokens)
+        if skipped_duplicates:
+            logger.info(
+                "FCM: skipped %d device(s) that already received notification %s.",
+                skipped_duplicates, notification_id,
+            )
+        if not tokens:
+            return {
+                "success_count": 0, "failure_count": 0, "failed_tokens": [], "errors": [],
+                "skipped_duplicates": skipped_duplicates,
+            }
+
+    payload = push_contract.build_data(
+        data, title=title, body=body, sound=sound, notification_id=notification_id,
+        # Off by default: with title/body in `data` the released app draws a second, local copy
+        # of the notification the system already shows (confirmed on device, 2026-10-15).
+        include_text=_setting("PUSH_DATA_INCLUDE_TEXT", False),
+    )
     platform = platform if platform in ("android", "ios") else "unknown"
 
     message_kwargs = {
@@ -555,12 +647,14 @@ def send_push_to_tokens(
             "; ".join(errors),
             extra={"fcm_errors": errors, "failed_token_count": len(failed_tokens)},
         )
+    _release_claims(failed_tokens, claims)
     _record_outcomes(results, payload, platform)
     return {
         "success_count": total_success,
         "failure_count": len(failed_tokens),
         "failed_tokens": failed_tokens,
         "errors": errors,
+        "skipped_duplicates": skipped_duplicates,
     }
 
 
@@ -604,8 +698,10 @@ def send_push_to_users(
     data = dict(data or {})
     if category:
         data["notification_category"] = category
-    # One id per event, shared by every device and by the delivery log.
-    data["notification_id"] = str(data.get("notification_id") or push_contract.new_notification_id())
+    # One id per event, shared by every device and by the delivery log. A producer-supplied id
+    # identifies the event itself, so sends are deduplicated per device on it.
+    event_id = str(data.get("notification_id") or "").strip()
+    data["notification_id"] = event_id or push_contract.new_notification_id()
 
     targets, skipped_user_ids = _resolve_push_targets(users, category)
     _log_skipped_preferences(skipped_user_ids, data)
@@ -630,6 +726,7 @@ def send_push_to_users(
                 image_url=image_url,
                 sound=sound,
                 platform=platform,
+                dedupe=bool(event_id),
             )
             result["success_count"] += group_result.get("success_count", 0)
             result["failure_count"] += group_result.get("failure_count", 0)

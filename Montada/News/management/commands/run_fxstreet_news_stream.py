@@ -154,6 +154,10 @@ def _notify_users_about_news(instance, *, event_name):
     redirect_url = getattr(instance, "source_url", None) or None
     data = {
         "type": "news_update",
+        "notification_id": "news:" + _news_claim_key(
+            "url" if getattr(instance, "source_url", None) else "title",
+            getattr(instance, "source_url", None) or _clean_notification_text(getattr(instance, "title", None)),
+        ).rsplit(":", 1)[-1],
         "event": str(event_name or "updated"),
         "news_id": str(getattr(instance, "id", "") or ""),
         "provider_content_id": str(getattr(instance, "provider_content_id", "") or ""),

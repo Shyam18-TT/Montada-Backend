@@ -233,6 +233,8 @@ send_push_to_tokens(tokens, title, body, data={}, image_url=None, sound=True, pl
 - Sends use `send_each_for_multicast`; transient errors retry (max 3, backoff + jitter); dead tokens
   are deleted; payload / APNs-credential errors never delete a token. Every attempt is logged in
   `Mainapp.PushDelivery` (admin: filter by user id, kept 30 days).
+- `data` never carries `title`/`body` (setting `PUSH_DATA_INCLUDE_TEXT`, default off): with them the
+  released app draws a second local copy. `PUSH_IOS_CONTENT_AVAILABLE` (default on) is the other switch.
 - Android ids are the `_v2` / `_silent` channels listed in `push_contract.py`; the only sound is
   `montada_push` (Android) / `montada_push.wav` (iOS); news plays none.
 - Management commands (run as separate system commands on the server, no worker/Celery):

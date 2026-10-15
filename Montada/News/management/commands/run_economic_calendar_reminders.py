@@ -294,6 +294,7 @@ class Command(BaseCommand):
         # Send FCM push notification
         data_payload = {
             "type": "economic_reminder",
+            "notification_id": f"econ_reminder:{event.id}:{reminder.reminder_type}:{reminder.custom_minutes_before or ''}",
             "event_id": str(event.id),
             "event_name": event.event_name,
             "importance": event.importance,
@@ -528,6 +529,7 @@ class Command(BaseCommand):
 
         data_payload = {
             "type": "economic_global_reminder",
+            "notification_id": f"econ_global:{event.id}:{minutes_before}",
             "event_id": str(event.id),
             "event_name": event.event_name,
             "importance": event.importance,
@@ -840,6 +842,7 @@ class Command(BaseCommand):
 
         data_payload = {
             "type": "economic_event",
+            "notification_id": f"econ_event:{event.id}:{'followup' if follow_up else 'release'}",
             "event_id": str(event.id),
             "event_name": event.event_name,
             "importance": event.importance,

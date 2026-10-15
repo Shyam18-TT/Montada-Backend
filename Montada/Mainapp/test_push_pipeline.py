@@ -157,12 +157,15 @@ class MessageShapeTests(TestCase):
         )
         data = encoded["data"]
         self.assertTrue(all(isinstance(v, str) for v in data.values()))
-        for key in ("type", "notification_id", "preference_category", "title", "body", "silent", "sent_at"):
+        for key in ("type", "notification_id", "preference_category", "silent", "sent_at"):
             self.assertIn(key, data)
         self.assertEqual(data["preference_category"], "PRICE_ALERTS")
         self.assertEqual(data["silent"], "false")
         self.assertEqual(data["alert_id"], "7")
-        self.assertEqual(data["title"], "BTCUSD price alert")
+        # The released app draws a second copy when title/body are in data, so they are not sent.
+        self.assertNotIn("title", data)
+        self.assertNotIn("body", data)
+        self.assertEqual(encoded["notification"], {"title": "BTCUSD price alert", "body": "crossed"})
         self.assertNotIn("category", data)  # data.category belongs to the app's own use
 
     def test_platform_blocks(self):
@@ -655,3 +658,105 @@ class CleanupAndToolsTests(TestCase):
         self.assertEqual(first["data"]["type"], "user_price_alert")
         self.assertEqual(first["data"]["silent"], "true")
         self.assertIn("OK", out.getvalue())
+
+
+@override_settings(FCM_PUSH_ENABLED=True)
+class DuplicatePreventionTests(TestCase):
+    def setUp(self):
+        from django.core.cache import cache
+
+        cache.clear()
+        self.user = make_user("dupes@example.com")
+        DeviceToken.objects.create(user=self.user, fcm_token="tok-a", device_id="dev-a", platform="android")
+        DeviceToken.objects.create(user=self.user, fcm_token="tok-b", device_id="dev-b", platform="ios")
+
+    def send(self, data, response=None):
+        with patch("firebase.messaging.send_each_for_multicast", return_value=response or ok_response("m1")) as send_each, \
+                patch("firebase._sleep"):
+            result = firebase.send_push_to_users([self.user], "t", "b", data=data)
+        return result, send_each
+
+    def test_same_event_sent_twice_reaches_each_device_once(self):
+        data = {"type": "chat_message", "notification_id": "chat:42"}
+        first, send_each = self.send(dict(data))
+        self.assertEqual(first["success_count"], 2)
+        self.assertEqual(send_each.call_count, 2)  # one multicast per platform block
+
+        second, send_each = self.send(dict(data))
+        send_each.assert_not_called()
+        self.assertEqual(second["success_count"], 0)
+
+    def test_different_events_are_not_suppressed(self):
+        self.send({"type": "chat_message", "notification_id": "chat:1"})
+        _result, send_each = self.send({"type": "chat_message", "notification_id": "chat:2"})
+        self.assertEqual(send_each.call_count, 2)
+
+    def test_producer_without_event_id_is_never_suppressed(self):
+        self.send({"type": "signal_alert"})
+        _result, send_each = self.send({"type": "signal_alert"})
+        self.assertEqual(send_each.call_count, 2)
+
+    def test_failed_device_can_receive_the_event_later(self):
+        data = {"type": "chat_message", "notification_id": "chat:9"}
+        failing = multicast_response(failed(fb_exceptions.UnavailableError("503")))
+        with patch("firebase._sleep"):
+            self.send(dict(data), response=failing)
+        _result, send_each = self.send(dict(data))
+        self.assertGreaterEqual(send_each.call_count, 1)  # claims of the failed sends were released
+
+    def test_notification_id_is_the_android_tag_and_ios_collapse_id(self):
+        _result, send_each = self.send({"type": "chat_message", "notification_id": "chat:77"})
+        for call in send_each.call_args_list:
+            encoded = encode(call.args[0])
+            self.assertEqual(encoded["data"]["notification_id"], "chat:77")
+            if "android" in encoded:
+                self.assertEqual(encoded["android"]["notification"]["tag"], "chat:77")
+            if "apns" in encoded:
+                self.assertEqual(encoded["apns"]["headers"]["apns-collapse-id"], "chat:77")
+
+    def test_one_app_install_registered_under_two_device_ids_gets_one_push(self):
+        DeviceToken.objects.all().delete()
+        # Same Firebase installation id (prefix), two registrations: one phone.
+        DeviceToken.objects.create(user=self.user, fcm_token="FID1234567890:secret-old", device_id="id-old")
+        DeviceToken.objects.create(user=self.user, fcm_token="FID1234567890:secret-new", device_id="id-new")
+        DeviceToken.objects.create(user=self.user, fcm_token="OTHERFID:secret", device_id="id-other")
+        targets = firebase.get_push_targets_for_users([self.user])
+        self.assertEqual(len(targets), 2)
+        self.assertEqual(
+            sorted(t.token.split(":")[0] for t in targets), ["FID1234567890", "OTHERFID"],
+        )
+
+    def test_producers_use_a_stable_id_per_event(self):
+        from chat.views import _send_chat_push
+
+        conversation = SimpleNamespace(id=5)
+        message = SimpleNamespace(id=42, sender=None, content="hello")
+        sent = []
+        with patch("firebase.send_push_to_users_in_background", side_effect=lambda **kw: sent.append(kw)):
+            _send_chat_push(conversation, message, [self.user])
+            _send_chat_push(conversation, message, [self.user])
+        self.assertEqual([kw["data"]["notification_id"] for kw in sent], ["chat:42", "chat:42"])
+
+
+class PayloadSwitchTests(TestCase):
+    def test_content_available_can_be_switched_off(self):
+        with override_settings(PUSH_IOS_CONTENT_AVAILABLE=False):
+            encoded = send_and_encode({"type": "chat_message"})
+        self.assertNotIn("content-available", encoded["apns"]["payload"]["aps"])
+        self.assertNotIn("title", encoded["data"])
+        self.assertNotIn("body", encoded["data"])
+        self.assertEqual(encoded["notification"], {"title": "Title", "body": "Body"})  # still displayed
+        self.assertEqual(encoded["apns"]["payload"]["aps"]["alert"], {"title": "Title", "body": "Body"})
+        self.assertIn("notification_id", encoded["data"])
+
+    def test_data_text_can_be_switched_back_on(self):
+        with override_settings(PUSH_DATA_INCLUDE_TEXT=True):
+            encoded = send_and_encode({"type": "chat_message"})
+        self.assertEqual(encoded["data"]["title"], "Title")
+        self.assertEqual(encoded["data"]["body"], "Body")
+
+    def test_defaults_never_put_the_text_in_data(self):
+        encoded = send_and_encode({"type": "chat_message"})
+        self.assertEqual(encoded["apns"]["payload"]["aps"]["content-available"], 1)
+        self.assertNotIn("title", encoded["data"])
+        self.assertNotIn("body", encoded["data"])

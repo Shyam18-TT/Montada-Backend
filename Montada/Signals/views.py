@@ -195,6 +195,7 @@ def _notify_analyst_signal_applied(applied):
     )
     data_payload = {
         "type": "signal_applied",
+        "notification_id": f"signal_applied:{applied.id}",
         "signal_id": str(signal.id),
         "applied_signal_id": str(applied.id),
         "trader_id": str(trader.id),
@@ -231,6 +232,7 @@ def _notify_signal_published(signal, *, old_status=None):
     )
     data_payload = {
         "type": "signal_published",
+        "notification_id": f"signal_published:{signal.id}",
         "signal_id": str(signal.id),
         "analyst_id": str(signal.analyst_id),
         "symbol": symbol,
@@ -281,6 +283,7 @@ def _notify_signal_closed(signal, *, old_status=None):
     )
     data_payload = {
         "type": "signal_closed",
+        "notification_id": f"signal_closed:{signal.id}",
         "signal_id": str(signal.id),
         "analyst_id": str(signal.analyst_id),
         "symbol": symbol,

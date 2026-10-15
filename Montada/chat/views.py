@@ -145,6 +145,8 @@ def _send_chat_push(conversation, message, recipients):
         # sender_id lets firebase.py skip recipients who blocked the sender.
         data = {
             "type": "chat_message",
+            # Same message => same id: a repeated send collapses instead of showing twice.
+            "notification_id": f"chat:{message.id}",
             "conversation_id": str(conversation.id),
             "message_id": str(message.id),
             "sender_id": str(getattr(sender, "id", "")),
