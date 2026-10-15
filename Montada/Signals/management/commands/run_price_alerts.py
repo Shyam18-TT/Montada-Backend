@@ -445,10 +445,6 @@ def _close_signal_and_notify(signal, hit_type, current_price):
     logger.info("Signal %s %s hit for %s at %s – analyst notified", signal.id, hit_type, symbol, current_price)
 
 
-_PUSH_MAX_ATTEMPTS = 3
-_push_attempts = {}  # alert pk -> failed push attempts so far (this worker process)
-
-
 def _format_price(value):
     """Readable price for notification text: no float noise, at most 5 decimals, min 2."""
     try:
@@ -460,8 +456,33 @@ def _format_price(value):
     return "%s.%s" % (whole, frac)
 
 
+def _send_user_price_alert_push(alert, title, message, fcm_data):
+    """Push for an alert whose inbox row already exists. Transient FCM errors are retried inside."""
+    try:
+        from firebase import send_push_to_users
+
+        push_result = send_push_to_users(
+            users=[alert.user],
+            title=title,
+            body=message,
+            data=fcm_data,
+        )
+        print("[CHECK] PriceAlert %s FCM push to user %s: %s" % (alert.id, alert.user_id, _describe_push_result(push_result)))
+    except Exception as e:
+        logger.exception("FCM push for user price alert %s failed: %s", alert.id, e)
+        print("[CHECK] PriceAlert %s FCM push FAILED: %s" % (alert.id, e))
+
+
 def _trigger_user_price_alert(alert, current_price):
-    """Mark alert as triggered, create UserNotification and send FCM to the user who set the alert."""
+    """
+    Trigger a user price alert.
+
+    Order matters: the in-app inbox row is created and the alert is marked triggered in one
+    transaction (so a failure leaves the alert armed and it is retried on the next check);
+    the push is sent after that commit. A failed push therefore never loses the alert, and a
+    retry never duplicates the inbox row.
+    """
+    from django.db import transaction
     from Mainapp.models import UserNotification
 
     alert.refresh_from_db()
@@ -474,78 +495,53 @@ def _trigger_user_price_alert(alert, current_price):
         return
     symbol = alert.instrument.symbol if alert.instrument else "Unknown"
     cond = (alert.condition or "above").lower()
-    if alert.target_price is not None:
-        target_desc = str(alert.target_price)
-    else:
-        target_desc = f"{alert.target_percentage}% {cond} {alert.reference_price}"
-    label = alert.label or f"{symbol} {cond} {target_desc}"
+    target_text = _format_price(effective)
+    price_text = _format_price(current_price)
 
-    title = f"Price alert – {symbol}"
-    direction_word = "above" if cond == "above" else "below"
-    message = (
-        f"{symbol} is now {direction_word} your target of {_format_price(effective)}. "
-        f"Current price: {_format_price(current_price)}."
-    )
+    title = f"{symbol} price alert"
+    message = f"{symbol} crossed {cond} {target_text} (now {price_text})"
 
-    fcm_data = {
-        "type": "user_price_alert",
-        "alert_id": str(alert.id),
-        "symbol": symbol,
-        "condition": cond,
-        "current_price": str(current_price),
-        "effective_target": str(effective),
-    }
-    if alert.target_price is not None:
-        fcm_data["target_price"] = str(alert.target_price)
-    else:
-        fcm_data["target_percentage"] = str(alert.target_percentage)
-        fcm_data["reference_price"] = str(alert.reference_price)
-    # Push first. A transient FCM failure (every send failed) leaves the alert untriggered so the
-    # next check retries it, up to _PUSH_MAX_ATTEMPTS. No registered devices / user opted out is a
-    # final outcome and not retried.
-    push_failed = False
     try:
-        from firebase import send_push_to_users
-        push_result = send_push_to_users(
-            users=[alert.user],
-            title=title,
-            body=message,
-            data=fcm_data,
-        )
-        print("[CHECK] PriceAlert %s FCM push to user %s: %s" % (alert.id, alert.user_id, _describe_push_result(push_result)))
-        if isinstance(push_result, dict):
-            push_failed = not push_result.get("success_count", 0) and bool(push_result.get("failure_count", 0))
+        with transaction.atomic():
+            inbox_row = UserNotification.objects.create(
+                user=alert.user,
+                title=title,
+                message=message,
+                notification_type="SUCCESS",
+                category="PRICE_ALERT",
+            )
+            alert.is_triggered = True
+            alert.triggered_at = timezone.now()
+            alert.save(update_fields=["is_triggered", "triggered_at", "updated_at"])
     except Exception as e:
-        logger.warning("FCM push for user price alert failed: %s", e)
-        print("[CHECK] PriceAlert %s FCM push FAILED: %s" % (alert.id, e))
-        push_failed = True
+        # Nothing was committed: the alert stays armed and fires again on the next check.
+        alert.is_triggered = False
+        alert.triggered_at = None
+        logger.exception("PriceAlert %s could not be recorded (will retry): %s", alert.id, e)
+        print("[CHECK] PriceAlert %s NOT triggered, inbox row failed: %s" % (alert.id, e))
+        return
 
-    if push_failed:
-        attempts = _push_attempts.get(alert.pk, 0) + 1
-        if attempts < _PUSH_MAX_ATTEMPTS:
-            _push_attempts[alert.pk] = attempts
-            logger.warning("PriceAlert %s push failed (attempt %d/%d); will retry.", alert.id, attempts, _PUSH_MAX_ATTEMPTS)
-            return
-    _push_attempts.pop(alert.pk, None)
-
-    from django.utils import timezone as tz
-    alert.is_triggered = True
-    alert.triggered_at = tz.now()
-    alert.save(update_fields=["is_triggered", "triggered_at", "updated_at"])
     from Mainapp.audit import audit
     audit("price_alert.triggered", actor="system", alert=alert.pk, user=alert.user_id, symbol=symbol,
           condition=cond, price=current_price, effective_target=effective)
 
-    try:
-        UserNotification.objects.create(
-            user=alert.user,
-            title=title,
-            message=message,
-            notification_type="SUCCESS",
-            category="PRICE_ALERT",
-        )
-    except Exception as e:
-        logger.warning("UserNotification create for price alert failed: %s", e)
+    fcm_data = {
+        "type": "user_price_alert",
+        "notification_id": str(inbox_row.pk),
+        "alert_id": str(alert.id),
+        "symbol": symbol,
+        "condition": cond,
+        "current_price": price_text,
+        "target_price": _format_price(alert.target_price if alert.target_price is not None else effective),
+        "effective_target": target_text,
+    }
+    if alert.target_price is None:
+        fcm_data["target_percentage"] = str(alert.target_percentage)
+        fcm_data["reference_price"] = str(alert.reference_price)
+
+    # In the worker (autocommit) this runs immediately; inside a caller's transaction it waits
+    # for the commit.
+    transaction.on_commit(lambda: _send_user_price_alert_push(alert, title, message, fcm_data))
 
     logger.info("PriceAlert %s triggered for %s at %s – user %s notified", alert.id, symbol, current_price, alert.user_id)
 

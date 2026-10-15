@@ -534,6 +534,10 @@ class Command(BaseCommand):
             "currency_code": event.currency_code or "",
             "country": country,
             "minutes_before": str(minutes_before),
+            # Keys the app reads for every reminder type.
+            "reminder_type": "global",
+            "custom_minutes_before": "",
+            "time_remaining": f"{minutes_before} minute{'s' if minutes_before != 1 else ''}",
         }
 
         # Short committed chunks; the FCM call runs outside any transaction so the

@@ -214,18 +214,31 @@ Override via environment variable: `MARKET_NEWS_AND_DATA_FREE_ACCESS=false`.
 
 ## Push Notifications (FCM)
 
-Helper module: `firebase.py`
+Helper module: `firebase.py`. The app-facing contract (channel ids, sounds, `data.type` values, TTLs)
+lives in **one** place: `push_contract.py`. Producers pass `data["type"]`; never hard-code channel ids.
 
 ```python
 from firebase import send_push_to_tokens, send_push_to_users
 
-send_push_to_tokens(tokens, title, body, data={}, image_url=None)
-send_push_to_users(user_queryset, title, body, data={}, image_url=None)
+send_push_to_users(users, title, body, data={"type": "user_price_alert", ...}, image_url=None)
+send_push_to_tokens(tokens, title, body, data={}, image_url=None, sound=True, platform="unknown")
 ```
 
-- Device tokens stored in `Mainapp.DeviceToken` (deduplicated by `device_id`)
-- Multicast chunk size: 500 (FCM limit)
-- Supports Android (`AndroidConfig`) and iOS (`APNsConfig`)
+- Device registrations: `Mainapp.DeviceToken` (one row per physical device; unique `device_id` and
+  `token_hash`; `platform`, `is_active`, `last_seen_at`, `failure_count`...). All writes go through
+  `Mainapp/push_devices.py`. `POST /api/auth/save-fcm-token/` registers, `POST /api/auth/logout/`
+  unregisters (works with an expired access token).
+- One push per physical device (newest `updated_at`); users who turned the category off are skipped,
+  users on "silent" get the `_silent` channel and no sound (`Mainapp/notification_preferences.py`).
+- Sends use `send_each_for_multicast`; transient errors retry (max 3, backoff + jitter); dead tokens
+  are deleted; payload / APNs-credential errors never delete a token. Every attempt is logged in
+  `Mainapp.PushDelivery` (admin: filter by user id, kept 30 days).
+- Android ids are the `_v2` / `_silent` channels listed in `push_contract.py`; the only sound is
+  `montada_push` (Android) / `montada_push.wav` (iOS); news plays none.
+- Management commands (run as separate system commands on the server, no worker/Celery):
+  `python manage.py cleanup_push_devices` (daily: 60-day stale devices, 30-day delivery log) and
+  `python manage.py send_test_push <user_id_or_email> <data.type> [--silent] [--yes]` (internal
+  test accounts only; without `--yes` it just lists the devices).
 - FCM credentials: `credentials/montada-86ba6-firebase-adminsdk-fbsvc-8df57cd800.json`
 
 ---

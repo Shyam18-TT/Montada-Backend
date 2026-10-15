@@ -233,6 +233,10 @@ class ChangePasswordSerializer(serializers.Serializer):
         user = self.context['request'].user
         user.set_password(self.validated_data['new_password'])
         user.save()
+        # A password change signs the account out everywhere: stop pushes to every device.
+        from .push_devices import remove_devices_for_user
+
+        remove_devices_for_user(user, "password_changed")
         return user
 
 

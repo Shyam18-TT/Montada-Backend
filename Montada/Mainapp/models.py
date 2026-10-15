@@ -396,12 +396,119 @@ class NotificationPreference(models.Model):
 
 # firebase token model
 
+def hash_push_token(token):
+    """sha256 hex of an FCM token: unique-indexable (MSSQL cannot index a text column)."""
+    import hashlib
+
+    return hashlib.sha256(str(token or "").strip().encode("utf-8")).hexdigest()
+
+
 class DeviceToken(models.Model):
+    """
+    One signed-in device of one account (an FCM registration).
+
+    - A physical device belongs to at most one account at a time (unique ``device_id``).
+    - A token belongs to exactly one row (unique ``token_hash``).
+    - An account can have many devices; every active one receives every push.
+    """
+
+    PLATFORM_ANDROID = "android"
+    PLATFORM_IOS = "ios"
+    PLATFORM_UNKNOWN = "unknown"
+    PLATFORM_CHOICES = [
+        (PLATFORM_ANDROID, "Android"),
+        (PLATFORM_IOS, "iOS"),
+        (PLATFORM_UNKNOWN, "Unknown"),
+    ]
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(User, on_delete=models.CASCADE)
     fcm_token = models.TextField()
-    device_id = models.TextField(blank=True, null=True)
+    # sha256 of fcm_token; maintained by save(). Carries the unique constraint.
+    token_hash = models.CharField(max_length=64, blank=True, default="")
+    device_id = models.CharField(max_length=191, blank=True, default="")
+    platform = models.CharField(max_length=16, choices=PLATFORM_CHOICES, default=PLATFORM_UNKNOWN)
+    is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)  # token / owner last changed
+    last_seen_at = models.DateTimeField(default=timezone.now)  # last save-fcm-token call
+    last_success_at = models.DateTimeField(null=True, blank=True)
+    failure_count = models.PositiveIntegerField(default=0)
+    last_error = models.CharField(max_length=64, blank=True, default="")
+
+    class Meta:
+        constraints = [
+            # One row per physical device, across ALL users.
+            models.UniqueConstraint(
+                fields=["device_id"],
+                condition=models.Q(device_id__gt=""),
+                name="uniq_push_device_device_id",
+            ),
+            # One token can only ever belong to one row.
+            models.UniqueConstraint(
+                fields=["token_hash"],
+                condition=models.Q(token_hash__gt=""),
+                name="uniq_push_device_token",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["user", "is_active"], name="devicetoken_user_active_idx"),
+        ]
+
+    def save(self, *args, **kwargs):
+        self.device_id = (self.device_id or "").strip()
+        self.fcm_token = (self.fcm_token or "").strip()
+        self.token_hash = hash_push_token(self.fcm_token) if self.fcm_token else ""
+        update_fields = kwargs.get("update_fields")
+        if update_fields is not None:
+            fields = set(update_fields)
+            if "fcm_token" in fields:
+                fields.add("token_hash")
+            if "device_id" in fields or "fcm_token" in fields:
+                fields.add("updated_at")
+            kwargs["update_fields"] = list(fields)
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.user.username} - {self.fcm_token[:20]}"
+
+
+class PushDelivery(models.Model):
+    """
+    One push attempt to one device. Lets support answer "did this notification reach the
+    user's devices?". Kept 30 days (``manage.py cleanup_push_devices``).
+    """
+
+    STATUS_SENT = "sent"
+    STATUS_FAILED = "failed"
+    STATUS_DELETED_TOKEN = "deleted_token"
+    STATUS_SKIPPED_PREF = "skipped_pref"
+    STATUS_CHOICES = [
+        (STATUS_SENT, "Sent"),
+        (STATUS_FAILED, "Failed"),
+        (STATUS_DELETED_TOKEN, "Token deleted"),
+        (STATUS_SKIPPED_PREF, "Skipped (preference off)"),
+    ]
+
+    id = models.BigAutoField(primary_key=True)
+    notification_id = models.CharField(max_length=64, blank=True, default="")
+    # Plain UUID, not a FK: the log must survive and never block user deletion.
+    user_id = models.UUIDField(null=True, blank=True)
+    device_id = models.CharField(max_length=191, blank=True, default="")
+    platform = models.CharField(max_length=16, blank=True, default="")
+    push_type = models.CharField(max_length=64, blank=True, default="")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES)
+    fcm_message_id = models.CharField(max_length=255, blank=True, default="")
+    error_code = models.CharField(max_length=64, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["user_id", "created_at"], name="pushdelivery_user_created_idx"),
+            models.Index(fields=["notification_id"], name="pushdelivery_notification_idx"),
+        ]
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.push_type} {self.status} {self.device_id[:12]}"
+

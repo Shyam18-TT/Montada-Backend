@@ -126,7 +126,6 @@ class DeviceTokenSelectionTests(TestCase):
         old_token = DeviceToken.objects.create(user=user, fcm_token="old-token")
         new_token = DeviceToken.objects.create(user=user, fcm_token="new-token")
         other_token = DeviceToken.objects.create(user=other_user, fcm_token="other-token")
-        DeviceToken.objects.create(user=user, fcm_token="new-token")
 
         tokens = get_push_tokens_for_users([user, other_user])
 
@@ -135,33 +134,17 @@ class DeviceTokenSelectionTests(TestCase):
         self.assertIn(other_token.fcm_token, tokens)
         self.assertEqual(len(tokens), 3)
 
-    def test_get_push_tokens_for_users_deduplicates_shared_device_across_users(self):
-        user1 = User.objects.create_user(
-            email="device1@example.com",
-            username="device1@example.com",
-            password="Testpass123!",
-        )
-        user2 = User.objects.create_user(
-            email="device2@example.com",
-            username="device2@example.com",
-            password="Testpass123!",
-        )
+    def test_one_physical_device_can_only_belong_to_one_row(self):
+        from django.db import IntegrityError, transaction
 
-        DeviceToken.objects.create(
-            user=user1,
-            fcm_token="first-token",
-            device_id="shared-device-1",
-        )
-        DeviceToken.objects.create(
-            user=user2,
-            fcm_token="second-token",
-            device_id="shared-device-1",
-        )
+        user1 = User.objects.create_user(email="device1@example.com", username="device1@example.com", password="x")
+        user2 = User.objects.create_user(email="device2@example.com", username="device2@example.com", password="x")
+        DeviceToken.objects.create(user=user1, fcm_token="first-token", device_id="shared-device-1")
 
-        tokens = get_push_tokens_for_users([user1, user2])
-
-        self.assertEqual(len(tokens), 1)
-        self.assertIn(tokens[0], ["first-token", "second-token"])
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            DeviceToken.objects.create(user=user2, fcm_token="second-token", device_id="shared-device-1")
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            DeviceToken.objects.create(user=user2, fcm_token="first-token", device_id="other-device")
 
 
 class NotificationPreferenceTests(TestCase):

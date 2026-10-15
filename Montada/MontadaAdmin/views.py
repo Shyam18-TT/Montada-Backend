@@ -259,6 +259,9 @@ class AdminChangeUserPasswordView(APIView):
             )
         user.set_password(new_password)
         user.save(update_fields=["password"])
+        from Mainapp.push_devices import remove_devices_for_user
+
+        remove_devices_for_user(user, "admin_password_change")
         audit("admin.user_password_changed", request=request, target_user=user.pk)
         return Response(
             {"message": "Password updated successfully."},

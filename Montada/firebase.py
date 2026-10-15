@@ -24,12 +24,20 @@ send_push_to_users(
 )
 """
 import logging
+import random
+import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Iterable, Optional
 
 import firebase_admin
-from firebase_admin import credentials, messaging
+from firebase_admin import credentials
+from firebase_admin import exceptions as fb_exceptions
+from firebase_admin import messaging
+
+import push_contract
 
 logger = logging.getLogger(__name__)
 
@@ -87,60 +95,98 @@ def _clean_tokens(tokens: Iterable[str]) -> list[str]:
     return cleaned_tokens
 
 
-def get_push_tokens_for_users(users) -> list[str]:
+@dataclass(frozen=True)
+class PushTarget:
+    """One physical device to push to."""
+
+    token: str
+    platform: str  # "android" | "ios" | "unknown"
+    device_id: str
+    user_id: object
+    mode: str  # "sound" | "silent"
+
+
+_RESOLVE_CHUNK = 1000  # keeps IN (...) lists under SQL Server's 2100-parameter limit
+
+
+def _resolve_push_targets(users, preference_category=None):
     """
-    Resolve all distinct FCM tokens for the given users.
+    (targets, skipped_user_ids) for ``users``.
 
-    Deduplication strategy
-    ----------------------
-    - Rows with a non-null ``device_id``: only the **most recent** token per
-      physical ``device_id`` is kept. This prevents duplicate notifications
-      when the same device is registered under multiple users.
-    - Rows with ``device_id=NULL``: treated as anonymous devices; deduplicated
-      by token string only (legacy behaviour).
-    - Identical token strings that appear more than once are always collapsed
-      to a single send target regardless of device_id.
+    - only active rows of active, non-deleted users
+    - one target per physical device: rows grouped by device_id (case-insensitive), newest
+      ``updated_at`` wins; rows without a device_id are grouped by token
+    - users whose preference for ``preference_category`` is "off" are skipped
     """
-    try:
-        from Mainapp.models import DeviceToken
-    except ImportError:
-        logger.error("DeviceToken model not found – cannot resolve push tokens.")
-        return []
+    from Mainapp import notification_preferences as prefs
+    from Mainapp.models import DeviceToken
 
-    token_rows = (
-        DeviceToken.objects.filter(user__in=users)
-        .exclude(fcm_token__isnull=True)
-        .exclude(fcm_token__exact="")
-        .order_by("device_id", "-created_at", "-id")
-        .values_list("device_id", "fcm_token")
-    )
+    user_ids = []
+    for user in users or []:
+        user_id = getattr(user, "pk", user)
+        if user_id is not None:
+            user_ids.append(user_id)
+    if not user_ids:
+        return [], []
 
-    resolved_tokens: list[str] = []
+    rows = []
+    for start in range(0, len(user_ids), _RESOLVE_CHUNK):
+        rows.extend(
+            DeviceToken.objects.filter(
+                user_id__in=user_ids[start:start + _RESOLVE_CHUNK],
+                is_active=True,
+                user__is_active=True,
+                user__is_soft_deleted=False,
+            )
+            .exclude(fcm_token="")
+            .values_list("fcm_token", "platform", "device_id", "user_id", "updated_at", "created_at", "id")
+        )
+    # Newest first, so the first row seen per device is the one to keep.
+    rows.sort(key=lambda r: (r[4], r[5], str(r[6])), reverse=True)
+
+    modes = {}
+    if preference_category:
+        try:
+            modes = prefs._mode_by_user_id(preference_category)
+        except Exception:
+            logger.exception("FCM: notification preference lookup failed; sending with sound.")
+
+    targets: list[PushTarget] = []
+    skipped: list = []
+    seen_devices: set[str] = set()
     seen_tokens: set[str] = set()
-    seen_device_ids: set[str] = set()  # global across all users — one send per physical device
-
-    for device_id, token in token_rows:
-        normalized = str(token or "").strip()
-        if not normalized or normalized in seen_tokens:
+    for token, platform, device_id, user_id, _updated, _created, _pk in rows:
+        token = str(token or "").strip()
+        if not token or token in seen_tokens:
             continue
+        device_key = str(device_id or "").strip().lower() or "token:" + token
+        if device_key in seen_devices:
+            continue
+        mode = modes.get(user_id, prefs.DEFAULT_MODE)
+        if mode == prefs.OFF:
+            if user_id not in skipped:
+                skipped.append(user_id)
+            continue
+        seen_devices.add(device_key)
+        seen_tokens.add(token)
+        targets.append(PushTarget(
+            token=token,
+            platform=platform if platform in ("android", "ios") else "unknown",
+            device_id=str(device_id or ""),
+            user_id=user_id,
+            mode=mode,
+        ))
+    return targets, skipped
 
-        device_key = str(device_id or "").strip().lower()
-        if device_key:
-            if device_key in seen_device_ids:
-                continue
-            seen_device_ids.add(device_key)
 
-        seen_tokens.add(normalized)
-        resolved_tokens.append(normalized)
+def get_push_targets_for_users(users, preference_category=None) -> list:
+    """One PushTarget per physical device for users who have not turned ``preference_category`` off."""
+    return _resolve_push_targets(users, preference_category)[0]
 
-    logger.debug(
-        "FCM token resolution: %d unique token(s) from %d device_id(s) for %d user(s)",
-        len(resolved_tokens),
-        len(seen_device_ids),
-        # Only count real lists: len() on a queryset would run the user query again.
-        len(users) if isinstance(users, (list, tuple, set)) else "?",
-    )
-    return resolved_tokens
+
+def get_push_tokens_for_users(users) -> list[str]:
+    """Distinct FCM tokens (one per physical device) for ``users``, ignoring preferences."""
+    return [target.token for target in get_push_targets_for_users(users)]
 
 
 def _source_user_id_from_payload(data):
@@ -177,43 +223,57 @@ def _filter_users_who_blocked_source(users, data):
     return filtered_users
 
 
-# Custom notification sound bundled in the mobile app.
-# iOS plays a sound for background/closed-app pushes only when aps.sound is set; the value
-# must include the extension and must never be "default".
-IOS_PUSH_SOUND = "montada_push.wav"
-# Android: no extension. On Android 8+ the channel decides the sound, so the channel_id
-# must be one of the channels the app creates (an unknown id gets a channel with no sound).
-ANDROID_PUSH_SOUND = "montada_push"
-ANDROID_DEFAULT_CHANNEL_ID = "montada_notifications"
-_ANDROID_CHANNEL_BY_TYPE = {
-    "news_update": "montada_news",
-    "economic_reminder": "montada_economic_reminders",
-    "economic_global_reminder": "montada_economic_reminders",
-    "user_price_alert": "montada_price_alerts",
-    "signal_change_threshold": "montada_price_alerts",
-    "signal_published": "montada_trade_ideas",
-    "signal_closed": "montada_trade_ideas",
-    "signal_alert": "montada_trade_ideas",
-    "price_alert": "montada_trade_ideas",  # analyst's own signal hit TP/SL (signal closed)
-    "admin_broadcast": "montada_broadcasts",
-}
-
-
-# Silent variant of every channel: the app must create "<channel>_silent" with no sound,
-# because on Android 8+ only the channel (not the message) decides whether a sound plays.
-ANDROID_SILENT_CHANNEL_SUFFIX = "_silent"
+# Channel ids, sounds and payload shape live in push_contract.py (the app depends on them).
+IOS_PUSH_SOUND = push_contract.IOS_SOUND
+ANDROID_PUSH_SOUND = push_contract.ANDROID_SOUND
+ANDROID_DEFAULT_CHANNEL_ID = push_contract.DEFAULT_CHANNEL
+ANDROID_SILENT_CHANNEL_SUFFIX = push_contract.SILENT_SUFFIX
 
 
 def android_channel_for(data: Optional[dict], sound: bool = True) -> str:
     """Android notification channel for a push, based on its data payload."""
-    data = data or {}
-    push_type = str(data.get("type") or "").strip().lower()
-    if push_type == "economic_event":
-        importance = str(data.get("importance") or "").strip().lower()
-        channel = "montada_economic_high" if importance == "high" else "montada_economic"
-    else:
-        channel = _ANDROID_CHANNEL_BY_TYPE.get(push_type, ANDROID_DEFAULT_CHANNEL_ID)
-    return channel if sound else channel + ANDROID_SILENT_CHANNEL_SUFFIX
+    return push_contract.android_channel_for(data, sound=sound)
+
+
+_MAX_SEND_RETRIES = 3
+_BACKOFF_BASE_SECONDS = 1.0
+_BACKOFF_MAX_SECONDS = 30.0
+_DEACTIVATE_AFTER_FAILURES = 5
+# Module-level so tests can replace it.
+_sleep = time.sleep
+
+_KIND_DEAD = "dead"
+_KIND_TRANSIENT = "transient"
+_KIND_PAYLOAD = "payload"
+_KIND_APNS_AUTH = "apns_auth"
+_KIND_OTHER = "other"
+
+
+def _classify_error(exc) -> str:
+    """
+    What an FCM send error means for the token.
+
+    dead       – the token itself will never work again (delete the row)
+    transient  – FCM / network trouble, retry
+    payload    – our message is wrong (bad key, oversized): the token is fine, never delete
+    apns_auth  – APNs credentials broken: affects every iOS device, never delete
+    """
+    if exc is None:
+        return _KIND_OTHER
+    if isinstance(exc, (messaging.UnregisteredError, messaging.SenderIdMismatchError)):
+        return _KIND_DEAD
+    if isinstance(exc, messaging.ThirdPartyAuthError):
+        return _KIND_APNS_AUTH
+    if isinstance(exc, (messaging.QuotaExceededError, fb_exceptions.UnavailableError, fb_exceptions.InternalError)):
+        return _KIND_TRANSIENT
+    if isinstance(exc, fb_exceptions.InvalidArgumentError):
+        # Malformed token: FCM returns INVALID_ARGUMENT with this exact wording.
+        if "not a valid fcm registration token" in str(exc or "").lower():
+            return _KIND_DEAD
+        return _KIND_PAYLOAD
+    if isinstance(exc, (ConnectionError, TimeoutError, OSError)):
+        return _KIND_TRANSIENT
+    return _KIND_OTHER
 
 
 def _is_dead_token_error(exc) -> bool:
@@ -222,21 +282,186 @@ def _is_dead_token_error(exc) -> bool:
     rotated, or issued for another Firebase project). Payload/quota/server errors are
     not token problems and must not delete anything.
     """
-    if isinstance(exc, (messaging.UnregisteredError, messaging.SenderIdMismatchError)):
-        return True
-    # Malformed token: FCM returns INVALID_ARGUMENT with this exact wording.
-    return "not a valid fcm registration token" in str(exc or "").lower()
+    return _classify_error(exc) == _KIND_DEAD
 
 
-def _remove_dead_tokens(tokens: list[str]) -> None:
+def _error_code(exc) -> str:
+    code = getattr(exc, "code", None)
+    return str(code or type(exc).__name__)[:64]
+
+
+def _retry_delay(attempt: int, exceptions) -> float:
+    """Exponential backoff with jitter, never less than a Retry-After the server asked for."""
+    delay = min(_BACKOFF_MAX_SECONDS, _BACKOFF_BASE_SECONDS * (2 ** attempt)) + random.uniform(0, 0.5)
+    for exc in exceptions:
+        headers = getattr(getattr(exc, "http_response", None), "headers", None) or {}
+        try:
+            delay = max(delay, min(_BACKOFF_MAX_SECONDS, float(headers.get("Retry-After"))))
+        except (TypeError, ValueError):
+            continue
+    return delay
+
+
+def _send_chunk(chunk: list[str], message_kwargs: dict) -> list:
+    """[(token, success, message_id, exception)] for one multicast of up to 500 tokens."""
+    message = messaging.MulticastMessage(tokens=chunk, **message_kwargs)
     try:
-        from Mainapp.models import DeviceToken
+        response = messaging.send_each_for_multicast(message)
+    except Exception as exc:  # the whole call failed (network, auth); every token is affected
+        logger.error("FCM multicast send failed for %d token(s): %s", len(chunk), exc)
+        return [(token, False, None, exc) for token in chunk]
+    outcome = []
+    for token, resp in zip(chunk, response.responses):
+        message_id = getattr(resp, "message_id", None)
+        outcome.append((
+            token,
+            bool(resp.success),
+            message_id if isinstance(message_id, str) else None,
+            None if resp.success else resp.exception,
+        ))
+    return outcome
 
-        deleted, _ = DeviceToken.objects.filter(fcm_token__in=list(set(tokens))).delete()
-        if deleted:
-            logger.info("FCM: removed %d dead device token(s).", deleted)
+
+def _record_outcomes(results: dict, payload: dict, platform: str) -> None:
+    """
+    Per-token bookkeeping after a send: delivery log, last_success_at / failure_count /
+    is_active, and deletion of dead tokens. Best effort; never raises into the sender.
+    """
+    try:
+        from django.db.models import F
+        from django.utils import timezone
+        from Mainapp.models import DeviceToken, PushDelivery, hash_push_token
+
+        now = timezone.now()
+        hashes = {token: hash_push_token(token) for token in results}
+        rows = {
+            row.token_hash: row
+            for row in DeviceToken.objects.filter(token_hash__in=list(hashes.values()))
+        }
+
+        ok_hashes, dead_hashes = [], []
+        transient = {}  # hash -> error code
+        deliveries = []
+        for token, (ok, message_id, exc) in results.items():
+            token_hash = hashes[token]
+            row = rows.get(token_hash)
+            error_code = ""
+            if ok:
+                status = PushDelivery.STATUS_SENT
+                ok_hashes.append(token_hash)
+            else:
+                kind = _classify_error(exc)
+                error_code = _error_code(exc)
+                if kind == _KIND_DEAD:
+                    status = PushDelivery.STATUS_DELETED_TOKEN
+                    dead_hashes.append(token_hash)
+                else:
+                    status = PushDelivery.STATUS_FAILED
+                    if kind == _KIND_TRANSIENT:
+                        transient[token_hash] = error_code
+                    elif kind == _KIND_PAYLOAD:
+                        logger.error(
+                            "FCM rejected the payload (INVALID_ARGUMENT), token kept. type=%s keys=%s error=%s",
+                            payload.get("type"), sorted(payload.keys()), exc,
+                        )
+                    elif kind == _KIND_APNS_AUTH:
+                        logger.error(
+                            "FCM THIRD_PARTY_AUTH_ERROR: APNs credentials are invalid; every iOS push fails. "
+                            "Token kept. Check the APNs auth key in the Firebase console."
+                        )
+            deliveries.append(PushDelivery(
+                notification_id=payload.get("notification_id", ""),
+                user_id=getattr(row, "user_id", None),
+                device_id=getattr(row, "device_id", "") or "",
+                platform=getattr(row, "platform", "") or platform,
+                push_type=str(payload.get("type", ""))[:64],
+                status=status,
+                fcm_message_id=message_id or "",
+                error_code=error_code,
+            ))
+
+        if ok_hashes:
+            DeviceToken.objects.filter(token_hash__in=ok_hashes).update(
+                last_success_at=now, failure_count=0, last_error="",
+            )
+        if transient:
+            DeviceToken.objects.filter(token_hash__in=list(transient)).update(failure_count=F("failure_count") + 1)
+            for token_hash, code in transient.items():
+                DeviceToken.objects.filter(token_hash=token_hash).update(last_error=code)
+            DeviceToken.objects.filter(
+                token_hash__in=list(transient), failure_count__gte=_DEACTIVATE_AFTER_FAILURES,
+            ).update(is_active=False)
+        if dead_hashes:
+            deleted, _ = DeviceToken.objects.filter(token_hash__in=dead_hashes).delete()
+            if deleted:
+                logger.info("FCM: removed %d dead device token(s).", deleted)
+        if deliveries:
+            PushDelivery.objects.bulk_create(deliveries)
     except Exception:
-        logger.exception("FCM: failed to remove dead device tokens.")
+        logger.exception("FCM: recording push outcomes failed.")
+
+
+def _log_skipped_preferences(user_ids, payload: dict) -> None:
+    if not user_ids:
+        return
+    try:
+        from Mainapp.models import PushDelivery
+
+        PushDelivery.objects.bulk_create([
+            PushDelivery(
+                notification_id=payload.get("notification_id", ""),
+                user_id=user_id,
+                push_type=str(payload.get("type", ""))[:64],
+                status=PushDelivery.STATUS_SKIPPED_PREF,
+            )
+            for user_id in user_ids
+        ])
+    except Exception:
+        logger.exception("FCM: logging skipped recipients failed.")
+
+
+def _android_config(payload: dict, data: Optional[dict], sound: bool, image_url, title, body):
+    notification_id = payload["notification_id"]
+    return messaging.AndroidConfig(
+        priority="high",
+        ttl=timedelta(seconds=push_contract.ttl_seconds_for(data)),
+        notification=messaging.AndroidNotification(
+            title=title,
+            body=body,
+            image=image_url or None,
+            channel_id=push_contract.android_channel_for(data, sound=sound),
+            sound=push_contract.android_sound_for(data, sound=sound),
+            default_sound=False,
+            priority="high",
+            visibility="public",
+            tag=notification_id,
+        ),
+    )
+
+
+def _apns_config(payload: dict, data: Optional[dict], sound: bool, image_url, title, body):
+    notification_id = payload["notification_id"]
+    ttl = push_contract.ttl_seconds_for(data)
+    return messaging.APNSConfig(
+        headers={
+            "apns-push-type": "alert",
+            "apns-priority": "10",
+            "apns-expiration": str(int(time.time()) + ttl),
+            "apns-collapse-id": notification_id.encode("utf-8")[:64].decode("utf-8", "ignore"),
+        },
+        payload=messaging.APNSPayload(
+            aps=messaging.Aps(
+                alert=messaging.ApsAlert(title=title, body=body),
+                # No aps.sound = iOS shows the notification silently.
+                sound=push_contract.ios_sound_for(data, sound=sound),
+                mutable_content=True,
+                content_available=True,
+                thread_id=push_contract.thread_id_for(data),
+                custom_data={"interruption-level": "active"},
+            )
+        ),
+        fcm_options=messaging.APNSFCMOptions(image=image_url) if image_url else None,
+    )
 
 
 def send_push_to_tokens(
@@ -246,6 +471,7 @@ def send_push_to_tokens(
     data: Optional[dict] = None,
     image_url: Optional[str] = None,
     sound: bool = True,
+    platform: str = "unknown",
 ) -> dict:
     """
     Send an FCM push notification to a list of device tokens.
@@ -255,10 +481,14 @@ def send_push_to_tokens(
     tokens    : list of FCM registration tokens (strings).
     title     : notification title shown on device.
     body      : notification body text.
-    data      : optional dict of string key-value pairs sent as the data payload
-                (all values must be strings).
+    data      : dict of extra data (values are converted to strings). ``type`` selects the
+                Android channel, sound, TTL and iOS thread (see push_contract.py).
     image_url : optional URL to an image shown in the notification.
     sound     : False delivers the notification silently (silent Android channel, no iOS sound).
+    platform  : "android" or "ios" sends only that platform's block; anything else sends both.
+
+    Transient FCM errors are retried (exponential backoff + jitter, max 3). Dead tokens are
+    deleted; payload errors and APNs credential errors never delete a token.
 
     Returns
     -------
@@ -282,91 +512,53 @@ def send_push_to_tokens(
             "errors": ["Firebase Admin SDK not initialised"] * len(tokens),
         }
 
-    # Ensure data values are all strings (FCM requirement)
-    clean_data = {str(k): str(v) for k, v in (data or {}).items()}
-    clean_data["source"] = "montada-app"
-    # Lets the app decide whether to play a sound for foreground notifications it shows itself.
-    clean_data["sound"] = "1" if sound else "0"
+    payload = push_contract.build_data(data, title=title, body=body, sound=sound)
+    platform = platform if platform in ("android", "ios") else "unknown"
 
-    notification = messaging.Notification(
-        title=title,
-        body=body,
-        image=image_url or None,
-    )
-    android_config = messaging.AndroidConfig(
-        priority="high",
-        notification=messaging.AndroidNotification(
-            title=title,
-            body=body,
-            image=image_url or None,
-            channel_id=android_channel_for(data, sound=sound),
-            sound=ANDROID_PUSH_SOUND if sound else None,
-        ),
-    )
-    apns_config = messaging.APNSConfig(
-        headers={"apns-priority": "10", "apns-push-type": "alert"},
-        payload=messaging.APNSPayload(
-            aps=messaging.Aps(
-                alert=messaging.ApsAlert(title=title, body=body),
-                # No aps.sound = iOS shows the notification silently.
-                sound=IOS_PUSH_SOUND if sound else None,
-                # Only image pushes need the Notification Service Extension; routing every
-                # push through it risks the extension replacing the content and dropping the sound.
-                mutable_content=True if image_url else None,
-            )
-        ),
-        fcm_options=messaging.APNSFCMOptions(image=image_url) if image_url else None,
-    )
+    message_kwargs = {
+        "notification": messaging.Notification(title=title, body=body, image=image_url or None),
+        "android": None if platform == "ios" else _android_config(payload, data, sound, image_url, title, body),
+        "apns": None if platform == "android" else _apns_config(payload, data, sound, image_url, title, body),
+        "data": payload,
+    }
 
-    total_success = 0
-    total_failure = 0
-    failed_tokens: list[str] = []
-    errors: list[str] = []
-    dead_tokens: list[str] = []
+    results: dict = {}  # token -> (success, message_id, exception)
+    pending = tokens
+    retries = 0
+    while pending:
+        outcome = []
+        for i in range(0, len(pending), _FCM_MULTICAST_CHUNK):
+            outcome.extend(_send_chunk(pending[i:i + _FCM_MULTICAST_CHUNK], message_kwargs))
+        retry = []
+        for token, ok, message_id, exc in outcome:
+            results[token] = (ok, message_id, exc)
+            if not ok and _classify_error(exc) == _KIND_TRANSIENT:
+                retry.append(token)
+        if not retry or retries >= _MAX_SEND_RETRIES:
+            break
+        _sleep(_retry_delay(retries, [results[t][2] for t in retry]))
+        retries += 1
+        pending = retry
 
-    # Chunk into groups of ≤500 (FCM multicast limit)
-    for i in range(0, len(tokens), _FCM_MULTICAST_CHUNK):
-        chunk = tokens[i : i + _FCM_MULTICAST_CHUNK]
-        message = messaging.MulticastMessage(
-            tokens=chunk,
-            notification=notification,
-            android=android_config,
-            apns=apns_config,
-            data=clean_data if clean_data else None,
-        )
-        try:
-            response: messaging.BatchResponse = messaging.send_each_for_multicast(message)
-            total_success += response.success_count
-            total_failure += response.failure_count
-            for idx, resp in enumerate(response.responses):
-                if not resp.success:
-                    failed_tokens.append(chunk[idx])
-                    errors.append(str(resp.exception))
-                    if _is_dead_token_error(resp.exception):
-                        dead_tokens.append(chunk[idx])
-        except Exception as exc:
-            logger.error("FCM multicast send failed for chunk starting at %d: %s", i, exc)
-            total_failure += len(chunk)
-            failed_tokens.extend(chunk)
-            errors.extend([str(exc)] * len(chunk))
+    failed_tokens = [t for t, (ok, _mid, _exc) in results.items() if not ok]
+    errors = [str(results[t][2]) for t in failed_tokens]
+    total_success = len(results) - len(failed_tokens)
 
     logger.info(
-        "FCM: sent to %d token(s) – success=%d  failure=%d",
-        len(tokens),
-        total_success,
-        total_failure,
+        "FCM: sent to %d token(s) – success=%d  failure=%d%s",
+        len(tokens), total_success, len(failed_tokens),
+        " (after %d retr%s)" % (retries, "y" if retries == 1 else "ies") if retries else "",
     )
-    if total_failure > 0 and errors:
+    if failed_tokens:
         logger.warning(
             "FCM failure reason(s): %s",
             "; ".join(errors),
             extra={"fcm_errors": errors, "failed_token_count": len(failed_tokens)},
         )
-    if dead_tokens:
-        _remove_dead_tokens(dead_tokens)
+    _record_outcomes(results, payload, platform)
     return {
         "success_count": total_success,
-        "failure_count": total_failure,
+        "failure_count": len(failed_tokens),
         "failed_tokens": failed_tokens,
         "errors": errors,
     }
@@ -384,7 +576,7 @@ def send_push_to_users(
 
     Applies each user's notification preference for the payload's category
     (Mainapp.notification_preferences): users who turned it off are skipped, and users who
-    chose "without sound" get a silent push.
+    chose "without sound" get a silent push. One push per physical device, newest token wins.
 
     Parameters
     ----------
@@ -401,45 +593,48 @@ def send_push_to_users(
         return empty_result
     users = _filter_users_who_blocked_source(users, data)
 
-    with_sound, without_sound = users, []
     category = None
     try:
-        from Mainapp.notification_preferences import category_for_push, split_by_sound
+        from Mainapp.notification_preferences import category_for_push
 
         category = category_for_push(data)
-        if category:
-            with_sound, without_sound = split_by_sound(users, category)
     except Exception:
-        logger.exception("FCM: notification preference lookup failed; sending with sound.")
-        with_sound, without_sound = users, []
+        logger.exception("FCM: notification category lookup failed; sending with sound.")
 
+    data = dict(data or {})
     if category:
-        data = {**(data or {}), "notification_category": category}
+        data["notification_category"] = category
+    # One id per event, shared by every device and by the delivery log.
+    data["notification_id"] = str(data.get("notification_id") or push_contract.new_notification_id())
+
+    targets, skipped_user_ids = _resolve_push_targets(users, category)
+    _log_skipped_preferences(skipped_user_ids, data)
+
+    grouped: dict = {}
+    for target in targets:
+        grouped.setdefault((target.mode != "silent", target.platform), []).append(target.token)
 
     result = dict(empty_result, failed_tokens=[], errors=[])
     sent_any = False
-    # A device registered under two users can land in both groups; it gets one push.
-    sent_tokens: set[str] = set()
-    for group, sound in ((with_sound, True), (without_sound, False)):
-        if not group:
-            continue
-        tokens = [t for t in get_push_tokens_for_users(group) if t not in sent_tokens]
-        sent_tokens.update(tokens)
-        if not tokens:
-            continue
-        sent_any = True
-        group_result = send_push_to_tokens(
-            tokens=tokens,
-            title=title,
-            body=body,
-            data=data,
-            image_url=image_url,
-            sound=sound,
-        )
-        result["success_count"] += group_result.get("success_count", 0)
-        result["failure_count"] += group_result.get("failure_count", 0)
-        result["failed_tokens"].extend(group_result.get("failed_tokens", []))
-        result["errors"].extend(group_result.get("errors", []))
+    for sound in (True, False):
+        for platform in ("android", "ios", "unknown"):
+            group_tokens = grouped.get((sound, platform))
+            if not group_tokens:
+                continue
+            sent_any = True
+            group_result = send_push_to_tokens(
+                tokens=group_tokens,
+                title=title,
+                body=body,
+                data=data,
+                image_url=image_url,
+                sound=sound,
+                platform=platform,
+            )
+            result["success_count"] += group_result.get("success_count", 0)
+            result["failure_count"] += group_result.get("failure_count", 0)
+            result["failed_tokens"].extend(group_result.get("failed_tokens", []))
+            result["errors"].extend(group_result.get("errors", []))
 
     if not sent_any:
         logger.info("FCM: no device tokens found for the given users – skipping.")

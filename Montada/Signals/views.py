@@ -237,6 +237,9 @@ def _notify_signal_published(signal, *, old_status=None):
         "direction": signal.direction or "",
         "status": signal.status or "",
         "timeframe": timeframe,
+        "entry_price": str(signal.entry_price) if signal.entry_price is not None else "",
+        "stop_loss": str(signal.stop_loss) if signal.stop_loss is not None else "",
+        "take_profit": str(signal.take_profit) if signal.take_profit is not None else "",
     }
 
     _create_and_broadcast_notifications(
@@ -285,6 +288,9 @@ def _notify_signal_closed(signal, *, old_status=None):
         "status": signal.status or "",
         "close_outcome": outcome,
         "timeframe": timeframe,
+        "entry_price": str(signal.entry_price) if signal.entry_price is not None else "",
+        "stop_loss": str(signal.stop_loss) if signal.stop_loss is not None else "",
+        "take_profit": str(signal.take_profit) if signal.take_profit is not None else "",
     }
 
     _create_and_broadcast_notifications(
@@ -1114,6 +1120,7 @@ class SignalPushNotificationView(generics.GenericAPIView):
             "stop_loss": str(signal.stop_loss) if signal.stop_loss else "",
             "timeframe": signal.timeframe.code if signal.timeframe else "",
             "signal_status": signal.status or "",
+            "status": signal.status or "",
         }
 
         # ── Count device tokens (non-fatal) ──────────────────────────────────

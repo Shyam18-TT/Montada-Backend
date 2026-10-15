@@ -1116,7 +1116,7 @@ class Command(BaseCommand):
             logger.exception("Failed to broadcast signal change notifications.")
 
         data = {
-            "type": "signal_change_threshold",
+            "type": "market_percentage_alert",
             "symbol": symbol,
             "direction": direction,
             "crossed_percentage": str(crossed_percentage),

@@ -1,7 +1,7 @@
 import logging
 
 from rest_framework import status, generics, permissions
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, authentication_classes, permission_classes
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -26,6 +26,8 @@ from .serializers import (
 from .models import PasswordResetOTP, EmailVerificationOTP, AccountDeletionOTP, DeviceToken
 from .emails import send_templated_email, user_display_name
 from .audit import audit
+
+logger = logging.getLogger(__name__)
 
 User = get_user_model()
 
@@ -332,45 +334,75 @@ class ChangePasswordView(APIView):
         )
 
 
-@api_view(['POST'])
-@permission_classes([permissions.IsAuthenticated])
-def logout_view(request):
-    """
-    API endpoint for user logout (blacklist refresh token)
-    Body: { "refresh_token": "...", "device_id": "..." (optional) }
-    device_id unregisters this device's FCM token so the phone stops getting the user's pushes.
-    """
-    # Done before the refresh-token check: the user is already authenticated, and a
-    # stale refresh token must not leave the device subscribed.
-    device_id = str(request.data.get('device_id') or '').strip()
-    # Optional fallback for clients that don't send device_id: unregister by FCM token.
-    fcm_token = str(request.data.get('fcm_token') or request.data.get('token') or '').strip()
-    device_filter = Q()
-    if device_id:
-        device_filter |= Q(device_id=device_id)
-    if fcm_token:
-        device_filter |= Q(fcm_token=fcm_token)
-    if device_filter:
-        DeviceToken.objects.filter(user=request.user).filter(device_filter).delete()
+def _user_id_from_access_header(request):
+    """User id of a valid Bearer access token, or None (missing, malformed or expired)."""
+    from rest_framework_simplejwt.authentication import JWTAuthentication
 
     try:
-        refresh_token = request.data.get('refresh_token')
-        if refresh_token:
-            token = RefreshToken(refresh_token)
-            token.blacklist()
-            audit("auth.logout", request=request, user=request.user.pk, device_id=device_id or None)
-            return Response({
-                'message': 'Logout successful'
-            }, status=status.HTTP_200_OK)
-        else:
-            return Response({
-                'error': 'Refresh token is required'
-            }, status=status.HTTP_400_BAD_REQUEST)
-    except Exception as e:
-        audit("auth.logout_failed", request=request, level=logging.WARNING, user=request.user.pk, error=type(e).__name__)
-        return Response({
-            'error': 'Invalid token'
-        }, status=status.HTTP_400_BAD_REQUEST)
+        result = JWTAuthentication().authenticate(request)
+    except Exception:
+        return None
+    return result[0].pk if result else None
+
+
+@csrf_exempt
+@api_view(['POST'])
+@authentication_classes([])
+@permission_classes([permissions.AllowAny])
+def logout_view(request):
+    """
+    Sign out: blacklist the refresh token and unregister this device from push.
+    Body: { "refresh_token": "...", "device_id": "..." (optional) }
+
+    Works with an expired (or missing) access token: the account is identified from the access
+    token when it is valid and always from the refresh token. The device row is removed only when
+    it belongs to one of those accounts, so a logout can never remove another user's device.
+    Without device_id (a queued logout replayed after someone signed in again) only the refresh
+    token is blacklisted.
+    """
+    from rest_framework_simplejwt.exceptions import TokenError
+    from rest_framework_simplejwt.settings import api_settings as jwt_settings
+    from rest_framework_simplejwt.state import token_backend
+
+    from .push_devices import unregister_device
+
+    refresh_token = request.data.get('refresh_token')
+    refresh_token = refresh_token.strip() if isinstance(refresh_token, str) else ''
+    if not refresh_token:
+        return Response({'error': 'Refresh token is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+    # Verify signature and expiry, but not the blacklist: replaying a logout must still unregister.
+    try:
+        payload = token_backend.decode(refresh_token, verify=True)
+        if payload.get('token_type') != 'refresh':
+            raise TokenError('Not a refresh token')
+        refresh_user_id = payload.get(jwt_settings.USER_ID_CLAIM)
+    except Exception as exc:
+        audit("auth.logout_failed", request=request, level=logging.WARNING, error=type(exc).__name__)
+        return Response({'error': 'Invalid token'}, status=status.HTTP_401_UNAUTHORIZED)
+
+    user_ids = {uid for uid in (_user_id_from_access_header(request), refresh_user_id) if uid}
+    device_id = str(request.data.get('device_id') or '').strip()
+    fcm_token = str(request.data.get('fcm_token') or request.data.get('token') or '').strip()
+    removed = 0
+    try:
+        removed = unregister_device(
+            [str(uid) for uid in user_ids], device_id=device_id, token=fcm_token,
+        ) if (device_id or fcm_token) else 0
+    except Exception:
+        logger.exception("Logout: unregistering push device failed.")
+
+    try:
+        RefreshToken(refresh_token).blacklist()
+    except TokenError:
+        pass  # already blacklisted or expired between decode and blacklist: the goal is met
+    except Exception as exc:
+        audit("auth.logout_failed", request=request, level=logging.ERROR, error=type(exc).__name__)
+        return Response({'error': 'Logout failed'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    audit("auth.logout", request=request, user=str(refresh_user_id), device_id=device_id or None,
+          devices_removed=removed)
+    return Response({'message': 'Logout successful'}, status=status.HTTP_200_OK)
 
 
 @csrf_exempt
@@ -699,70 +731,49 @@ Montada Team
 
 class SaveFCMToken(APIView):
     """
-    POST: Save FCM device token for the authenticated user.
-    Body: { "token": "<fcm_token_string>" }
+    POST: register this device for push notifications.
+    Body: { "token": "<fcm token>", "device_id": "<stable device id>", "platform": "android"|"ios" }
+    device_id and platform are optional (older app builds omit them); unknown fields are ignored.
+    Idempotent: repeating the call leaves one row. See Mainapp/push_devices.py for the rules.
     """
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request):
-        token = (request.data.get("token") or "").strip()
-        device_id = (request.data.get("device_id") or "").strip() or None
+        from .push_devices import MAX_TOKEN_LENGTH, register_device
+
+        token = request.data.get("token")
+        token = token.strip() if isinstance(token, str) else ""
         if not token:
             return Response(
                 {"error": "Token is required."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-
-        user = request.user
-        with transaction.atomic():
-            # Step 1 — Evict this device from any OTHER user's account.
-            # Matched by device_id (if provided) OR by the exact FCM token.
-            # This ensures one physical device is never registered under two users
-            # at the same time, while the current user's OTHER devices are untouched.
-            if device_id:
-                DeviceToken.objects.select_for_update().filter(
-                    Q(device_id=device_id) | Q(fcm_token=token)
-                ).exclude(user=user).delete()
-            else:
-                DeviceToken.objects.select_for_update().filter(
-                    fcm_token=token
-                ).exclude(user=user).delete()
-
-            # Step 2 — Upsert the current user's row for this device.
-            # Match by device_id first (most accurate); fall back to token match.
-            own_rows = list(
-                DeviceToken.objects.select_for_update()
-                .filter(user=user)
-                .filter(Q(device_id=device_id) if device_id else Q(fcm_token=token))
-                .order_by("created_at", "id")
+        if len(token) > MAX_TOKEN_LENGTH:
+            return Response(
+                {"error": "Token is too long."},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-            if own_rows:
-                device_token = own_rows[0]
-                update_fields = []
-                if device_token.fcm_token != token:
-                    device_token.fcm_token = token
-                    update_fields.append("fcm_token")
-                if device_id is not None and device_token.device_id != device_id:
-                    device_token.device_id = device_id
-                    update_fields.append("device_id")
-                if update_fields:
-                    device_token.save(update_fields=update_fields)
-                # Drop duplicate rows for the same device under this user
-                if len(own_rows) > 1:
-                    DeviceToken.objects.filter(
-                        id__in=[r.id for r in own_rows[1:]]
-                    ).delete()
-            else:
-                device_token = DeviceToken.objects.create(
-                    user=user,
-                    fcm_token=token,
-                    device_id=device_id,
-                )
+        user = request.user
+        device, moved_from = register_device(
+            user,
+            token,
+            device_id=request.data.get("device_id"),
+            platform=request.data.get("platform"),
+        )
 
-        audit("device.fcm_token_saved", request=request, user=user.pk, device_id=device_id, token_id=device_token.id)
+        audit("device.fcm_token_saved", request=request, user=user.pk, device_id=device.device_id or None,
+              platform=device.platform, token_id=device.id,
+              moved_from_user=str(moved_from) if moved_from else None)
         return Response(
-            {"message": "Token saved", "token_id": str(device_token.id)},
+            {
+                "registered": True,
+                "device_id": device.device_id,
+                "platform": device.platform,
+                # Kept for older clients.
+                "message": "Token saved",
+                "token_id": str(device.id),
+            },
             status=status.HTTP_200_OK,
         )
 
@@ -887,8 +898,8 @@ class NotificationPreferencesView(APIView):
         {"preferences": [{"category": "NEWS", "enabled": true, "sound": false}]}
       Returns the same payload as GET.
 
-    Modes: "sound" = push with sound, "silent" = push without sound,
-    "off" = no push for that category (default).
+    Modes: "sound" = push with sound (default), "silent" = push without sound,
+    "off" = no push for that category.
     """
     permission_classes = [permissions.IsAuthenticated]
 

@@ -73,7 +73,7 @@ CATEGORIES = OrderedDict([
     (Category.SYMBOL_MOVES, {
         "label": "Market moves",
         "description": "Large daily percentage changes on symbols.",
-        "push_types": ("signal_change_threshold",),
+        "push_types": ("market_percentage_alert", "signal_change_threshold"),
     }),
     (Category.ECONOMIC_EVENTS, {
         "label": "Economic events",

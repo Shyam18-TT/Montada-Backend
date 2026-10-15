@@ -230,7 +230,7 @@ class SignalChangeNotificationThresholdTests(TestCase):
             {user.id for user in users},
         )
         self.assertEqual(push.call_args.kwargs["title"], "EURUSD up 0.5%")
-        self.assertEqual(push.call_args.kwargs["data"]["type"], "signal_change_threshold")
+        self.assertEqual(push.call_args.kwargs["data"]["type"], "market_percentage_alert")
 
     def test_poll_jump_across_many_levels_sends_single_notification(self):
         from Mainapp.models import UserNotification
@@ -910,34 +910,48 @@ class FirebasePushSoundTests(SimpleTestCase):
         encoded = self._encoded_message({"type": "admin_broadcast"})
 
         self.assertEqual(encoded["notification"], {"title": "Title", "body": "Body"})
-        self.assertEqual(encoded["apns"]["headers"], {"apns-priority": "10", "apns-push-type": "alert"})
-        self.assertEqual(encoded["apns"]["payload"]["aps"]["sound"], "montada_push.wav")
+        headers = encoded["apns"]["headers"]
+        self.assertEqual(headers["apns-priority"], "10")
+        self.assertEqual(headers["apns-push-type"], "alert")
+        self.assertIn("apns-expiration", headers)
+        self.assertIn("apns-collapse-id", headers)
+        aps = encoded["apns"]["payload"]["aps"]
+        self.assertEqual(aps["sound"], "montada_push.wav")
+        self.assertEqual(aps["mutable-content"], 1)
+        self.assertEqual(aps["content-available"], 1)
+        self.assertEqual(aps["thread-id"], "broadcasts")
         self.assertEqual(encoded["android"]["priority"], "high")
+        self.assertEqual(encoded["android"]["ttl"], "259200s")
         self.assertEqual(encoded["android"]["notification"]["sound"], "montada_push")
         self.assertEqual(encoded["android"]["notification"]["channel_id"], "montada_broadcasts")
-        self.assertNotIn("mutable-content", encoded["apns"]["payload"]["aps"])  # no image
 
     def test_android_channel_per_notification_type(self):
         from firebase import android_channel_for
 
         expected = {
             "news_update": "montada_news",
-            "economic_reminder": "montada_economic_reminders",
-            "economic_global_reminder": "montada_economic_reminders",
-            "user_price_alert": "montada_price_alerts",
-            "signal_change_threshold": "montada_price_alerts",
-            "signal_published": "montada_trade_ideas",
-            "signal_closed": "montada_trade_ideas",
-            "signal_alert": "montada_trade_ideas",
-            "price_alert": "montada_trade_ideas",
+            "economic_reminder": "montada_economic_reminders_v2",
+            "economic_global_reminder": "montada_economic_reminders_v2",
+            "user_price_alert": "montada_price_alerts_v2",
+            "market_percentage_alert": "montada_price_alerts_v2",
+            "signal_change_threshold": "montada_price_alerts_v2",
+            "signal_published": "montada_trade_ideas_v2",
+            "signal_closed": "montada_trade_ideas_v2",
+            "signal_alert": "montada_trade_ideas_v2",
+            "chat_message": "montada_chat",
             "admin_broadcast": "montada_broadcasts",
+            "price_alert": "montada_notifications",
             "signal_applied": "montada_notifications",
             "": "montada_notifications",
         }
         for push_type, channel in expected.items():
             self.assertEqual(android_channel_for({"type": push_type}), channel, push_type)
-        self.assertEqual(android_channel_for({"type": "economic_event", "importance": "high"}), "montada_economic_high")
-        self.assertEqual(android_channel_for({"type": "economic_event", "importance": "medium"}), "montada_economic")
+        self.assertEqual(
+            android_channel_for({"type": "economic_event", "importance": "high"}), "montada_economic_high_v2",
+        )
+        self.assertEqual(
+            android_channel_for({"type": "economic_event", "importance": "medium"}), "montada_economic_v2",
+        )
         self.assertEqual(android_channel_for(None), "montada_notifications")
 
 
@@ -1339,7 +1353,8 @@ class PriceAlertLifecycleTests(TestCase):
         self.assertTrue(is_armed)
         self.assertTrue(_check_user_alert_hit(alert, 95.0))
 
-    def test_percentage_alert_already_past_target_still_waits(self):
+    def test_percentage_alert_already_past_target_arms_immediately(self):
+        # Waiting for a pull-back to the reference price meant the alert could never fire.
         alert = PriceAlert.objects.create(
             user=self.user,
             instrument=self.instrument,
@@ -1347,10 +1362,11 @@ class PriceAlertLifecycleTests(TestCase):
             reference_price="100.00000",
             condition=PriceAlert.Condition.ABOVE,
         )
-        is_armed, _, _ = _ensure_user_alert_activation_state(alert, 106.0)
+        is_armed, _, armed_now = _ensure_user_alert_activation_state(alert, 106.0)
         alert.refresh_from_db()
-        self.assertFalse(is_armed)
-        self.assertEqual(alert.activation_watch_direction, ENTRY_WATCH_DOWN)
+        self.assertTrue(is_armed)
+        self.assertTrue(armed_now)
+        self.assertIsNotNone(alert.armed_at)
 
     def _run_check_with_price(self, bid, push):
         prices = {"EURUSD": {"bid": bid, "ask": bid + 0.0001}}
@@ -1362,7 +1378,9 @@ class PriceAlertLifecycleTests(TestCase):
             cmd._verbose = False
             cmd._use_mt5_lib = False
             cmd._use_mt5_manager = False
-            cmd._run_check()
+            # The push is sent after the alert's transaction commits (TestCase never commits).
+            with self.captureOnCommitCallbacks(execute=True):
+                cmd._run_check()
 
     def test_run_check_triggers_alert_and_sends_push_once(self):
         from Mainapp.models import UserNotification
