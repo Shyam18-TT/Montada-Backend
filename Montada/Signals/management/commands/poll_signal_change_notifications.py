@@ -1,8 +1,9 @@
 import json
 import logging
 import time
-import uuid
-from decimal import Decimal, InvalidOperation, ROUND_FLOOR
+from dataclasses import dataclass
+from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -12,6 +13,22 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 from Signals.management.commands.run_price_alerts import _describe_push_result
+from Signals.price_move_levels import (
+    DIRECTIONS,
+    UP,
+    LevelState,
+    advance,
+    has_states,
+    level_for,
+    level_percentage,
+    load_states,
+    normalize_reference,
+    notification_id,
+    parse_tick_time,
+    period_key,
+    rebase,
+    revert,
+)
 from Signals.price_move_config import (
     DEFAULT_COOLDOWN_SECONDS as DEFAULT_NOTIFICATION_COOLDOWN_SECONDS,
     DEFAULT_MAX_NOTIFICATION_BATCHES as DEFAULT_MAX_NOTIFICATION_BATCHES_PER_POLL,
@@ -52,6 +69,9 @@ _EXCLUDED_STOCK_SYMBOLS = frozenset(
 )
 
 DEFAULT_PRICE_URL = "https://trustcapital.com/api/get-MT5-price"
+# --state-ttl / --lock-ttl are accepted for existing command lines but no longer used: the
+# level state is a durable DB table (Signals.price_move_levels) updated with an atomic
+# compare-and-set, so it needs neither a TTL nor a lock.
 DEFAULT_STATE_TTL_SECONDS = 60 * 60 * 24 * 7
 DEFAULT_LOCK_TTL_SECONDS = 60
 # Market snapshot prices older than this fall back to the polled quote's bid.
@@ -60,15 +80,18 @@ MARKET_SNAPSHOT_MAX_AGE_SECONDS = 300
 MAX_PUSH_SIGNAL_IDS = 20
 # While waiting for the next poll, check this often whether the admin changed the config.
 CONFIG_CHECK_SECONDS = 5
-STATE_CACHE_KEY_PREFIX = "signals:change-notifications:state"
-LOCK_CACHE_KEY_PREFIX = "signals:change-notifications:lock"
-# Set once a poll has built symbol state. Missing means Redis was flushed (or this is the
-# first run of this code): that poll records state silently instead of notifying every
-# symbol already past a level.
-BASELINE_DONE_CACHE_KEY = "signals:change-notifications:baseline-done"
-# _get_symbol_state result when the state cannot be read at all (Redis down and nothing in
-# the in-process fallback). Recorded silently, like a flush.
-_UNKNOWN_STATE = object()
+# Set once a poll has recorded the levels of an empty state table. A poll that finds neither
+# this marker nor any stored level (first run of this code, or a wiped table) records where
+# every symbol is without notifying, instead of pushing every level already behind the price.
+# A Redis flush alone is harmless now: the levels live in the DB.
+BASELINE_DONE_CACHE_KEY = "signals:change-notifications:baseline-done:v2"
+
+
+@dataclass(frozen=True)
+class Tick:
+    """What identifies a quote for the level state: its period and its (feed) timestamp."""
+    period: str
+    tick_at: datetime = None
 
 
 def _drop_duplicate_futures(symbols):
@@ -101,18 +124,12 @@ def _parse_decimal(value):
 
 
 def _step_count_for(abs_percentage, start, step):
-    """Number of levels crossed, where levels are start, start+step, start+2*step, ..."""
-    if abs_percentage < start:
-        return 0
-    return int(((abs_percentage - start) / step).to_integral_value(rounding=ROUND_FLOOR)) + 1
+    """Level reached, where levels are start, start+step, start+2*step, ... (0 below start)."""
+    return level_for(abs_percentage, start, step)
 
 
 def _step_percentage(step_count, start, step):
-    return start + step * Decimal(int(step_count) - 1)
-
-
-def _level_key(value):
-    return _format_percent(abs(value))
+    return level_percentage(step_count, start, step)
 
 
 def _format_price(value, digits=None):
@@ -193,13 +210,13 @@ class Command(BaseCommand):
             "--state-ttl",
             type=int,
             default=DEFAULT_STATE_TTL_SECONDS,
-            help="Seconds to keep inactive symbol state in cache. Default: 604800.",
+            help="Deprecated, ignored: level state is a DB table now.",
         )
         parser.add_argument(
             "--lock-ttl",
             type=int,
             default=DEFAULT_LOCK_TTL_SECONDS,
-            help="Seconds to hold the per-symbol cache lock. Default: 60.",
+            help="Deprecated, ignored: levels are claimed with an atomic compare-and-set, no lock.",
         )
         parser.add_argument(
             "--max-notification-batches",
@@ -222,7 +239,7 @@ class Command(BaseCommand):
         parser.add_argument(
             "--no-daily-reset",
             action="store_true",
-            help="Do not reset milestone state when the local trading date changes.",
+            help="Never reset the notified levels (by default they reset when the feed's daily reference price changes).",
         )
         parser.add_argument(
             "--once",
@@ -303,8 +320,6 @@ class Command(BaseCommand):
                 self.style.WARNING("--no-hardcoded-exclusions is ignored: exclusions are admin mute rules now.")
             )
 
-        self.state_ttl = max(60, int(options.get("state_ttl") or DEFAULT_STATE_TTL_SECONDS))
-        self.lock_ttl = max(1, int(options.get("lock_ttl") or DEFAULT_LOCK_TTL_SECONDS))
         self.max_users_per_notification = max(0, int(options.get("max_users_per_notification") or 0))
         self.reset_daily = not bool(options.get("no_daily_reset"))
 
@@ -319,9 +334,7 @@ class Command(BaseCommand):
             if _normalize_symbol(symbol)
         }
 
-        self._fallback_state_by_symbol = {}
-        self._fallback_locks = set()
-        self._fallback_state_last_cleanup = 0  # For periodic memory cleanup
+        self._last_tick_at = {}
         self._active_config = None
 
         config = self._get_config()
@@ -359,7 +372,6 @@ class Command(BaseCommand):
         while True:
             poll_started_at = time.monotonic()
             try:
-                self._cleanup_fallback_state()
                 self._run_poll()
             except KeyboardInterrupt:
                 self.stdout.write(self.style.WARNING("Stopping signal change polling."))
@@ -411,11 +423,13 @@ class Command(BaseCommand):
             time.sleep(min(remaining, CONFIG_CHECK_SECONDS))
 
     def _needs_baseline_poll(self):
+        """True when there is no stored level anywhere and no marker saying that is expected."""
         try:
-            return not cache.get(BASELINE_DONE_CACHE_KEY)
+            if cache.get(BASELINE_DONE_CACHE_KEY):
+                return False
         except Exception:
-            # Redis is down: per-symbol unknown state is handled in _get_symbol_state.
-            return False
+            return False  # Redis down: do not silence a poll because of it
+        return not has_states()
 
     def _mark_baseline_done(self):
         try:
@@ -477,6 +491,9 @@ class Command(BaseCommand):
                 "WARNING: No open signals matched %d fetched quote symbols." % len(quotes_by_symbol)
             )
 
+        # Without the stored levels every symbol would look new, so a read failure aborts the poll.
+        self._level_states = load_states()
+        self._instrument_ids = self._load_instrument_ids()
         self._baseline_poll = self._needs_baseline_poll()
         if self._baseline_poll:
             self.stdout.write(
@@ -489,6 +506,9 @@ class Command(BaseCommand):
         notification_count = 0
         self._notification_batches_this_poll = 0
         for symbol, quote in quotes_by_symbol.items():
+            tick = self._validate_tick(symbol, quote)
+            if tick is None:
+                continue
             parsed_quote = self._parse_quote_change(symbol, quote)
             if parsed_quote is None:
                 continue
@@ -502,6 +522,7 @@ class Command(BaseCommand):
                 signed_change_percentage,
                 quote,
                 signals,
+                tick=tick,
             )
 
         if self._baseline_poll:
@@ -668,181 +689,64 @@ class Command(BaseCommand):
             signed_change_percentage = -signed_change_percentage
         return direction, signed_change_percentage
 
-    def _state_cache_key(self, symbol):
-        return "%s:%s" % (STATE_CACHE_KEY_PREFIX, symbol)
+    # ------------------------------------------------------------------ ticks
 
-    def _lock_cache_key(self, symbol):
-        return "%s:%s" % (LOCK_CACHE_KEY_PREFIX, symbol)
+    def _tick_meta(self, quote):
+        """Period and timestamp of a quote (see Signals.price_move_levels.period_key)."""
+        return Tick(
+            period=period_key(
+                normalize_reference(quote.get("bid_today")),
+                reset=getattr(self, "reset_daily", True),
+            ),
+            tick_at=parse_tick_time(quote.get("time")),
+        )
 
-    def _current_state_day(self):
-        if not self.reset_daily:
-            return ""
-        return timezone.localdate().isoformat()
+    def _count_silent(self, reason):
+        counts = getattr(self, "_silent_counts", None)
+        if counts is None:
+            counts = self._silent_counts = {}
+        counts[reason] = counts.get(reason, 0) + 1
 
-    def _cleanup_fallback_state(self):
+    def _validate_tick(self, symbol, quote):
         """
-        Periodically drop in-process fallback state from previous trading days. Today's
-        entries are kept: wiping them would make every symbol notify its levels again while
-        Redis is down.
+        The Tick of a usable quote, else None. Ignored, and never allowed to move the state:
+        - a missing, zero or negative price (bid, or the bid_today reference when given);
+        - a tick older than one already processed for the symbol (out of order / stale feed).
         """
-        current_time = time.time()
-        if current_time - self._fallback_state_last_cleanup < 300:  # Cleanup every 5 minutes
-            return
-
-        self._fallback_state_last_cleanup = current_time
-        today = self._current_state_day()
-        old_count = len(self._fallback_state_by_symbol)
-        self._fallback_state_by_symbol = {
-            symbol: state
-            for symbol, state in self._fallback_state_by_symbol.items()
-            if isinstance(state, dict) and state.get("trading_day") == today
-        }
-        removed = old_count - len(self._fallback_state_by_symbol)
-        if self.verbose and removed > 0:
-            self.stdout.write("Cleaned up %d old fallback state entries." % removed)
-
-    def _get_symbol_state(self, symbol):
-        """
-        Today's state for `symbol`: from Redis, or from the in-process fallback written while
-        Redis was failing (whichever is newer, so levels notified during an outage are not
-        sent again once Redis is back). Returns None when there is no state and
-        _UNKNOWN_STATE when Redis cannot be read and the fallback has nothing either.
-        """
-        fallback = self._fallback_state_by_symbol.get(symbol)
-        try:
-            state = cache.get(self._state_cache_key(symbol))
-        except Exception:
-            logger.warning("Signal change state cache read failed for %s; using in-process fallback.", symbol)
-            if not isinstance(fallback, dict):
-                return _UNKNOWN_STATE
-            state = None
-        if isinstance(fallback, dict):
-            state_updated_at = state.get("updated_at", 0) if isinstance(state, dict) else -1
-            if fallback.get("updated_at", 0) > state_updated_at:
-                state = fallback
-        if not isinstance(state, dict):
+        bid = _parse_decimal(quote.get("bid"))
+        if bid is None or bid <= 0:
+            self._count_silent("bad price")
+            logger.warning("Skipping %s: unusable bid=%r.", symbol, quote.get("bid"))
             return None
-        if self.reset_daily and state.get("trading_day") != self._current_state_day():
+        reference = quote.get("bid_today")
+        if reference not in (None, "") and normalize_reference(reference) is None:
+            self._count_silent("bad price")
+            logger.warning("Skipping %s: unusable bid_today=%r.", symbol, reference)
             return None
-        return state
 
-    def _set_symbol_state(
-        self,
-        symbol,
-        direction,
-        step_count,
-        notified_levels=None,
-        threshold=None,
-        notification_history=None,
-        config_sig=None,
-    ):
-        state = {
-            "direction": direction,
-            "step_count": int(step_count),
-            "trading_day": self._current_state_day(),
-            "threshold": str(threshold) if threshold is not None else "",
-            "config_sig": config_sig,
-            "notified_levels": notified_levels or {},
-            "notification_history": notification_history or {},
-            "updated_at": time.time(),
-        }
-        try:
-            cache.set(self._state_cache_key(symbol), state, timeout=self.state_ttl)
-        except Exception:
-            logger.warning("Signal change state cache write failed for %s; using in-process fallback.", symbol)
-            self._fallback_state_by_symbol[symbol] = state
-        else:
-            self._fallback_state_by_symbol.pop(symbol, None)
-
-    def _clear_symbol_state(self, symbol):
-        try:
-            cache.delete(self._state_cache_key(symbol))
-        except Exception:
-            logger.exception("Signal change state cache delete failed for %s; using in-process fallback.", symbol)
-        self._fallback_state_by_symbol.pop(symbol, None)
-
-    def _acquire_symbol_lock(self, symbol):
-        token = uuid.uuid4().hex
-        try:
-            if cache.add(self._lock_cache_key(symbol), token, timeout=self.lock_ttl):
-                return token
-            return None
-        except Exception:
-            logger.exception("Signal change lock cache add failed for %s; using in-process fallback.", symbol)
-            if symbol in self._fallback_locks:
+        tick = self._tick_meta(quote)
+        last_tick_at = getattr(self, "_last_tick_at", None)
+        if last_tick_at is None:
+            last_tick_at = self._last_tick_at = {}
+        previous = last_tick_at.get(symbol)
+        if tick.tick_at is not None:
+            if previous is not None and tick.tick_at < previous:
+                self._count_silent("stale tick")
+                if self.verbose:
+                    self.stdout.write(
+                        "Skip %s: tick %s is older than the last processed (%s)." % (symbol, tick.tick_at, previous)
+                    )
                 return None
-            self._fallback_locks.add(symbol)
-            return token
+            last_tick_at[symbol] = tick.tick_at
+        return tick
 
-    def _release_symbol_lock(self, symbol, token):
-        try:
-            if cache.get(self._lock_cache_key(symbol)) == token:
-                cache.delete(self._lock_cache_key(symbol))
-        except Exception:
-            logger.exception("Signal change lock cache release failed for %s; using in-process fallback.", symbol)
-        self._fallback_locks.discard(symbol)
+    # ----------------------------------------------------------------- levels
 
-    def _crossed_step_counts(self, previous_step_count, current_step_count):
-        start = max(1, int(previous_step_count) + 1)
-        return range(start, int(current_step_count) + 1)
-
-    def _is_level_notification_in_cooldown(self, direction, level_key, previous, current_time=None, cooldown_seconds=None):
-        if cooldown_seconds is None:
-            cooldown_seconds = getattr(self, "notification_cooldown_seconds", DEFAULT_NOTIFICATION_COOLDOWN_SECONDS)
-        if cooldown_seconds <= 0:
-            return False
-
-        history = previous.get("notification_history") if previous else None
-        if not isinstance(history, dict):
-            return False
-
-        direction_history = history.get(direction)
-        if not isinstance(direction_history, dict):
-            return False
-
-        timestamp = direction_history.get(level_key)
-        if not isinstance(timestamp, (int, float)):
-            return False
-
-        current_time = current_time if current_time is not None else int(time.time())
-        return (current_time - timestamp) < cooldown_seconds
-
-    def _get_notified_levels(self, previous):
-        notified_levels = previous.get("notified_levels") if previous else None
-        if not isinstance(notified_levels, dict):
-            return {"up": set(), "down": set()}
-        return {
-            "up": set(str(level) for level in notified_levels.get("up", [])),
-            "down": set(str(level) for level in notified_levels.get("down", [])),
-        }
-
-    def _serialize_notified_levels(self, notified_levels):
-        return {
-            "up": sorted(notified_levels.get("up", set())),
-            "down": sorted(notified_levels.get("down", set())),
-        }
-
-    def _serialize_notification_history(self, previous):
-        previous_history = previous.get("notification_history") if previous else None
-        if not isinstance(previous_history, dict):
-            previous_history = {}
-
-        return {
-            "up": dict(previous_history.get("up", {}) or {}),
-            "down": dict(previous_history.get("down", {}) or {}),
-        }
-
-    def _maybe_notify_symbol(self, symbol, direction, change_percentage, quote, signals):
-        lock_token = self._acquire_symbol_lock(symbol)
-        if not lock_token:
-            if self.verbose:
-                self.stdout.write("Skip %s: another worker is processing this symbol." % symbol)
-            return 0
-
-        try:
-            return self._maybe_notify_symbol_locked(symbol, direction, change_percentage, quote, signals)
-        finally:
-            self._release_symbol_lock(symbol, lock_token)
+    def _get_level_states(self):
+        states = getattr(self, "_level_states", None)
+        if states is None:
+            states = self._level_states = load_states()
+        return states
 
     def _resolve_rule(self, symbol, signals=None):
         """Admin settings for `symbol`; open signals add their instrument's asset class."""
@@ -858,187 +762,163 @@ class Command(BaseCommand):
             self.stdout.write("Config warning for %s: %s" % (symbol, " ".join(rule.warnings)))
         return rule
 
-    def _silent_reason(self, rule, previous, state_unknown):
+    def _rebase_levels(self, symbol, direction, level, rule, tick):
         """
-        Why this symbol's levels should be recorded without notifying, or None to notify
-        normally. Every case would otherwise push levels the price crossed earlier:
-        - muted: tracked silently, so unmuting later starts from the current level.
-        - baseline: cache was flushed / first run, every symbol has lost its state.
-        - state unavailable: Redis is down and this process has no state for the symbol.
-        - config changed: admin changed this symbol's threshold/step or (un)muted it, so
-          its levels are re-based on the current % change.
+        The level grid of `symbol` changed (threshold/step edited, muted, unmuted): start over
+        from the current change without notifying the levels the new grid "missed". The other
+        direction has notified nothing on the new grid, so it starts at 0.
         """
-        if not rule.enabled:
-            return "muted"
-        if getattr(self, "_baseline_poll", False):
-            return "baseline"
-        if state_unknown:
-            return "state unavailable"
-        if previous is not None and previous.get("config_sig") != rule.signature:
-            return "config changed"
-        return None
-
-    def _record_silent_baseline(self, symbol, direction, step_count, rule, previous, reason):
-        counts = getattr(self, "_silent_counts", None)
-        if counts is None:
-            counts = self._silent_counts = {}
-        counts[reason] = counts.get(reason, 0) + 1
-
-        if (
-            previous is not None
-            and previous.get("config_sig") == rule.signature
-            and previous.get("direction") == direction
-            and int(previous.get("step_count", 0)) == int(step_count)
-        ):
-            return  # e.g. a muted symbol still at the same level: nothing to rewrite
-
-        notified_levels = {"up": set(), "down": set()}
-        notified_levels[direction] = {
-            _level_key(_step_percentage(step, rule.threshold, rule.step))
-            for step in range(1, int(step_count) + 1)
-        }
-        self._set_symbol_state(
-            symbol,
-            direction,
-            step_count,
-            self._serialize_notified_levels(notified_levels),
-            threshold=rule.threshold,
-            notification_history=self._serialize_notification_history(previous),
-            config_sig=rule.signature,
-        )
-        if self.verbose:
-            self.stdout.write(
-                "Silent %s (%s): %s levels up to %s recorded; next notification at %s%%."
-                % (
-                    symbol,
-                    reason,
-                    direction,
-                    _format_percent(_step_percentage(step_count, rule.threshold, rule.step)) + "%"
-                    if step_count > 0 else "none",
-                    _format_percent(_step_percentage(int(step_count) + 1, rule.threshold, rule.step)),
-                )
+        states = self._get_level_states()
+        for side in DIRECTIONS:
+            target = level if side == direction else 0
+            percentage = level_percentage(target, rule.threshold, rule.step) if target else Decimal("0")
+            rebase(
+                symbol, side, period=tick.period, level=target, percentage=percentage,
+                config_sig=rule.signature, tick_at=tick.tick_at,
             )
+            states[(symbol, side)] = LevelState(target, tick.period, rule.signature, tick.tick_at)
+        self._count_silent("config changed")
 
-    def _maybe_notify_symbol_locked(self, symbol, direction, change_percentage, quote, signals):
+    def _maybe_notify_symbol(self, symbol, direction, change_percentage, quote, signals, tick=None):
+        """
+        Notify `symbol` once for the level `change_percentage` has reached, if that level is
+        higher than any already notified in this period for this direction. Returns the number
+        of notifications sent (0 or 1).
+
+        The stored level never moves down inside a period: a price that falls back and crosses
+        the same level again sends nothing. The claim on a level is an atomic compare-and-set
+        (price_move_levels.advance), so workers racing on the same tick send exactly one push.
+        """
         rule = self._resolve_rule(symbol, signals)
-        previous = self._get_symbol_state(symbol)
-        state_unknown = previous is _UNKNOWN_STATE
-        if state_unknown:
-            previous = None
-        abs_percentage = abs(change_percentage)
-        effective_threshold = rule.threshold
-        effective_step = rule.step
+        tick = tick or self._tick_meta(quote)
+        states = self._get_level_states()
+        period = tick.period
+        level = level_for(change_percentage, rule.threshold, rule.step)
 
-        if abs_percentage <= rule.reset:
-            if previous:
-                self._clear_symbol_state(symbol)
-                if self.verbose:
-                    self.stdout.write(
-                        "Reset %s: change fell to %s%%."
-                        % (symbol, _format_percent(abs_percentage))
-                    )
+        def stored_level(side):
+            state = states.get((symbol, side))
+            return state.level if state is not None and state.period == period else 0
+
+        if any(
+            state is not None and state.period == period and state.config_sig != rule.signature
+            for state in (states.get((symbol, side)) for side in DIRECTIONS)
+        ):
+            self._rebase_levels(symbol, direction, level, rule, tick)
             return 0
 
-        step_count = _step_count_for(abs_percentage, effective_threshold, effective_step)
-
-        silent_reason = self._silent_reason(rule, previous, state_unknown)
-        if silent_reason:
-            self._record_silent_baseline(symbol, direction, step_count, rule, previous, silent_reason)
-            return 0
-
-        if step_count <= 0:
-            return 0
-
-        # The state's config_sig matches, so its step counts use the same level grid.
-        previous_direction = previous.get("direction") if previous else None
-        previous_step_count = int(previous.get("step_count", 0)) if previous else 0
-        if previous_direction != direction:
-            previous_step_count = 0
-        notified_levels = self._get_notified_levels(previous)
-
-        if step_count <= previous_step_count:
+        if level == 0:
+            return 0  # below the threshold: nothing to send, and nothing to reset
+        previous_level = stored_level(direction)
+        if level <= previous_level:
             if self.verbose:
                 self.stdout.write(
                     "Skip %s: already notified %s %s%%."
-                    % (
-                        symbol,
-                        direction,
-                        _format_percent(_step_percentage(previous_step_count, effective_threshold, effective_step)),
-                    )
+                    % (symbol, direction, _format_percent(level_percentage(previous_level, rule.threshold, rule.step)))
                 )
             return 0
 
-        sent_count = 0
-        highest_notified_step_count = previous_step_count
-        notification_history = self._serialize_notification_history(previous)
-        now_ts = int(time.time())
+        silent_reason = None
+        if not rule.enabled:
+            silent_reason = "muted"  # tracked, so unmuting later starts from the current level
+        elif getattr(self, "_baseline_poll", False):
+            silent_reason = "baseline"  # first run: record where every symbol is, send nothing
+        elif getattr(self, "_notification_batches_this_poll", 0) >= self._get_config().max_notification_batches:
+            logger.warning(
+                "Signal change notification batch limit reached (%s). Last processed symbol=%s.",
+                self._get_config().max_notification_batches, symbol,
+            )
+            return 0  # level not claimed: the next poll sends it
 
-        # Levels crossed since the last notification that have not been notified yet.
-        pending_levels = []
-        for crossed_step_count in self._crossed_step_counts(previous_step_count, step_count):
-            crossed_percentage = _step_percentage(crossed_step_count, effective_threshold, effective_step)
-            crossed_level_key = _level_key(crossed_percentage)
-            if crossed_level_key in notified_levels.get(direction, set()):
-                highest_notified_step_count = crossed_step_count
-                continue
-            if self._is_level_notification_in_cooldown(
-                direction, crossed_level_key, previous, now_ts, cooldown_seconds=rule.cooldown_seconds
-            ):
-                if self.verbose:
-                    self.stdout.write(
-                        "Skip %s: %s %s%% already notified within %ss."
-                        % (
-                            symbol,
-                            direction,
-                            _format_percent(crossed_percentage),
-                            rule.cooldown_seconds,
-                        )
-                    )
-                highest_notified_step_count = crossed_step_count
-                continue
-            pending_levels.append((crossed_step_count, crossed_percentage, crossed_level_key))
+        crossed_percentage = level_percentage(level, rule.threshold, rule.step)
+        if not advance(
+            symbol, direction, period=period, level=level, percentage=crossed_percentage,
+            config_sig=rule.signature, tick_at=tick.tick_at,
+        ):
+            if self.verbose:
+                self.stdout.write("Skip %s: %s level %s already claimed." % (symbol, direction, level))
+            states.pop((symbol, direction), None)  # re-read on the next poll
+            return 0
+        states[(symbol, direction)] = LevelState(level, period, rule.signature, tick.tick_at)
 
-        # A move that jumps several levels at once (e.g. -0.3% -> -7.37%) sends ONE
-        # notification for the highest level reached; the lower levels are marked as covered
-        # instead of each producing its own push with the same price.
-        if pending_levels:
-            max_batches = self._config.max_notification_batches
-            if self._notification_batches_this_poll >= max_batches:
-                logger.warning(
-                    "Signal change notification batch limit reached (%s). Last processed symbol=%s.",
-                    max_batches,
-                    symbol,
-                )
-            else:
-                top_step_count, top_percentage, _ = pending_levels[-1]
-                signed_top_percentage = top_percentage if direction == "up" else -top_percentage
-                if self._notify_all_users(
-                    symbol=symbol,
-                    direction=direction,
-                    signed_crossed_percentage=signed_top_percentage,
-                    crossed_percentage=top_percentage,
-                    current_percentage=change_percentage,
-                    quote=quote,
-                    signal_ids=[signal.id for signal in signals],
-                ):
-                    sent_count = 1
-                    self._notification_batches_this_poll += 1
-                    highest_notified_step_count = top_step_count
-                    for _, _, level_key in pending_levels:
-                        notified_levels.setdefault(direction, set()).add(level_key)
-                        notification_history.setdefault(direction, {})[level_key] = now_ts
+        if silent_reason:
+            self._count_silent(silent_reason)
+            return 0
 
-        state_step_count = highest_notified_step_count if sent_count else step_count
-        self._set_symbol_state(
-            symbol,
-            direction,
-            state_step_count,
-            self._serialize_notified_levels(notified_levels),
-            threshold=effective_threshold,
-            notification_history=notification_history,
-            config_sig=rule.signature,
+        sent = self._send_level_alert(
+            symbol=symbol,
+            direction=direction,
+            level=level,
+            period=period,
+            crossed_percentage=crossed_percentage,
+            change_percentage=change_percentage,
+            quote=quote,
+            signals=signals,
         )
-        return sent_count
+        if not sent:
+            # Nothing reached anyone, so give the level back; the next poll retries it. The push
+            # carries the (symbol, direction, level, period) key, so a retry never double-sends.
+            restore_level = previous_level
+            revert(
+                symbol, direction, period=period, claimed_level=level, restore_level=restore_level,
+                restore_percentage=level_percentage(restore_level, rule.threshold, rule.step)
+                if restore_level else Decimal("0"),
+            )
+            states[(symbol, direction)] = LevelState(restore_level, period, rule.signature, tick.tick_at)
+            return 0
+
+        self._notification_batches_this_poll = getattr(self, "_notification_batches_this_poll", 0) + 1
+        return 1
+
+    def _instrument_id_for(self, symbol, signals):
+        """Instrument id of `symbol` (as a string) for the push payload, or ""."""
+        for signal in signals or ():
+            if getattr(signal, "instrument_id", None):
+                return str(signal.instrument_id)
+        ids = getattr(self, "_instrument_ids", None) or {}
+        for candidate in [symbol] + sorted(_symbol_alias_candidates(symbol) - {symbol}):
+            if candidate in ids:
+                return ids[candidate]
+        return ""
+
+    def _load_instrument_ids(self):
+        try:
+            from Signals.models import Instrument
+
+            return {
+                _normalize_symbol(symbol): str(instrument_id)
+                for symbol, instrument_id in Instrument.objects.values_list("symbol", "id")
+                if _normalize_symbol(symbol)
+            }
+        except Exception:
+            logger.exception("Could not load instrument ids for move notifications.")
+            return {}
+
+    def _send_level_alert(
+        self, *, symbol, direction, level, period, crossed_percentage, change_percentage, quote, signals
+    ):
+        """
+        Deliver the notification for a claimed level. True when it went out. An exception while
+        creating the in-app notifications means nothing was delivered, so it is reported as
+        not sent (the caller rolls the claim back). FCM failures do not: send_push_to_users
+        already retries per device and logs every attempt, and the in-app copy exists by then.
+        """
+        signed = crossed_percentage if direction == UP else -crossed_percentage
+        try:
+            return self._notify_all_users(
+                symbol=symbol,
+                direction=direction,
+                signed_crossed_percentage=signed,
+                crossed_percentage=crossed_percentage,
+                current_percentage=change_percentage,
+                quote=quote,
+                signal_ids=[signal.id for signal in signals],
+                level=level,
+                instrument_id=self._instrument_id_for(symbol, signals),
+                notification_id=notification_id(symbol, direction, level, period),
+            )
+        except Exception:
+            logger.exception("Could not deliver %s %s level %s notification.", symbol, direction, level)
+            return False
 
     def _notify_all_users(
         self,
@@ -1050,7 +930,15 @@ class Command(BaseCommand):
         current_percentage,
         quote,
         signal_ids,
+        level=None,
+        instrument_id="",
+        notification_id=None,
     ):
+        """
+        In-app notification plus push for every active user. Returns True when it went out,
+        False when there was nobody to notify. `notification_id` is the idempotency key of the
+        alert (symbol, direction, level, period); firebase skips devices that already got it.
+        """
         from django.contrib.auth import get_user_model
         from Mainapp.models import UserNotification
         from Mainapp.notifications import bulk_create_user_notifications
@@ -1077,21 +965,7 @@ class Command(BaseCommand):
         message += ", trading at %s." % current_price if current_price else "."
         notification_type = "SUCCESS" if direction == "up" else "WARNING"
 
-        # Check for recent duplicates to prevent re-sends if cache failed
-        notification_cache_key = "signals:last_notification:%s:%s:%s" % (symbol, direction, crossed_label)
-        try:
-            if cache.get(notification_cache_key):
-                if self.verbose:
-                    self.stdout.write("Skip %s: notification already sent within last 60s." % title)
-                return False
-        except Exception:
-            logger.exception("Could not check notification cache for deduplication.")
-        
-        # Set the cache key to prevent duplicate notifications for 60 seconds
-        try:
-            cache.set(notification_cache_key, True, timeout=60)
-        except Exception:
-            logger.exception("Could not set notification deduplication cache for %s." % title)
+        # No duplicate guard here: the caller has already won the atomic claim on this level.
 
         notifications = []
         for user in users:
@@ -1119,6 +993,8 @@ class Command(BaseCommand):
             "type": "market_percentage_alert",
             "symbol": symbol,
             "direction": direction,
+            "alert_level": str(level) if level is not None else "",
+            "instrument_id": str(instrument_id or ""),
             "crossed_percentage": str(crossed_percentage),
             "signed_crossed_percentage": str(signed_crossed_percentage),
             "current_percentage": str(current_percentage),
@@ -1130,6 +1006,8 @@ class Command(BaseCommand):
             "ask": str(quote.get("ask") or ""),
             "source": "montada-app",
         }
+        if notification_id:
+            data["notification_id"] = notification_id
         push_summary = "not sent"
         try:
             from firebase import send_push_to_users

@@ -486,11 +486,12 @@ class PriceMoveNotificationSettings(models.Model):
     )
     reset_percent = models.DecimalField(
         max_digits=7, decimal_places=3, default=Decimal("0.3"),
-        help_text="When the daily change falls back to this %, the symbol can notify the same levels again.",
+        help_text="No longer used: a level is notified once per direction until the daily reference "
+                  "changes, however far the price falls back.",
     )
     cooldown_seconds = models.PositiveIntegerField(
         default=300,
-        help_text="Minimum seconds before the same direction/level is notified again.",
+        help_text="No longer used: a level already notified is never notified again in the same period.",
     )
     poll_interval_seconds = models.PositiveIntegerField(
         default=30,
@@ -616,3 +617,34 @@ class PriceMoveNotificationRule(models.Model):
     def __str__(self):
         state = {None: "inherit", True: "on", False: "muted"}[self.is_enabled]
         return f"{self.get_scope_display()} {self.target_label} ({state})"
+
+
+class PriceMoveLevelState(models.Model):
+    """
+    High-water mark of the %-move notifications: the highest level already notified for one
+    symbol and direction in the current period (see Signals.price_move_levels).
+
+    The alert is a broadcast to every active user, so the state is per (symbol, direction), not
+    per user. `period` identifies the reference price the % change is measured against; a row
+    from another period counts as level 0 and is overwritten by the next level reached.
+    Levels only ever rise inside a period: advancing is a conditional UPDATE, so two workers
+    can never both claim the same level.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    symbol = models.CharField(max_length=50)
+    direction = models.CharField(max_length=4)
+    period = models.CharField(max_length=64)
+    last_level = models.PositiveIntegerField(default=0)
+    last_percentage = models.DecimalField(max_digits=9, decimal_places=4, default=Decimal("0"))
+    config_sig = models.CharField(max_length=64, blank=True, default="")
+    last_tick_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = "signals_price_move_level_state"
+        constraints = [
+            models.UniqueConstraint(fields=["symbol", "direction"], name="uniq_price_move_level_symbol_dir"),
+        ]
+
+    def __str__(self):
+        return f"{self.symbol} {self.direction} level {self.last_level} ({self.period})"

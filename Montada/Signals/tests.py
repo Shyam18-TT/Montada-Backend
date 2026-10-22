@@ -1,3 +1,4 @@
+from unittest import skipIf
 from unittest.mock import Mock, patch
 from decimal import Decimal
 import json
@@ -5,7 +6,7 @@ import time
 import uuid
 
 from django.contrib.auth import get_user_model
-from django.test import SimpleTestCase, TestCase
+from django.test import SimpleTestCase, TestCase, TransactionTestCase
 from django.utils import timezone
 
 from firebase import send_push_to_tokens
@@ -171,18 +172,6 @@ class SignalChangeNotificationThresholdTests(TestCase):
         self.assertEqual(self._threshold("NEW.LISTING"), Decimal("5.0"))
         self.assertEqual(self._threshold("EURUSD"), Decimal("0.5"))
 
-    def test_level_notification_does_not_repeat_within_cooldown_window(self):
-        self.command.notification_cooldown_seconds = 300
-        current_time = int(time.time())
-        previous_state = {
-            "notification_history": {
-                "up": {"1": current_time - 60},
-            }
-        }
-
-        self.assertTrue(self.command._is_level_notification_in_cooldown("up", "1", previous_state, current_time))
-        self.assertFalse(self.command._is_level_notification_in_cooldown("up", "1", previous_state, current_time + 600))
-
     def _make_poll_command(self, config=None):
         from django.core.cache import cache
         from Signals.management.commands.poll_signal_change_notifications import BASELINE_DONE_CACHE_KEY
@@ -196,14 +185,10 @@ class SignalChangeNotificationThresholdTests(TestCase):
         command.verbose = False
         command._config_provider = Mock()
         command._config_provider.get.return_value = config or build_fallback_config()
-        command.state_ttl = 3600
-        command.lock_ttl = 60
         command.max_users_per_notification = 0
         command.reset_daily = True
         command.symbol_filter = set()
         command.excluded_symbols = set()
-        command._fallback_state_by_symbol = {}
-        command._fallback_locks = set()
         return command
 
     def test_poll_sends_push_to_all_active_users_once_per_level(self):
@@ -476,33 +461,323 @@ class PriceMoveMidDayChangeTests(TestCase):
         self.assertEqual(self.push.call_args.kwargs["title"], "EURUSD up 1.5%")
 
     def test_redis_outage_does_not_resend_levels(self):
+        # Levels live in the DB, so a cache outage neither loses them nor re-sends them.
         command = self._command()
+        self._poll(command, "1.3")
+        self.assertEqual(self.push.call_count, 1)
+
         broken_cache = Mock()
         for name in ("get", "set", "add", "delete"):
             getattr(broken_cache, name).side_effect = ConnectionError("redis down")
         with patch("Signals.management.commands.poll_signal_change_notifications.cache", broken_cache):
-            self._poll(command, "1.3")  # no state readable anywhere: recorded silently
-            self.assertEqual(self.push.call_count, 0)
-            self.assertIn("EURUSD", command._fallback_state_by_symbol)
-
-            self._poll(command, "1.6")  # in-process state is used for the next level
+            self._poll(command, "1.3")
+            self._poll(command, "1.4")
             self.assertEqual(self.push.call_count, 1)
+            self._poll(command, "1.6")  # a new level still goes out
+            self.assertEqual(self.push.call_count, 2)
 
-            command._fallback_state_last_cleanup = 0
-            command._cleanup_fallback_state()  # today's state survives the periodic cleanup
-            self._poll(command, "1.7")
-            self.assertEqual(self.push.call_count, 1)
 
-    def test_fallback_cleanup_drops_only_previous_days(self):
-        command = self._command()
-        today = command._current_state_day()
-        command._fallback_state_by_symbol = {
-            "EURUSD": {"trading_day": today},
-            "GBPUSD": {"trading_day": "2000-01-01"},
+BASELINE_DONE_KEY = "signals:change-notifications:baseline-done:v2"
+
+
+def _parse_tick(value):
+    from Signals.price_move_levels import parse_tick_time
+
+    return parse_tick_time(value)
+
+
+class PriceMoveHighWaterMarkTests(TestCase):
+    """A level is notified once per symbol/direction/period, however the price oscillates."""
+
+    def setUp(self):
+        self.push = Mock(return_value={"success_count": 1, "failure_count": 0, "failed_tokens": [], "errors": []})
+        User.objects.create_user(
+            email="hwm@example.com", username="hwm@example.com", password="Testpass123!", user_type="trader",
+        )
+
+    def _command(self, config=None):
+        return SignalChangeNotificationThresholdTests._make_poll_command(self, config)
+
+    def _quote(self, change, bid="2350.1", **extra):
+        quote = {
+            "change_percentage": str(change),
+            "dir": "down" if str(change).startswith("-") else "up",
+            "bid": bid,
+            "ask": bid,
         }
-        command._fallback_state_last_cleanup = 0
-        command._cleanup_fallback_state()
-        self.assertEqual(set(command._fallback_state_by_symbol), {"EURUSD"})
+        quote.update(extra)
+        return quote
+
+    def _poll(self, command, change, symbol="GOLD", **extra):
+        quotes = {symbol: self._quote(change, **extra)}
+        with patch(
+            "Signals.management.commands.poll_signal_change_notifications._fetch_live_quotes",
+            return_value=quotes,
+        ), patch("firebase.send_push_to_users", self.push):
+            command._run_poll()
+
+    def _titles(self):
+        return [call.kwargs["title"] for call in self.push.call_args_list]
+
+    def test_gold_sequence_notifies_each_level_once(self):
+        command = self._command()
+        # (change, pushes so far) after each tick of the table in the spec
+        steps = [
+            ("0.5", 1),   # reaches 0.5%: level 1 > 0
+            ("0.4", 1),   # drops below: level 0
+            ("0.5", 1),   # crosses 0.5% again: level 1 already sent
+            ("1.0", 2),   # level 2
+            ("0.9", 2),   # level 1
+            ("1.0", 2),   # level 2 again: already sent
+            ("1.5", 3),   # level 3
+        ]
+        for change, pushes in steps:
+            with self.subTest(change=change):
+                self._poll(command, change)
+                self.assertEqual(self.push.call_count, pushes)
+        self.assertEqual(self._titles(), ["GOLD up 0.5%", "GOLD up 1%", "GOLD up 1.5%"])
+
+    def test_multi_level_jump_sends_one_push_for_the_level_reached(self):
+        command = self._command()
+        self._poll(command, "0.3")
+        self.assertEqual(self.push.call_count, 0)
+        self._poll(command, "1.6")  # levels 1, 2 and 3 in one tick
+        self.assertEqual(self.push.call_count, 1)
+        self.assertEqual(self.push.call_args.kwargs["title"], "GOLD up 1.5%")
+        self.assertEqual(self.push.call_args.kwargs["data"]["alert_level"], "3")
+        self._poll(command, "1.6")
+        self.assertEqual(self.push.call_count, 1)  # no backlog for the skipped levels
+
+    def test_up_and_down_are_tracked_independently(self):
+        command = self._command()
+        self._poll(command, "0.6")
+        self._poll(command, "-0.6")
+        self.assertEqual(self._titles(), ["GOLD up 0.5%", "GOLD down 0.5%"])
+        self._poll(command, "0.7")
+        self._poll(command, "-0.7")
+        self.assertEqual(self.push.call_count, 2)  # both sides already at level 1
+        self._poll(command, "-1.1")
+        self.assertEqual(self.push.call_count, 3)
+        self.assertEqual(self.push.call_args.kwargs["title"], "GOLD down 1%")
+        self.assertEqual(self.push.call_args.kwargs["data"]["direction"], "down")
+        self.assertIn("down", self.push.call_args.kwargs["body"])
+        self._poll(command, "0.9")  # up side is still at level 1: nothing new
+        self.assertEqual(self.push.call_count, 3)
+        self._poll(command, "1.0")
+        self.assertEqual(self.push.call_count, 4)
+        self.assertEqual(self.push.call_args.kwargs["title"], "GOLD up 1%")
+
+    def test_new_period_resets_levels_and_first_crossing_notifies_again(self):
+        command = self._command()
+        self._poll(command, "0.6", bid_today="2340.5")
+        self._poll(command, "1.1", bid_today="2340.5")
+        self.assertEqual(self.push.call_count, 2)
+        self._poll(command, "1.1", bid_today="2340.5")
+        self.assertEqual(self.push.call_count, 2)
+
+        # The website rolled its daily reference: the % restarts, so do the levels.
+        self._poll(command, "0.1", bid_today="2361.0")
+        self.assertEqual(self.push.call_count, 2)
+        self._poll(command, "0.6", bid_today="2361.0")
+        self.assertEqual(self.push.call_count, 3)
+        self.assertEqual(self.push.call_args.kwargs["title"], "GOLD up 0.5%")
+        self._poll(command, "0.5", bid_today="2361.0")
+        self.assertEqual(self.push.call_count, 3)
+
+    def test_calendar_period_uses_configured_timezone_and_start_hour(self):
+        from datetime import datetime, timezone as dt_tz
+
+        from django.test import override_settings
+        from Signals.price_move_levels import period_key
+
+        before = datetime(2026, 10, 16, 20, 59, tzinfo=dt_tz.utc)
+        after = datetime(2026, 10, 16, 21, 1, tzinfo=dt_tz.utc)
+        with override_settings(PRICE_MOVE_PERIOD_TIMEZONE="UTC", PRICE_MOVE_PERIOD_START_HOUR=21):
+            self.assertEqual(period_key(None, now=before), "day:2026-10-15")
+            self.assertEqual(period_key(None, now=after), "day:2026-10-16")
+        with override_settings(PRICE_MOVE_PERIOD_SOURCE="calendar"):
+            # Calendar mode ignores the feed reference entirely.
+            self.assertEqual(period_key("2340.5", now=after), period_key(None, now=after))
+        self.assertEqual(period_key("2340.5", now=after), "ref:2340.5")
+        self.assertEqual(period_key("2340.5", now=after, reset=False), "all")
+
+    def test_two_workers_racing_on_the_same_tick_send_exactly_one_push(self):
+        first, second = self._command(), self._command()
+        # Both workers read the (empty) state before either one writes.
+        for command in (first, second):
+            command._level_states = {}
+            command._baseline_poll = False
+            command._notification_batches_this_poll = 0
+        quote = self._quote("0.6", time="2026-10-16 10:00:00.000", bid_today="2340.5")
+        with patch("firebase.send_push_to_users", self.push):
+            sent = [
+                command._maybe_notify_symbol("GOLD", "up", Decimal("0.6"), quote, [])
+                for command in (first, second)
+            ]
+        self.assertEqual(sorted(sent), [0, 1])
+        self.assertEqual(self.push.call_count, 1)
+
+    def test_float_noise_at_the_threshold_still_counts_as_the_level(self):
+        from Signals.price_move_levels import level_for
+
+        half = Decimal("0.5")
+        self.assertEqual(level_for(Decimal("0.4999"), half, half), 0)
+        self.assertEqual(level_for(Decimal("0.5"), half, half), 1)
+        self.assertEqual(level_for(Decimal("0.49999999"), half, half), 1)  # float noise
+        self.assertEqual(level_for(Decimal("-0.50000001"), half, half), 1)  # sign is irrelevant
+        self.assertEqual(level_for(Decimal("0.9999"), half, half), 1)
+        self.assertEqual(level_for(Decimal("1.49"), half, half), 2)
+        self.assertEqual(level_for(Decimal(str(0.1 + 0.2)), Decimal("0.3"), Decimal("0.3")), 1)
+
+        command = self._command()
+        self._poll(command, "0.49999999")
+        self.assertEqual(self.push.call_count, 1)
+        self.assertEqual(self.push.call_args.kwargs["title"], "GOLD up 0.5%")
+
+    def test_stock_and_crypto_use_five_percent_steps(self):
+        command = self._command()
+        for change, pushes in (("4.9", 0), ("5.0", 1), ("7.0", 1), ("9.99", 1), ("10", 2), ("12", 2), ("15.2", 3)):
+            with self.subTest(change=change):
+                self._poll(command, change, symbol="BTCUSD")
+                self.assertEqual(self.push.call_count, pushes)
+        self.assertEqual(self._titles(), ["BTCUSD up 5%", "BTCUSD up 10%", "BTCUSD up 15%"])
+
+    def test_out_of_order_tick_is_ignored(self):
+        from Signals.price_move_levels import advance, load_states
+
+        command = self._command()
+        self._poll(command, "1.2", time="2026-10-16 10:00:00.000")
+        self.assertEqual(self.push.call_count, 1)
+
+        # An older tick showing a bigger move must not set the high-water mark.
+        self._poll(command, "2.1", time="2026-10-16 09:59:00.000")
+        self.assertEqual(self.push.call_count, 1)
+
+        # Same protection in the database for a worker that has never seen the newer tick.
+        self.assertFalse(advance(
+            "GOLD", "up", period=next(iter(load_states().values())).period, level=9,
+            percentage=Decimal("4.5"), config_sig="x", tick_at=_parse_tick("2026-10-16 09:00:00.000"),
+        ))
+        self.assertEqual(load_states()[("GOLD", "up")].level, 2)
+
+        self._poll(command, "2.1", time="2026-10-16 10:01:00.000")
+        self.assertEqual(self.push.call_count, 2)
+        self.assertEqual(self.push.call_args.kwargs["title"], "GOLD up 2%")
+
+    def test_bad_ticks_never_move_the_state(self):
+        from Signals.price_move_levels import load_states
+
+        command = self._command()
+        for bid in ("0", "-5", "", None):
+            self._poll(command, "3.0", bid=bid)
+        self._poll(command, "3.0", bid_today="0")
+        self._poll(command, "3.0", bid_today="-1")
+        self.assertEqual(self.push.call_count, 0)
+        self.assertEqual(load_states(), {})
+
+    def test_payload_carries_level_direction_and_instrument(self):
+        from Signals.price_move_levels import notification_id
+
+        asset_class = AssetClass.objects.create(name="Metals")
+        instrument = Instrument.objects.create(asset_class=asset_class, symbol="GOLD")
+        command = self._command()
+        self._poll(command, "-1.2", time="2026-10-16 10:00:00.000", bid_today="2340.5")
+        data = self.push.call_args.kwargs["data"]
+        self.assertEqual(data["type"], "market_percentage_alert")
+        self.assertEqual(data["alert_level"], "2")
+        self.assertEqual(data["direction"], "down")
+        self.assertEqual(data["instrument_id"], str(instrument.id))
+        self.assertEqual(self.push.call_args.kwargs["title"], "GOLD down 1%")
+        key = data["notification_id"]
+        self.assertTrue(key.startswith("pm-") and len(key) <= 64)
+        self.assertEqual(key, notification_id("GOLD", "down", 2, "ref:2340.5"))
+        self.assertNotEqual(key, notification_id("GOLD", "down", 3, "ref:2340.5"))
+        self.assertNotEqual(key, notification_id("GOLD", "up", 2, "ref:2340.5"))
+        self.assertNotEqual(key, notification_id("GOLD", "down", 2, "ref:2361"))
+
+    def test_failed_delivery_gives_the_level_back_and_the_retry_sends_once(self):
+        from Signals.price_move_levels import load_states
+
+        command = self._command()
+        with patch("Mainapp.notifications.bulk_create_user_notifications", side_effect=RuntimeError("db down")):
+            self._poll(command, "0.7")
+        self.assertEqual(self.push.call_count, 0)
+        self.assertEqual(load_states()[("GOLD", "up")].level, 0)
+
+        self._poll(command, "0.7")
+        self.assertEqual(self.push.call_count, 1)
+        self._poll(command, "0.7")
+        self.assertEqual(self.push.call_count, 1)
+
+    def test_state_survives_a_restart_and_a_cache_flush(self):
+        from django.core.cache import cache
+
+        command = self._command()
+        self._poll(command, "0.7")
+        self.assertEqual(self.push.call_count, 1)
+
+        cache.clear()  # Redis flushed...
+        restarted = self._command()  # ...and a fresh process with no in-memory state
+        cache.delete(BASELINE_DONE_KEY)
+        self._poll(restarted, "0.8")
+        self.assertEqual(self.push.call_count, 1)
+        self._poll(restarted, "1.1")
+        self.assertEqual(self.push.call_count, 2)
+
+    def test_advance_is_a_compare_and_set(self):
+        from Signals.price_move_levels import advance
+
+        def go(level, period="ref:1"):
+            return advance("EURUSD", "up", period=period, level=level, percentage=Decimal(level), config_sig="s")
+
+        self.assertTrue(go(1))
+        self.assertFalse(go(1))    # same level
+        self.assertTrue(go(3))
+        self.assertFalse(go(2))    # a lower level never wins
+        self.assertTrue(go(1, period="ref:2"))   # new period: back to level 1
+        self.assertFalse(go(1, period="ref:2"))
+
+
+def _in_memory_sqlite():
+    from django.db import connection
+
+    return connection.vendor == "sqlite" and connection.is_in_memory_db()
+
+
+class PriceMoveAdvanceConcurrencyTests(TransactionTestCase):
+    """Real threads (own DB connections) racing for one level: exactly one wins."""
+
+    # SQLite's in-memory shared cache raises "table is locked" for parallel writers, which says
+    # nothing about the compare-and-set; run it on a file or server database.
+    @skipIf(_in_memory_sqlite(), "needs a database that supports concurrent writers")
+    def test_concurrent_advance_has_a_single_winner(self):
+        import threading
+
+        from django.db import connection
+        from Signals.price_move_levels import advance, load_states
+
+        workers = 8
+        barrier = threading.Barrier(workers)
+        results = []
+
+        def worker():
+            try:
+                barrier.wait(timeout=10)
+                results.append(advance(
+                    "GOLD", "up", period="ref:1", level=2, percentage=Decimal("1.0"), config_sig="s",
+                ))
+            finally:
+                connection.close()
+
+        threads = [threading.Thread(target=worker) for _ in range(workers)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+
+        self.assertEqual(len(results), workers)
+        self.assertEqual(results.count(True), 1)
+        self.assertEqual(load_states()[("GOLD", "up")].level, 2)
 
 
 class PriceMoveConfigCacheTests(TestCase):
