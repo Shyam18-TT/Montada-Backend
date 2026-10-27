@@ -167,11 +167,19 @@ DATABASES = {
         # 'HOST': '13.236.73.211',
         # 'PORT': '1433',
 
+        # 'ENGINE': 'mssql',
+        # 'NAME': 'MontadaApp',
+        # 'USER': 'sa',
+        # 'PASSWORD': 'Montada@1234',
+        # 'HOST': '127.0.0.1',
+        # 'PORT': '1433',
+
+
         'ENGINE': 'mssql',
-        'NAME': 'MontadaApp',
+        'NAME': 'test_MontadaApp',
         'USER': 'sa',
         'PASSWORD': 'Montada@1234',
-        'HOST': '127.0.0.1',
+        'HOST': '13.236.73.211',
         'PORT': '1433',
 
         # 'OPTIONS': {
