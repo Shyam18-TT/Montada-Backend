@@ -1,5 +1,5 @@
 const ROOT = "/var/www/vhosts/api.themontada.com/httpdocs/Montada-Backend";
-const PYTHON = `${ROOT}/venv/bin/python`;
+const PYTHON = `/var/www/vhosts/api.themontada.com/httpdocs/venv/bin/python`;
 const LOG_DIR = "/root/.pm2/logs";
 
 // Shared options: every process is started/stopped/restarted together with the API
