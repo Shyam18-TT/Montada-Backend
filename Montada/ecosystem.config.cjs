@@ -1,5 +1,5 @@
-const ROOT = "/var/www/vhosts/api.themontada.com/httpdocs/Montada-Backend";
-const PYTHON = `/var/www/vhosts/api.themontada.com/httpdocs/venv/bin/python`;
+const ROOT = "/var/www/vhosts/uat.themontada.com/httpdocs/Montada-Backend";
+const PYTHON = "/var/www/vhosts/uat.themontada.com/httpdocs/venv/bin/python";
 const LOG_DIR = "/root/.pm2/logs";
 
 // Shared options: every process is started/stopped/restarted together with the API
@@ -40,7 +40,7 @@ module.exports = {
       ...base,
       name: "montada-api",
 
-      script: `${ROOT}/venv/bin/gunicorn`,
+      script: "/var/www/vhosts/uat.themontada.com/httpdocs/venv/bin/gunicorn",
 
       args: [
         "Montada.asgi:application",
