@@ -65,6 +65,7 @@ module.exports = {
     },
 
     // ---- Long-running background commands -------------------------------------
+    worker("montada-price-alerts", "run_price_alerts"),
     worker("montada-signal-notifications", "poll_signal_change_notifications"),
     worker("montada-news-stream", "run_fxstreet_news_stream"),
     worker("montada-economic-reminders", "run_economic_calendar_reminders --schedule"),
