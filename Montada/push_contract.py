@@ -220,6 +220,7 @@ SAMPLE_PAYLOADS = {
         "data": {
             "signal_id": "test", "symbol": "TESTUSD", "direction": "BUY", "timeframe": "H1", "status": "OPEN",
             "analyst_id": "test", "entry_price": "1.0000", "stop_loss": "0.9900", "take_profit": "1.0200",
+            "analyst_name": "TEST analyst", "signal_created_at": "2026-01-01T00:00:00+00:00", "timeframe_name": "1 hour",
         },
     },
     TYPE_ECONOMIC_EVENT: {

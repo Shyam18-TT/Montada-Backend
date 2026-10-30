@@ -12,6 +12,9 @@ from .views import (
     SubscribedAnalystSignalsListView,
     TraderApplySignalView,
     TraderAppliedSignalsListView,
+    AnalystFollowedSignalsListView,
+    AnalystApplySignalView,
+    AnalystAppliedSignalsListView,
     SignalPushNotificationView,
     PriceAlertCreateView,
     PriceAlertListView,
@@ -40,6 +43,11 @@ urlpatterns = [
     # The mobile app sends the signal id in the URL instead of the body.
     path('apply-signal/<uuid:signal_id>/', TraderApplySignalView.as_view(), name='trader_apply_signal_by_id'),
     path('my-applied-signals/', TraderAppliedSignalsListView.as_view(), name='trader_applied_signals_list'),
+    # Analyst -> analyst: trade ideas from other analysts the current analyst follows
+    path('following/signals/', AnalystFollowedSignalsListView.as_view(), name='analyst_followed_signals'),
+    path('following/apply-signal/', AnalystApplySignalView.as_view(), name='analyst_apply_signal'),
+    path('following/apply-signal/<uuid:signal_id>/', AnalystApplySignalView.as_view(), name='analyst_apply_signal_by_id'),
+    path('following/applied-signals/', AnalystAppliedSignalsListView.as_view(), name='analyst_applied_signals_list'),
     path('<str:pk>/notify/', SignalPushNotificationView.as_view(), name='signal_push_notify'),
 
     # User price alerts (market alerts)

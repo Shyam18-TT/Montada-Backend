@@ -26,6 +26,8 @@ from django.core.management.base import BaseCommand
 from django.db import connections
 from django.utils import timezone
 
+from Signals.notification_context import signal_context_data, with_signal_context
+
 logger = logging.getLogger(__name__)
 
 # Optional: MetaTrader5 package (pip install MetaTrader5)
@@ -405,6 +407,7 @@ def _close_signal_and_notify(signal, hit_type, current_price):
         f"Price reached {label.lower()} for {symbol} at {current_price}. "
         f"Entry: {signal.entry_price} | TP: {signal.take_profit} | SL: {signal.stop_loss}"
     )
+    message = with_signal_context(message, signal)
 
     # In-app notification (once).
     try:
@@ -433,6 +436,7 @@ def _close_signal_and_notify(signal, hit_type, current_price):
                 "hit": hit_type,
                 "symbol": symbol,
                 "price": str(current_price),
+                **signal_context_data(signal),
             },
         )
         signal.price_alert_fcm_sent = True
@@ -896,7 +900,7 @@ class Command(BaseCommand):
 
         signals = list(
             TradingSignal.active.filter(status=TradingSignal.Status.OPEN)
-            .select_related("analyst", "instrument")
+            .select_related("analyst", "instrument", "timeframe")
             .only(
                 "id", "analyst_id", "direction", "entry_price", "take_profit", "stop_loss",
                 "instrument_id", "status", "is_win", "is_loss",
@@ -1043,7 +1047,7 @@ class Command(BaseCommand):
         self.stdout.write("[CHECK] Step 1: Fetching open signals and active price alerts from DB...")
         signals = list(
             TradingSignal.active.filter(status=TradingSignal.Status.OPEN)
-            .select_related("analyst", "instrument")
+            .select_related("analyst", "instrument", "timeframe")
             .only(
                 "id", "analyst_id", "direction", "entry_price", "take_profit", "stop_loss",
                 "instrument_id", "status", "is_win", "is_loss",

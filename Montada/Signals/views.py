@@ -17,6 +17,7 @@ from Subscriptions.analyst_plan_access import (
     filter_visible_analyst_ids_for_signals,
     user_has_analyst_signal_access,
 )
+from .notification_context import signal_context_data, with_signal_context
 from .models import TradingSignal, AssetClass, Instrument, Timeframe, AppliedSignal, PriceAlert
 
 try:
@@ -202,7 +203,9 @@ def _notify_analyst_signal_applied(applied):
         "symbol": symbol,
         "direction": signal.direction or "",
         "timeframe": timeframe,
+        **signal_context_data(signal),
     }
+    body = with_signal_context(body, signal, include_analyst=False, include_timeframe=False)
 
     _create_and_broadcast_notifications(
         [analyst], title=title, body=body, notification_type="INFO",
@@ -242,7 +245,9 @@ def _notify_signal_published(signal, *, old_status=None):
         "entry_price": str(signal.entry_price) if signal.entry_price is not None else "",
         "stop_loss": str(signal.stop_loss) if signal.stop_loss is not None else "",
         "take_profit": str(signal.take_profit) if signal.take_profit is not None else "",
+        **signal_context_data(signal),
     }
+    body = with_signal_context(body, signal, include_analyst=False, include_timeframe=False)
 
     _create_and_broadcast_notifications(
         recipients, title=title, body=body, notification_type="INFO",
@@ -294,7 +299,9 @@ def _notify_signal_closed(signal, *, old_status=None):
         "entry_price": str(signal.entry_price) if signal.entry_price is not None else "",
         "stop_loss": str(signal.stop_loss) if signal.stop_loss is not None else "",
         "take_profit": str(signal.take_profit) if signal.take_profit is not None else "",
+        **signal_context_data(signal),
     }
+    body = with_signal_context(body, signal, include_analyst=False, include_timeframe=False)
 
     _create_and_broadcast_notifications(
         recipients, title=title, body=body, notification_type="INFO",
@@ -649,6 +656,20 @@ class TraderSignalListView(generics.ListAPIView):
     permission_classes = [permissions.IsAuthenticated]
     pagination_class = AnalystSignalPagination
 
+    def _get_candidate_analyst_ids(self, user):
+        # Analysts the trader is following (accepted and active follow)
+        following_analyst_ids = list(
+            Follow.objects.filter(
+                follower=user,
+                status=Follow.Status.ACCEPTED,
+                is_active=True,
+            ).values_list("followed_id", flat=True)
+        )
+        analyst = self.request.query_params.get("analyst", None)
+        if analyst:
+            following_analyst_ids = [analyst]
+        return following_analyst_ids
+
     def get_queryset(self):
         """
         Return signals from followed analysts who also have an active analyst-plan
@@ -658,22 +679,7 @@ class TraderSignalListView(generics.ListAPIView):
             return TradingSignal.active.none()
 
         user = self.request.user
-
-        # Analysts the trader is following (accepted and active follow)
-        following_analyst_ids = list(
-            Follow.objects.filter(
-                follower=user,
-                status=Follow.Status.ACCEPTED,
-                is_active=True,
-            ).values_list("followed_id", flat=True)
-        )
-
-        analyst = self.request.query_params.get("analyst", None)
-        if analyst:
-            following_analyst_ids = [analyst]
-            
-        if analyst in following_analyst_ids:
-            pass
+        following_analyst_ids = self._get_candidate_analyst_ids(user)
         visible_analyst_ids = filter_visible_analyst_ids_for_signals(
             user, following_analyst_ids
         )
@@ -861,6 +867,9 @@ class TraderApplySignalView(generics.GenericAPIView):
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = ApplySignalSerializer
 
+    def get_allowed_signals(self, user):
+        return _get_trader_visible_signals_queryset(user)
+
     def post(self, request, *args, **kwargs):
         data = {"note": request.data.get("note"), "signal": request.data.get("signal")}
         if kwargs.get("signal_id"):
@@ -871,7 +880,7 @@ class TraderApplySignalView(generics.GenericAPIView):
         signal_id = serializer.validated_data['signal']
         note = serializer.validated_data.get('note') or ''
 
-        allowed_signals = _get_trader_visible_signals_queryset(request.user)
+        allowed_signals = self.get_allowed_signals(request.user)
         try:
             signal = allowed_signals.get(id=signal_id)
         except TradingSignal.DoesNotExist:
@@ -922,6 +931,61 @@ class TraderAppliedSignalsListView(generics.ListAPIView):
         return AppliedSignal.objects.filter(
             trader=self.request.user
         ).select_related('signal', 'signal__analyst', 'signal__asset_class', 'signal__instrument', 'signal__timeframe').order_by('-applied_at')
+
+
+def _followed_analyst_ids_of_analyst(user):
+    """Other analysts the analyst `user` follows (accepted, active follow)."""
+    return list(
+        Follow.objects.filter(
+            follower=user,
+            status=Follow.Status.ACCEPTED,
+            is_active=True,
+            followed__user_type="analyst",
+            followed__is_active=True,
+        )
+        .exclude(followed=user)
+        .values_list("followed_id", flat=True)
+    )
+
+
+class AnalystFollowedSignalsListView(TraderSignalListView):
+    """
+    GET following/signals/: trade ideas posted by the OTHER analysts the current analyst
+    follows. Analyst-only; own signals and drafts are never included.
+
+    Same filters, pagination and row shape as ``view-signals/`` (status, search/q, plus
+    ``analyst=<uuid>`` to narrow to one followed analyst). Each row has ``is_applied``.
+    The per-analyst subscription rules of ``view-signals/`` apply unchanged.
+    """
+    permission_classes = [permissions.IsAuthenticated, IsAnalystPermission]
+
+    def _get_candidate_analyst_ids(self, user):
+        ids = _followed_analyst_ids_of_analyst(user)
+        analyst = (self.request.query_params.get("analyst") or "").strip()
+        if analyst:
+            # Narrow only; an analyst who is not followed yields nothing.
+            ids = [i for i in ids if str(i) == analyst]
+        return ids
+
+
+class AnalystApplySignalView(TraderApplySignalView):
+    """
+    POST following/apply-signal/<signal_id>/ (or following/apply-signal/ with {"signal": ...}):
+    an analyst applies an OPEN trade idea posted by another analyst they follow.
+    Same body, responses and one-apply-per-signal rule as ``apply-signal/``; the posting
+    analyst is notified.
+    """
+    permission_classes = [permissions.IsAuthenticated, IsAnalystPermission]
+
+    def get_allowed_signals(self, user):
+        return _get_trader_visible_signals_queryset(user).filter(
+            analyst_id__in=_followed_analyst_ids_of_analyst(user)
+        )
+
+
+class AnalystAppliedSignalsListView(TraderAppliedSignalsListView):
+    """GET following/applied-signals/: trade ideas the current analyst applied from other analysts."""
+    permission_classes = [permissions.IsAuthenticated, IsAnalystPermission]
 
 
 class PriceAlertCreateView(generics.CreateAPIView):
@@ -1069,7 +1133,7 @@ class SignalPushNotificationView(generics.GenericAPIView):
         try:
             signal = (
                 TradingSignal.active
-                .select_related("instrument", "timeframe")
+                .select_related("instrument", "timeframe", "analyst")
                 .get(pk=pk, analyst=request.user)
             )
         except TradingSignal.DoesNotExist:
@@ -1124,7 +1188,9 @@ class SignalPushNotificationView(generics.GenericAPIView):
             "timeframe": signal.timeframe.code if signal.timeframe else "",
             "signal_status": signal.status or "",
             "status": signal.status or "",
+            **signal_context_data(signal),
         }
+        body = with_signal_context(body, signal)
 
         # ── Count device tokens (non-fatal) ──────────────────────────────────
         # Uses the subquery form of the audience so SQL joins instead of matching a list of
