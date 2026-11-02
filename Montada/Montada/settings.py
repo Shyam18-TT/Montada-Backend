@@ -39,7 +39,6 @@ ALLOWED_HOSTS = [
     "www.uat.themontada.com",
     "adminuat.themontada.com",
     "admin.themontada.com",
-    "api.themontada.com",
 ]
 
 USE_X_FORWARDED_HOST = True
@@ -95,7 +94,7 @@ CORS_ALLOWED_ORIGINS = [
     "http://127.0.0.1:3000",
     "http://127.0.0.1:5000",
     "http://127.0.0.1:8080",
-    "https://api.themontada.com",
+    "https://uat.themontada.com",
     "https://app.themontada.com",
     "https://uat.themontada.com",
     "https://adminuat.themontada.com",
@@ -197,10 +196,10 @@ DATABASES = {
         'HOST': '213.175.205.19',
         'PORT': '1433',
 
-        #  'OPTIONS': {
-        #     'driver': 'ODBC Driver 18 for SQL Server',
-        #     'extra_params': 'Encrypt=no;TrustServerCertificate=yes;',
-        # },
+         'OPTIONS': {
+            'driver': 'ODBC Driver 18 for SQL Server',
+            'extra_params': 'Encrypt=no;TrustServerCertificate=yes;',
+        },
        
         
     },
@@ -208,7 +207,7 @@ DATABASES = {
 
 
 CSRF_TRUSTED_ORIGINS = [
-    "https://api.themontada.com",
+    "https://uat.themontada.com",
     "https://uat.themontada.com",
     "https://www.uat.themontada.com",
     "http://localhost:8080",
@@ -302,7 +301,7 @@ SIMPLE_JWT = {
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 # Base URL for absolute media URLs in API responses (e.g. article featured_image)
-PUBLIC_MEDIA_BASE_URL = 'https://api.themontada.com'
+PUBLIC_MEDIA_BASE_URL = 'https://uat.themontada.com'
 
 # Marketaux API for market/finance news (https://www.marketaux.com/documentation). Sign up for a free token.
 MARKETAUX_API_TOKEN = "vIWcnrrYFI0FBaNnAgD0DAeiQ2prDE7QakmniN9h"
