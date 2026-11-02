@@ -176,16 +176,16 @@ DATABASES = {
 
 
         'ENGINE': 'mssql',
-        'NAME': 'test_MontadaApp',
-        'USER': 'sa',
-        'PASSWORD': 'Montada@1234',
-        'HOST': '13.236.73.211',
-        'PORT': '1433',
+        'NAME': 'MontadaApp',
+        'USER': 'tst1',
+        'PASSWORD': 'Nb901@Bv801401@@',
+        'HOST': '3.76.105.23',        
+        'PORT': '1433',     
 
-        'OPTIONS': {
-            'driver': 'ODBC Driver 18 for SQL Server',
-            'extra_params': 'Encrypt=no;TrustServerCertificate=yes;',
-        },
+        # 'OPTIONS': {
+        #     'driver': 'ODBC Driver 18 for SQL Server',
+        #     'extra_params': 'Encrypt=no;TrustServerCertificate=yes;',
+        # },
        
     },
 
