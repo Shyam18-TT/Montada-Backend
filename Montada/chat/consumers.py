@@ -52,6 +52,9 @@ def _check_conversation_not_blocked(conversation_id, user):
         from .models import Conversation
 
         conversation = Conversation.objects.prefetch_related("participants").get(pk=conversation_id)
+        if conversation.is_group:
+            # Blocking one member must not shut a user out of the whole group.
+            return conversation.is_active
         for participant in conversation.participants.exclude(pk=user.pk):
             if users_are_blocked(user, participant):
                 return False
@@ -162,6 +165,30 @@ class ChatConsumer(AsyncWebsocketConsumer):
         message = event.get("message")
         if message is not None:
             await self.send(text_data=json.dumps({"type": "chat.message", "message": message}))
+
+    async def chat_group_event(self, event):
+        """
+        Group changes: group.updated / group.members_added / group.member_removed / group.closed.
+        A member who was removed (or left) is disconnected right after being told.
+        """
+        data = event.get("data") or {}
+        await self.send(
+            text_data=json.dumps(
+                {
+                    "type": "chat.group",
+                    "event": event.get("event"),
+                    "conversation_id": event.get("conversation_id"),
+                    "data": data,
+                }
+            )
+        )
+        user = self.scope.get("user")
+        if (
+            event.get("event") == "group.member_removed"
+            and user is not None
+            and str(data.get("user_id")) == str(user.pk)
+        ):
+            await self.close(code=4403)
 
 
 class ChatNotificationConsumer(AsyncWebsocketConsumer):

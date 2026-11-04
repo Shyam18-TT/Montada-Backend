@@ -9,12 +9,31 @@ from django.db import models
 class Conversation(models.Model):
     """
     A chat conversation. For 1-1 chats there are exactly 2 participants;
-    for group chats (future) there can be more. Use get_or_create_direct()
-    to find or create a 1-1 conversation between two users.
+    group chats (is_group=True) are created by an analyst and can hold more.
+    Use get_or_create_direct() to find or create a 1-1 conversation between two users.
     """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    # --- Group chat fields (unused for 1-1 conversations) ---
+    is_group = models.BooleanField(default=False)
+    name = models.CharField(max_length=100, blank=True, default="")
+    description = models.CharField(max_length=500, blank=True, default="")
+    icon = models.ImageField(upload_to="chat/group_icons/", blank=True, null=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="chat_groups_created",
+    )
+    # Messaging: True = only group admins can send (announcement style).
+    only_admins_can_send = models.BooleanField(default=False)
+    # Group info (name / description / icon): True = only group admins can edit.
+    only_admins_can_edit_info = models.BooleanField(default=True)
+    # Closed groups are hidden and read-only; rows are kept (no hard deletes).
+    is_active = models.BooleanField(default=True)
 
     participants = models.ManyToManyField(
         settings.AUTH_USER_MODEL,
@@ -52,6 +71,7 @@ class Conversation(models.Model):
             from django.db.models import Count
             conv = (
                 cls.objects.filter(id__in=common_ids)
+                .filter(is_group=False)
                 .annotate(c=Count("participant_links"))
                 .filter(c=2)
                 .order_by("created_at")
@@ -79,6 +99,22 @@ class ConversationParticipant(models.Model):
         related_name="chat_participant_links",
     )
     joined_at = models.DateTimeField(auto_now_add=True)
+
+    class Role(models.TextChoices):
+        MEMBER = "member", "Member"
+        ADMIN = "admin", "Admin"
+
+    # Group chats only; 1-1 participants are all plain members.
+    role = models.CharField(max_length=10, choices=Role.choices, default=Role.MEMBER)
+    # Group unread tracking: ChatMessage.read_at is one flag per message, which cannot
+    # represent "read by some members". Groups count messages newer than this instead.
+    last_read_at = models.DateTimeField(null=True, blank=True)
+    # Muted members still get messages but no push notification.
+    is_muted = models.BooleanField(default=False)
+
+    @property
+    def is_admin(self):
+        return self.role == self.Role.ADMIN
 
     class Meta:
         unique_together = [("conversation", "user")]

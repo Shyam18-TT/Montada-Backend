@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 from Mainapp.audit import audit
 from Mainapp.user_visibility import is_listable_user
 
+from . import groups
 from .models import Conversation, ConversationParticipant, ChatMessage
 from .serializers import (
     ConversationListSerializer,
@@ -73,6 +74,8 @@ def _blocked_user_ids_for(user):
 
 
 def _conversation_blocked_for_user(user, conversation):
+    if conversation.is_group:
+        return False
     other_participants = conversation.participants.exclude(pk=user.pk)
     for participant in other_participants:
         if _users_are_blocked(user, participant):
@@ -109,11 +112,19 @@ def _broadcast_new_message(conversation_id, message_payload):
 
 
 def _build_chat_notification_payload(conversation, message, recipient):
-    unread_count = conversation.messages.filter(
-        is_deleted=False,
-        read_at__isnull=True,
-    ).exclude(sender=recipient).count()
+    if conversation.is_group:
+        link = groups.get_participant(conversation, recipient)
+        unread_count = groups.group_unread_count(conversation, link) if link else 0
+    else:
+        unread_count = conversation.messages.filter(
+            is_deleted=False,
+            read_at__isnull=True,
+        ).exclude(sender=recipient).count()
+    extra = {}
+    if conversation.is_group:
+        extra = {"is_group": True, "group_name": conversation.name}
     return {
+        **extra,
         "conversation_id": str(conversation.id),
         "message": json.loads(json.dumps(ChatMessageSerializer(message).data, default=str)),
         "sender": json.loads(json.dumps(UserChatSerializer(message.sender).data, default=str)),
@@ -142,6 +153,11 @@ def _send_chat_push(conversation, message, recipients):
         )
         content = (message.content or "").strip()
         body = content if len(content) <= 140 else f"{content[:137]}..."
+        title = str(sender_name)
+        if conversation.is_group:
+            # WhatsApp style: group name as the title, "Sender: text" as the body.
+            title = conversation.name or "Group"
+            body = f"{sender_name}: {body}"[:140]
         # sender_id lets firebase.py skip recipients who blocked the sender.
         data = {
             "type": "chat_message",
@@ -152,9 +168,12 @@ def _send_chat_push(conversation, message, recipients):
             "sender_id": str(getattr(sender, "id", "")),
             "sender_name": str(sender_name),
         }
+        if conversation.is_group:
+            data["is_group"] = "true"
+            data["group_name"] = conversation.name
         send_push_to_users_in_background(
             users=recipients,
-            title=str(sender_name),
+            title=title,
             body=body,
             data=data,
         )
@@ -164,7 +183,13 @@ def _send_chat_push(conversation, message, recipients):
 
 def _broadcast_chat_notification(conversation, message, recipients):
     recipients = list(recipients)
-    _send_chat_push(conversation, message, recipients)
+    push_recipients = recipients
+    if conversation.is_group:
+        muted_ids = set(
+            conversation.participant_links.filter(is_muted=True).values_list("user_id", flat=True)
+        )
+        push_recipients = [r for r in recipients if r.pk not in muted_ids]
+    _send_chat_push(conversation, message, push_recipients)
     try:
         from asgiref.sync import async_to_sync
         from channels.layers import get_channel_layer
@@ -238,6 +263,7 @@ class ConversationListCreateView(APIView):
 
         convos = (
             Conversation.objects.filter(participants=request.user)
+            .exclude(is_group=True, is_active=False)
             .prefetch_related("participants", "participant_links")
             .annotate(
                 # Correlated subqueries instead of per-conversation queries in the
@@ -262,18 +288,29 @@ class ConversationListCreateView(APIView):
         # one block-check query per conversation per other participant.
         blocked_ids = _blocked_user_ids_for(request.user)
         # Conversations with a suspended or deleted user are hidden from the list.
+        # Groups are exempt: one blocked/suspended member must not hide the whole group.
         convos = [
             convo for convo in convos
-            if not blocked_ids.intersection(
-                p.pk for p in convo.participants.all() if p.pk != request.user.pk
-            )
-            and all(
-                is_listable_user(p)
-                for p in convo.participants.all() if p.pk != request.user.pk
+            if convo.is_group or (
+                not blocked_ids.intersection(
+                    p.pk for p in convo.participants.all() if p.pk != request.user.pk
+                )
+                and all(
+                    is_listable_user(p)
+                    for p in convo.participants.all() if p.pk != request.user.pk
+                )
             )
         ]
         paginator = self.pagination_class()
         page = paginator.paginate_queryset(convos, request)
+        # Per-member unread for the (few) groups on this page; 1-1 uses the annotation.
+        for convo in (page if page is not None else convos):
+            if convo.is_group:
+                link = next(
+                    (l for l in convo.participant_links.all() if l.user_id == request.user.pk),
+                    None,
+                )
+                convo.group_unread_count = groups.group_unread_count(convo, link) if link else 0
         serializer = ConversationListSerializer(
             page or convos,
             many=True,
@@ -346,7 +383,7 @@ class ConversationDetailView(APIView):
                 {"error": "This conversation is blocked."},
                 status=status.HTTP_403_FORBIDDEN,
             )
-        serializer = ConversationDetailSerializer(conv)
+        serializer = ConversationDetailSerializer(conv, context={"request": request})
         return Response(serializer.data)
 
 
@@ -397,6 +434,18 @@ class MessageListCreateView(APIView):
                 {"error": "You are not part of this conversation."},
                 status=status.HTTP_403_FORBIDDEN,
             )
+        if conv.is_group:
+            link = groups.get_participant(conv, request.user)
+            if not conv.is_active:
+                return Response(
+                    {"error": "This group has been closed."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            if not groups.can_send_message(conv, link):
+                return Response(
+                    {"error": "Only admins can send messages in this group."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
         ser = ChatMessageCreateSerializer(data=request.data)
         ser.is_valid(raise_exception=True)
         msg = ChatMessage.objects.create(
@@ -430,6 +479,10 @@ class MessageMarkReadView(APIView):
                 {"error": "This conversation is blocked."},
                 status=status.HTTP_403_FORBIDDEN,
             )
+        if conv.is_group:
+            # read_at is a single flag per message; groups track reads per member instead.
+            groups.mark_group_read(conv, request.user)
+            return Response({"marked_read": 0})
         now = timezone.now()
         updated = conv.messages.filter(
             is_deleted=False,

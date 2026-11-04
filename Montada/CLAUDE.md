@@ -16,7 +16,7 @@ Montada/                  ← Django project root (run all commands from here)
 ├── Dashboard/            ← Analyst stats, polls, analytics
 ├── MontadaAdmin/         ← Admin-only endpoints (70+)
 ├── News/                 ← Articles, economic calendar, live news aggregation
-├── chat/                 ← Real-time 1-1 messaging via WebSocket
+├── chat/                 ← Real-time 1-1 and analyst group messaging via WebSocket
 ├── bases/                ← Shared base classes/utilities
 ├── credentials/          ← Firebase service account JSON
 ├── logs/                 ← App + PM2 logs (git-ignored)
@@ -128,13 +128,30 @@ OTP flows (6-digit codes, sent via email):
 
 ---
 
+## Analyst Group Chats (`chat/groups.py`, `chat/group_views.py`)
+
+Analysts create groups from users who follow them or whom they follow (accepted, active `Follow`).
+A group is a `Conversation` with `is_group=True`; the creator is the only `admin` (`ConversationParticipant.role`).
+Settings: `only_admins_can_send` (announcement mode) and `only_admins_can_edit_info`. Messages use the existing
+`/api/chat/conversations/<id>/messages/` endpoints; groups track unread per member via `last_read_at`.
+
+| Endpoint (`/api/chat/`) | Purpose |
+|---|---|
+| `POST groups/` | create (name, description, icon, member_ids, settings) |
+| `GET groups/eligible-members/?search=` | people the analyst can add |
+| `GET/PATCH/DELETE groups/<id>/` | details / edit info+settings / close group (soft) |
+| `POST groups/<id>/members/`, `DELETE groups/<id>/members/<user_id>/` | add / remove |
+| `POST groups/<id>/leave/`, `POST groups/<id>/mute/` | member leaves / mutes push |
+
+---
+
 ## WebSocket Endpoints
 
 All WS connections require a valid JWT passed as a query param or during handshake.
 
 | Path | Consumer | Purpose |
 |------|----------|---------|
-| `/ws/chat/<conversation_id>/` | `ChatConsumer` | Real-time 1-1 messaging |
+| `/ws/chat/<conversation_id>/` | `ChatConsumer` | Real-time 1-1 / group messaging (also pushes `chat.group` events) |
 | `/ws/chat/notifications/` | `ChatNotificationConsumer` | New message alerts |
 | `/ws/news/live/` | `LiveNewsConsumer` | Live news stream (Benzinga) |
 | `/ws/dashboard/notifications/` | `NotificationConsumer` | In-app notification push |
