@@ -18,6 +18,13 @@ from .views import (
     PriceAlertDestroyView,
 )
 
+from .market_move_views import (
+    MarketMoveCategoriesView,
+    MarketMovePreferencesView,
+    MarketMoveSymbolDetailView,
+    MarketMoveSymbolsView,
+)
+
 app_name = 'Signals'
 
 urlpatterns = [
@@ -46,5 +53,11 @@ urlpatterns = [
     path('price-alerts/', PriceAlertListView.as_view(), name='price_alert_list'),
     path('price-alerts/create/', PriceAlertCreateView.as_view(), name='price_alert_create'),
     path('price-alerts/<uuid:pk>/', PriceAlertDestroyView.as_view(), name='price_alert_destroy'),
+
+    # Which instruments send market-move alerts (thresholds stay admin-managed)
+    path('market-move-preferences/', MarketMovePreferencesView.as_view(), name='market_move_preferences'),
+    path('market-move-preferences/categories/', MarketMoveCategoriesView.as_view(), name='market_move_categories'),
+    path('market-move-preferences/symbols/', MarketMoveSymbolsView.as_view(), name='market_move_symbols'),
+    path('market-move-preferences/symbols/<str:symbol>/', MarketMoveSymbolDetailView.as_view(), name='market_move_symbol'),
 ]
 

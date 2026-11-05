@@ -948,6 +948,17 @@ class Command(BaseCommand):
         # in send_push_to_users.
         users = list(User.objects.filter(is_active=True).distinct())
 
+        # Users who turned this symbol (or its whole category) off in their market-move
+        # preferences get neither the in-app notification nor the push.
+        try:
+            from Signals.market_move_preferences import opted_out_user_ids
+
+            opted_out = opted_out_user_ids(symbol)
+            if opted_out:
+                users = [user for user in users if user.pk not in opted_out]
+        except Exception:
+            logger.exception("Could not apply market-move preferences for %s; notifying everyone.", symbol)
+
         # Limit users if specified
         if self.max_users_per_notification > 0:
             users = users[:self.max_users_per_notification]

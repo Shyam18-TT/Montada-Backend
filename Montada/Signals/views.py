@@ -1,5 +1,8 @@
 import logging
 
+from decimal import Decimal
+
+from django.db import transaction
 from django.utils import timezone
 from django.db.models import Count, Q
 from django.contrib.auth import get_user_model
@@ -17,7 +20,15 @@ from Subscriptions.analyst_plan_access import (
     filter_visible_analyst_ids_for_signals,
     user_has_analyst_signal_access,
 )
-from .models import TradingSignal, AssetClass, Instrument, Timeframe, AppliedSignal, PriceAlert
+from .models import (
+    AppliedSignal,
+    AssetClass,
+    Instrument,
+    PriceAlert,
+    SignalStopLossChange,
+    Timeframe,
+    TradingSignal,
+)
 
 try:
     from Mainapp.models import ActivityLog
@@ -1002,7 +1013,56 @@ _NOTIFICATION_CATEGORIES = {
     },
 }
 
+# Stop-loss moves: category -> (signal field holding the new stop, short label, title text).
+# Sending one of these also stores the new stop on the signal and writes a SignalStopLossChange row.
+_STOP_LOSS_MOVES = {
+    "move_sl_to_entry": ("entry_price", "entry", "Move stop loss to entry"),
+    "move_sl_to_tp1": ("take_profit", "TP1", "Move stop loss to TP1"),
+    "move_sl_to_tp2": ("take_profit_2", "TP2", "Move stop loss to TP2"),
+    "move_sl_to_tp3": ("take_profit_3", "TP3", "Move stop loss to TP3"),
+}
+_ALL_NOTIFICATION_CATEGORIES = tuple(_NOTIFICATION_CATEGORIES) + tuple(_STOP_LOSS_MOVES)
+
 _AUDIENCE_CHOICES = ("followers", "applied")
+
+
+def _price_str(value):
+    """Price as the app expects it in FCM data: 5 decimals, "" when unset."""
+    return "" if value is None else f"{Decimal(value):.5f}"
+
+
+def _stop_loss_move_error(signal, category):
+    """Why `signal` cannot take this stop-loss move, or None."""
+    if signal.status == TradingSignal.Status.CLOSED:
+        return "This trade idea is closed; its stop loss can no longer be moved."
+    if signal.status == TradingSignal.Status.DRAFT:
+        return "This trade idea is still a draft; publish it before moving its stop loss."
+    field, label, _ = _STOP_LOSS_MOVES[category]
+    if getattr(signal, field) is None:
+        return f"This trade idea has no {label} target; set it before moving the stop loss there."
+    return None
+
+
+def _apply_stop_loss_move(signal, category, analyst):
+    """
+    Store the new stop on the signal and record the old one, atomically. Returns
+    (previous_stop_loss, new_stop_loss), or None when the signal changed or was closed in the meantime.
+    The conditional update (open signals only, stop unchanged since read) stands in for a row lock.
+    """
+    field = _STOP_LOSS_MOVES[category][0]
+    previous = signal.stop_loss
+    new = getattr(signal, field)
+    with transaction.atomic():
+        updated = TradingSignal.objects.filter(
+            pk=signal.pk, status=TradingSignal.Status.OPEN, stop_loss=previous,
+        ).update(stop_loss=new, updated_at=timezone.now())
+        if not updated:
+            return None
+        SignalStopLossChange.objects.create(
+            signal=signal, category=category, previous_stop_loss=previous,
+            new_stop_loss=new, analyst=analyst,
+        )
+    return previous, new
 
 
 def _build_notification_content(signal, category: str, custom_title: str | None, custom_body: str | None):
@@ -1024,6 +1084,18 @@ def _build_notification_content(signal, category: str, custom_title: str | None,
     return title, body
 
 
+def _build_stop_loss_content(signal, category, new_stop, analyst, custom_title, custom_body):
+    """Title/body for a move_sl_to_* push (English; the backend does not localize signal pushes)."""
+    symbol = signal.instrument.symbol if signal.instrument else "Signal"
+    _, label, title_text = _STOP_LOSS_MOVES[category]
+    analyst_name = getattr(analyst, "name", None) or getattr(analyst, "username", None) or "your analyst"
+    title = custom_title or f"{symbol}: {title_text}"
+    body = custom_body or (
+        f"Analyst {analyst_name} moved the stop loss to {_price_str(new_stop)} ({label}). Adjust your trade."
+    )
+    return title, body
+
+
 class SignalPushNotificationView(generics.GenericAPIView):
     """
     POST: Analyst sends a push notification to users for one of their signals.
@@ -1033,7 +1105,8 @@ class SignalPushNotificationView(generics.GenericAPIView):
     Body (JSON):
     {
         "audience"     : "followers" | "applied",   // required
-        "category"     : "buy_now" | "sell_now" | "cancel_trade" | "exit",  // required
+        "category"     : "buy_now" | "sell_now" | "cancel_trade" | "exit"
+                         | "move_sl_to_entry" | "move_sl_to_tp1" | "move_sl_to_tp2" | "move_sl_to_tp3",  // required
         "custom_title" : "Override title",           // optional
         "custom_body"  : "Override message body",    // optional
     }
@@ -1042,6 +1115,9 @@ class SignalPushNotificationView(generics.GenericAPIView):
     - audience=applied   : notify only traders who applied this specific signal.
     - category           : determines the pre-built title and body (can be overridden).
     - The notification data payload always includes signal_id, symbol, direction, category.
+    - move_sl_to_*       : open signals only, the target must be set. Stores the new stop_loss on the
+                           signal (history row in SignalStopLossChange) and returns the full
+                           updated signal under "signal".
     """
     permission_classes = [permissions.IsAuthenticated, IsAnalystPermission]
 
@@ -1063,9 +1139,9 @@ class SignalPushNotificationView(generics.GenericAPIView):
                 {"error": f"'audience' must be one of: {', '.join(_AUDIENCE_CHOICES)}."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if category not in _NOTIFICATION_CATEGORIES:
+        if category not in _ALL_NOTIFICATION_CATEGORIES:
             return Response(
-                {"error": f"'category' must be one of: {', '.join(_NOTIFICATION_CATEGORIES)}."},
+                {"error": f"'category' must be one of: {', '.join(_ALL_NOTIFICATION_CATEGORIES)}."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -1082,7 +1158,36 @@ class SignalPushNotificationView(generics.GenericAPIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
+        # Stop-loss moves change the stored stop first, so the detail screen is right even when
+        # nobody is left to notify.
+        sl_move = _STOP_LOSS_MOVES.get(category)
+        previous_sl = new_sl = None
+        if sl_move:
+            error = _stop_loss_move_error(signal, category)
+            if error:
+                return Response({"error": error}, status=status.HTTP_400_BAD_REQUEST)
+            moved = _apply_stop_loss_move(signal, category, request.user)
+            if moved is None:
+                return Response(
+                    {"error": "This trade idea changed or was closed; refresh and try again."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            previous_sl, new_sl = moved
+            signal = (
+                TradingSignal.active
+                .select_related("analyst", "asset_class", "instrument", "timeframe")
+                .get(pk=signal.pk)
+            )
+            audit("signal.stop_loss_moved", request=request, signal=signal.pk, category=category,
+                  previous_stop_loss=previous_sl, new_stop_loss=new_sl)
+
+        def with_signal(payload):
+            if sl_move:
+                payload["signal"] = TradingSignalSerializer(signal).data
+            return payload
+
         # Recipients as subqueries (no id lists in SQL); only the id column is loaded.
+        from Followers.models import AnalystNotificationMute
         from Mainapp.notification_preferences import enabled_users_q
 
         if audience == "followers":
@@ -1093,26 +1198,39 @@ class SignalPushNotificationView(generics.GenericAPIView):
             ).values("follower_id")
         else:  # applied
             audience_ids = AppliedSignal.objects.filter(signal=signal).values("trader_id")
-        audience_qs = get_user_model().objects.filter(id__in=audience_ids).only("id")
+        # Followers who muted this analyst's trade ideas from the analyst profile.
+        muted_ids = AnalystNotificationMute.objects.filter(
+            analyst=request.user, mute_trade_ideas=True
+        ).values("user_id")
+        audience_qs = (
+            get_user_model().objects.filter(id__in=audience_ids).exclude(id__in=muted_ids).only("id")
+        )
 
         recipient_list = list(audience_qs)
         recipient_count = len(recipient_list)
         if recipient_count == 0:
             return Response(
-                {
-                    "message": "No recipients found for the selected audience. No notification sent.",
+                with_signal({
+                    "message": (
+                        "Stop loss updated. No recipients found for the selected audience; no notification sent."
+                        if sl_move else
+                        "No recipients found for the selected audience. No notification sent."
+                    ),
                     "audience": audience,
                     "category": category,
                     "recipient_count": 0,
                     "device_tokens_found": 0,
                     "success_count": 0,
                     "failure_count": 0,
-                },
+                }),
                 status=status.HTTP_200_OK,
             )
 
         # Build title / body from signal details
-        title, body = _build_notification_content(signal, category, custom_title, custom_body)
+        if sl_move:
+            title, body = _build_stop_loss_content(signal, category, new_sl, request.user, custom_title, custom_body)
+        else:
+            title, body = _build_notification_content(signal, category, custom_title, custom_body)
 
         # Data payload (always strings)
         symbol = signal.instrument.symbol if signal.instrument else ""
@@ -1129,6 +1247,24 @@ class SignalPushNotificationView(generics.GenericAPIView):
             "signal_status": signal.status or "",
             "status": signal.status or "",
         }
+
+        if sl_move:
+            from push_contract import new_notification_id
+
+            data_payload.update({
+                "trade_idea_id": str(signal.id),
+                # One id per push: the app and firebase.py de-duplicate on it.
+                "notification_id": new_notification_id(),
+                "previous_stop_loss": _price_str(previous_sl),
+                "new_stop_loss": _price_str(new_sl),
+                "stop_loss": _price_str(new_sl),
+                "entry_price": _price_str(signal.entry_price),
+                "take_profit": _price_str(signal.take_profit),
+                "take_profit_2": _price_str(signal.take_profit_2),
+                "take_profit_3": _price_str(signal.take_profit_3),
+                "title": title,
+                "body": body,
+            })
 
         # ── Count device tokens (non-fatal) ──────────────────────────────────
         # Uses the subquery form of the audience so SQL joins instead of matching a list of
@@ -1168,7 +1304,11 @@ class SignalPushNotificationView(generics.GenericAPIView):
                 fcm_failure = device_tokens_found
 
         # ── Build response message ───────────────────────────────────────────
-        if fcm_error:
+        if sl_move and fcm_error:
+            msg = "Stop loss updated, but the notification could not be queued."
+        elif sl_move:
+            msg = "Stop loss updated and notification queued."
+        elif fcm_error:
             msg = "Notification could not be queued."
         elif not recipient_list:
             msg = "All recipients turned trade-idea notifications off. No notification sent."
@@ -1192,6 +1332,7 @@ class SignalPushNotificationView(generics.GenericAPIView):
             response_data["tokens_error"] = tokens_error
         if fcm_error:
             response_data["fcm_error"] = fcm_error
+        with_signal(response_data)
 
         audit(
             "signal.push_notification_sent", request=request,

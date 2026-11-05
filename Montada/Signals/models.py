@@ -190,6 +190,22 @@ class TradingSignal(models.Model):
     take_profit = models.DecimalField(
         max_digits=12,
         decimal_places=5
+    )  # Target Price 1 (TP1): win/loss and TP-hit detection use this field only.
+
+    take_profit_2 = models.DecimalField(
+        max_digits=12,
+        decimal_places=5,
+        null=True,
+        blank=True,
+        help_text="Target Price 2 (TP2). Optional; requires take_profit.",
+    )
+
+    take_profit_3 = models.DecimalField(
+        max_digits=12,
+        decimal_places=5,
+        null=True,
+        blank=True,
+        help_text="Target Price 3 (TP3). Optional; requires take_profit_2.",
     )
 
     timeframe = models.ForeignKey(
@@ -648,3 +664,62 @@ class PriceMoveLevelState(models.Model):
 
     def __str__(self):
         return f"{self.symbol} {self.direction} level {self.last_level} ({self.period})"
+
+
+class MarketMovePreference(models.Model):
+    """
+    One user's choice for market-move alerts ("EURUSD up 0.5%") on a category or a symbol.
+    A missing row means "inherit": symbol -> category -> system default. Never holds a threshold.
+    """
+    class Scope(models.TextChoices):
+        CATEGORY = "category", "Category"
+        SYMBOL = "symbol", "Symbol"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="market_move_preferences",
+    )
+    scope = models.CharField(max_length=10, choices=Scope.choices)
+    key = models.CharField(
+        max_length=50,
+        help_text="Category key (forex, metals, ...) or normalized symbol (EURUSD).",
+    )
+    enabled = models.BooleanField()
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ("user", "scope", "key")
+        indexes = [
+            models.Index(fields=["scope", "key"]),
+        ]
+
+    def __str__(self):
+        return f"{self.user_id} {self.scope}:{self.key}={'on' if self.enabled else 'off'}"
+
+
+class SignalStopLossChange(models.Model):
+    """History of stop-loss moves made through POST /signals/<id>/notify/ (move_sl_to_* categories)."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    signal = models.ForeignKey(
+        TradingSignal,
+        on_delete=models.CASCADE,
+        related_name="stop_loss_changes",
+    )
+    category = models.CharField(max_length=30)
+    previous_stop_loss = models.DecimalField(max_digits=12, decimal_places=5)
+    new_stop_loss = models.DecimalField(max_digits=12, decimal_places=5)
+    analyst = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="signal_stop_loss_changes",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["signal", "-created_at"])]
+
+    def __str__(self):
+        return f"{self.signal_id} {self.category}: {self.previous_stop_loss} -> {self.new_stop_loss}"

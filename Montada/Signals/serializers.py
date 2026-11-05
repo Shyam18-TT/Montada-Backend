@@ -148,6 +148,7 @@ class TradingSignalSerializer(serializers.ModelSerializer):
             'asset_class', 'asset_class_name',
             'instrument', 'instrument_symbol', 'instrument_name',
             'direction', 'entry_price', 'stop_loss', 'take_profit',
+            'take_profit_2', 'take_profit_3',
             'timeframe', 'timeframe_code', 'timeframe_name',
             'confidence_level', 'analyst_note',
             'status', 'is_win', 'is_loss', 'is_neutral',
@@ -182,6 +183,44 @@ class TradingSignalSerializer(serializers.ModelSerializer):
             )
         return value
     
+    def _final(self, attrs, name):
+        """Value after this request: the submitted one, else the stored one (edit)."""
+        if name in attrs:
+            return attrs[name]
+        return getattr(self.instance, name, None)
+
+    def _validate_targets(self, attrs):
+        """Target prices: positive, chained (TP2 needs TP1, TP3 needs TP2) and ordered by direction."""
+        errors = {}
+        tp1, tp2, tp3 = (self._final(attrs, n) for n in ('take_profit', 'take_profit_2', 'take_profit_3'))
+
+        for name in ('take_profit_2', 'take_profit_3'):
+            if attrs.get(name) is not None and attrs[name] <= 0:
+                errors[name] = f"{self.fields[name].label or name} must be greater than 0."
+        if tp2 is not None and tp1 is None:
+            errors['take_profit_2'] = 'Target price 2 requires take_profit (target price 1).'
+        if tp3 is not None and tp2 is None:
+            errors['take_profit_3'] = 'Target price 3 requires take_profit_2 (target price 2).'
+
+        # Drafts skip the ordering checks, like every other price check on a draft.
+        final_status = self._final(attrs, 'status')
+        if not errors and final_status != TradingSignal.Status.DRAFT:
+            direction = self._final(attrs, 'direction')
+            entry = self._final(attrs, 'entry_price')
+            if direction in (TradingSignal.Direction.BUY, TradingSignal.Direction.SELL) and entry is not None:
+                chain = [('entry_price', entry), ('take_profit', tp1), ('take_profit_2', tp2), ('take_profit_3', tp3)]
+                chain = [(n, v) for n, v in chain if v is not None]
+                buy = direction == TradingSignal.Direction.BUY
+                for (prev_name, prev), (name, value) in zip(chain, chain[1:]):
+                    if (buy and value <= prev) or (not buy and value >= prev):
+                        errors[name] = (
+                            f"For a {direction} signal, {name} must be {'above' if buy else 'below'} "
+                            f"{prev_name}."
+                        )
+                        break
+        if errors:
+            raise serializers.ValidationError(errors)
+
     def validate(self, attrs):
         """Additional validation"""
         # Ensure entry_price, stop_loss, and take_profit are positive
@@ -200,6 +239,8 @@ class TradingSignalSerializer(serializers.ModelSerializer):
                 'take_profit': 'Take profit must be greater than 0.'
             })
         
+        self._validate_targets(attrs)
+
         # Validate that instrument belongs to the selected asset_class
         asset_class = attrs.get('asset_class')
         instrument = attrs.get('instrument')
