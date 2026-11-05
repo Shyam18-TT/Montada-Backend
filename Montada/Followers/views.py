@@ -16,7 +16,7 @@ from django.conf import settings as django_settings
 from Mainapp.audit import audit
 from Mainapp.user_visibility import listable_users_q
 
-from .models import AnalystReview, Follow, Mute
+from .models import AnalystNotificationMute, AnalystReview, Follow, Mute
 
 try:
     from Moderation.models import UserBlock, users_are_blocked
@@ -42,6 +42,7 @@ from .serializers import (
     FollowActionSerializer,
     MuteSerializer,
     MuteActionSerializer,
+    AnalystNotificationTypesSerializer,
     UserMinimalSerializer,
     FollowerListItemSerializer,
     AnalystReviewSubmitSerializer,
@@ -469,6 +470,62 @@ class UnmuteUserView(APIView):
             )
         audit("follow.unmuted", request=request, muter=request.user.pk, unmuted=user_id)
         return Response({"message": "User unmuted."}, status=status.HTTP_200_OK)
+
+
+# ---------- Per-analyst notification settings ----------
+
+
+def _analyst_notification_settings(user, analyst):
+    row = AnalystNotificationMute.objects.filter(user=user, analyst=analyst).first()
+    return {
+        "analyst_id": str(analyst.pk),
+        "trade_ideas_muted": bool(row and row.mute_trade_ideas),
+        "articles_muted": bool(row and row.mute_articles),
+        "chat_muted": bool(row and row.mute_chat),
+    }
+
+
+class AnalystNotificationSettingsView(APIView):
+    """
+    GET /api/followers/analysts/<analyst_id>/notifications/
+    Current per-analyst notification switches for the caller.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, analyst_id):
+        analyst = get_object_or_404(User, id=analyst_id, user_type="analyst")
+        return Response(_analyst_notification_settings(request.user, analyst))
+
+
+class _AnalystNotificationToggleView(APIView):
+    permission_classes = [IsAuthenticated]
+    mute_value = True
+
+    def post(self, request, analyst_id):
+        analyst = get_object_or_404(User, id=analyst_id, user_type="analyst")
+        serializer = AnalystNotificationTypesSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        types = serializer.validated_data.get("types") or list(AnalystNotificationMute.NOTIFICATION_TYPES)
+
+        row, _ = AnalystNotificationMute.objects.get_or_create(user=request.user, analyst=analyst)
+        for notification_type in types:
+            setattr(row, f"mute_{notification_type}", self.mute_value)
+        row.save()
+        audit(
+            "follow.analyst_notifications_muted" if self.mute_value else "follow.analyst_notifications_unmuted",
+            request=request, analyst=analyst.pk, types=",".join(sorted(types)),
+        )
+        return Response(_analyst_notification_settings(request.user, analyst))
+
+
+class AnalystNotificationMuteView(_AnalystNotificationToggleView):
+    """POST .../notifications/mute/  Body: { "types": ["trade_ideas", "articles", "chat"] } (omit = all)."""
+    mute_value = True
+
+
+class AnalystNotificationUnmuteView(_AnalystNotificationToggleView):
+    """POST .../notifications/unmute/  Body: { "types": [...] } (omit = all)."""
+    mute_value = False
 
 
 # ---------- Lists ----------

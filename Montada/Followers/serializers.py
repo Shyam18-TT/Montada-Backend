@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
-from .models import Follow, Mute, AnalystReview
+from .models import AnalystNotificationMute, AnalystReview, Follow, Mute
 
 User = get_user_model()
 
@@ -62,6 +62,17 @@ class MuteSerializer(serializers.ModelSerializer):
 
 class MuteActionSerializer(serializers.Serializer):
     user_id = serializers.UUIDField(required=True, help_text="ID of user to mute/unmute")
+
+
+class AnalystNotificationTypesSerializer(serializers.Serializer):
+    """Body for mute/unmute. `types` omitted or empty = all three."""
+
+    types = serializers.ListField(
+        child=serializers.ChoiceField(choices=AnalystNotificationMute.NOTIFICATION_TYPES),
+        required=False,
+        allow_empty=True,
+        help_text="Any of: trade_ideas, articles, chat. Omit for all.",
+    )
 
 
 class AnalystReviewSubmitSerializer(serializers.Serializer):

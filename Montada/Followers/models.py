@@ -105,6 +105,47 @@ class Mute(models.Model):
         return f"{self.muter} mutes {self.muted}"
 
 
+class AnalystNotificationMute(models.Model):
+    """
+    Per-analyst notification switches for one user (the analyst profile bell).
+    A row only exists once the user has changed something; no row = nothing muted.
+    """
+    NOTIFICATION_TYPES = ("trade_ideas", "articles", "chat")
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="analyst_notification_mutes",
+    )
+    analyst = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="notification_muted_by",
+    )
+    mute_trade_ideas = models.BooleanField(default=False)
+    mute_articles = models.BooleanField(default=False)
+    mute_chat = models.BooleanField(default=False)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ("user", "analyst")
+        indexes = [
+            models.Index(fields=["analyst"]),
+        ]
+
+    def __str__(self):
+        return f"{self.user} notification settings for {self.analyst}"
+
+    @classmethod
+    def muted_user_ids(cls, analyst, notification_type):
+        """IDs of users who muted `notification_type` for this analyst."""
+        field = f"mute_{notification_type}"
+        return set(
+            cls.objects.filter(analyst=analyst, **{field: True}).values_list("user_id", flat=True)
+        )
+
+
 class AnalystReview(models.Model):
     """
     Star rating (1–5) and optional written review for an analyst profile.

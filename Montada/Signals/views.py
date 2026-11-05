@@ -175,7 +175,11 @@ def _get_signal_notification_recipients(analyst):
         .values_list("follower_id", flat=True)
         .distinct()
     )
-    return list(User.objects.filter(id__in=recipient_ids).distinct())
+    # Followers who muted this analyst's trade ideas from the analyst profile.
+    from Followers.models import AnalystNotificationMute
+
+    muted_ids = AnalystNotificationMute.muted_user_ids(analyst, "trade_ideas")
+    return list(User.objects.filter(id__in=recipient_ids).exclude(id__in=muted_ids).distinct())
 
 
 def _notify_analyst_signal_applied(applied):

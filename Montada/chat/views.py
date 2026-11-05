@@ -189,6 +189,16 @@ def _broadcast_chat_notification(conversation, message, recipients):
             conversation.participant_links.filter(is_muted=True).values_list("user_id", flat=True)
         )
         push_recipients = [r for r in recipients if r.pk not in muted_ids]
+    sender = getattr(message, "sender", None)
+    if sender is not None and getattr(sender, "user_type", None) == "analyst":
+        # Recipients who muted this analyst's chat messages from the analyst profile.
+        try:
+            from Followers.models import AnalystNotificationMute
+
+            chat_muted = AnalystNotificationMute.muted_user_ids(sender, "chat")
+            push_recipients = [r for r in push_recipients if r.pk not in chat_muted]
+        except Exception:
+            logger.exception("Analyst chat mute lookup failed for conversation %s.", conversation.id)
     _send_chat_push(conversation, message, push_recipients)
     try:
         from asgiref.sync import async_to_sync
