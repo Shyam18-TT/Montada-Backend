@@ -66,6 +66,36 @@ def _member_link(conv, user):
     return None
 
 
+def _notify_added_to_group(conv, adder, users):
+    """Push "you were added to <group>" to newly added members (never blocks the request)."""
+    try:
+        from firebase import send_push_to_users_in_background
+
+        users = [u for u in users if u.pk != adder.pk]
+        if not users:
+            return
+        adder_name = getattr(adder, "name", None) or getattr(adder, "username", None) or "An analyst"
+        group_name = conv.name or "a group"
+        send_push_to_users_in_background(
+            users=users,
+            title=group_name,
+            body=f"{adder_name} added you to the group {group_name}"[:140],
+            data={
+                # Same type as group messages so the app opens the group chat on tap.
+                "type": "chat_message",
+                "notification_id": f"group_added:{conv.pk}",
+                "conversation_id": str(conv.pk),
+                "sender_id": str(adder.pk),
+                "sender_name": str(adder_name),
+                "is_group": "true",
+                "group_name": group_name,
+                "event": "added_to_group",
+            },
+        )
+    except Exception:
+        logger.exception("Group added push failed for conversation %s.", conv.pk)
+
+
 class GroupEligibleMembersView(APIView):
     """
     GET: users the analyst can add to a group (followers and followed users).
@@ -174,6 +204,7 @@ class GroupCreateView(APIView):
         )
         audit("chat.group_created", request=request, conversation=conv.pk,
               members=len(members) + 1, only_admins_can_send=conv.only_admins_can_send)
+        _notify_added_to_group(conv, request.user, members)
         return _detail_response(conv, request, status.HTTP_201_CREATED)
 
 
@@ -288,6 +319,7 @@ class GroupMembersView(APIView):
             groups.broadcast_group_event(
                 conv.pk, "group.members_added", user_ids=[str(u.pk) for u in added]
             )
+            _notify_added_to_group(conv, request.user, added)
         response = _detail_response(conv, request)
         response.data["added"] = len(added)
         return response
