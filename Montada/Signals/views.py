@@ -1,8 +1,10 @@
+import datetime
 import logging
+from django.core.exceptions import ValidationError
 
 from decimal import Decimal
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 from django.db.models import Count, Q
 from django.contrib.auth import get_user_model
@@ -25,6 +27,7 @@ from .models import (
     AssetClass,
     Instrument,
     PriceAlert,
+    SignalFeedback,
     SignalStopLossChange,
     Timeframe,
     TradingSignal,
@@ -34,6 +37,7 @@ try:
     from Mainapp.models import ActivityLog
 except ImportError:
     ActivityLog = None
+from .feedback import build_feedback_map
 from .serializers import (
     TradingSignalSerializer,
     AssetClassSerializer,
@@ -265,6 +269,73 @@ def _notify_signal_published(signal, *, old_status=None):
     _send_push_notifications(recipients, title=title, body=body, data=data_payload)
 
 
+def _signal_outcome(signal):
+    if signal.is_win:
+        return "profit"
+    if signal.is_loss:
+        return "loss"
+    return "neutral"
+
+
+def notify_applied_traders_to_vote(signal):
+    """
+    Tell every trader who applied this CLOSED signal that it closed and ask whether the idea was
+    favourable. Sent once per close: the claim on ``feedback_requested_at`` is atomic, so the
+    analyst endpoint, the price-alert auto-close and retries cannot double-send.
+    Returns the users notified (empty when already sent / nothing to send).
+    """
+    if not signal or signal.status != TradingSignal.Status.CLOSED or signal.deleted_at is not None:
+        return []
+
+    claimed = TradingSignal.objects.filter(
+        pk=signal.pk,
+        status=TradingSignal.Status.CLOSED,
+        feedback_requested_at__isnull=True,
+    ).update(feedback_requested_at=timezone.now())
+    if not claimed:
+        return []
+
+    trader_ids = (
+        AppliedSignal.objects.filter(signal_id=signal.pk)
+        .exclude(trader_id=signal.analyst_id)
+        .values_list("trader_id", flat=True)
+        .distinct()
+    )
+    traders = list(User.objects.filter(id__in=list(trader_ids), is_active=True, is_soft_deleted=False))
+    if not traders:
+        return []
+
+    analyst = signal.analyst
+    analyst_name = (
+        getattr(analyst, "name", None) or getattr(analyst, "username", None)
+        or getattr(analyst, "email", "Analyst")
+    )
+    symbol = signal.instrument.symbol if signal.instrument else "signal"
+    timeframe = signal.timeframe.code if signal.timeframe else ""
+    outcome = _signal_outcome(signal)
+    title = f"{symbol} signal closed – was it favourable?"
+    body = (
+        f"{analyst_name} closed the {signal.direction} signal for {symbol}"
+        + (f" ({timeframe})" if timeframe else "")
+        + f" as {outcome}. You applied this trade – please vote whether the idea was favourable."
+    )
+    data_payload = {
+        "type": "signal_closed",
+        "notification_id": f"signal_closed_vote:{signal.id}",
+        "signal_id": str(signal.id),
+        "analyst_id": str(signal.analyst_id),
+        "symbol": symbol,
+        "direction": signal.direction or "",
+        "status": signal.status or "",
+        "close_outcome": outcome,
+        "timeframe": timeframe,
+        "vote_requested": "true",
+    }
+    _create_and_broadcast_notifications(traders, title=title, body=body, notification_type="INFO")
+    _send_push_notifications(traders, title=title, body=body, data=data_payload)
+    return traders
+
+
 def _notify_signal_closed(signal, *, old_status=None):
     if (
         not signal
@@ -273,7 +344,12 @@ def _notify_signal_closed(signal, *, old_status=None):
     ):
         return
 
-    recipients = _get_signal_notification_recipients(signal.analyst)
+    # Applied traders get the closed + "please vote" notification instead of the plain one.
+    voters = notify_applied_traders_to_vote(signal)
+    voter_ids = {u.id for u in voters}
+    recipients = [
+        u for u in _get_signal_notification_recipients(signal.analyst) if u.id not in voter_ids
+    ]
     if not recipients:
         return
 
@@ -689,6 +765,7 @@ class TraderSignalListView(generics.ListAPIView):
             
         if analyst in following_analyst_ids:
             pass
+        
         visible_analyst_ids = filter_visible_analyst_ids_for_signals(
             user, following_analyst_ids
         )
@@ -844,6 +921,102 @@ class SubscribedAnalystSignalsListView(generics.ListAPIView):
         return qs.order_by("-created_at")
 
 
+class FollowedAnalystsSignalsListView(generics.ListAPIView):
+    """
+    GET: trade ideas (signals) posted by the OTHER analysts the current analyst follows.
+    Analyst-only. Open and closed signals are both returned (newest first); DRAFTs never.
+    Following = accepted + active ``Follow``. No content-plan subscription is required.
+
+    Query params (all optional):
+        status       — OPEN | CLOSED (default: both)
+        analyst      — UUID of one followed analyst
+        asset_class / instrument / timeframe — UUIDs
+        direction    — BUY | SELL
+        symbol       — partial match on instrument symbol
+        outcome      — profit | loss | neutral (closed signals only)
+        date_from / date_to — YYYY-MM-DD, on created_at
+        search or q  — free text (instrument, asset class, timeframe, note, analyst)
+        page, page_size
+    """
+
+    serializer_class = TradingSignalSerializer
+    permission_classes = [permissions.IsAuthenticated, IsAnalystPermission]
+    pagination_class = AnalystSignalPagination
+
+    def get_queryset(self):
+        user = self.request.user
+        followed_ids = Follow.objects.filter(
+            follower=user,
+            status=Follow.Status.ACCEPTED,
+            is_active=True,
+        ).exclude(followed_id=user.id).values_list("followed_id", flat=True)
+
+        qs = (
+            TradingSignal.active.filter(
+                analyst_id__in=list(followed_ids),
+                analyst__user_type="analyst",
+            )
+            .exclude(status=TradingSignal.Status.DRAFT)
+            .select_related("analyst", "asset_class", "instrument", "timeframe")
+        )
+
+        p = self.request.query_params
+        st = (p.get("status") or "").strip().upper()
+        if st in (TradingSignal.Status.OPEN, TradingSignal.Status.CLOSED):
+            qs = qs.filter(status=st)
+
+        for param, field in (
+            ("analyst", "analyst_id"),
+            ("asset_class", "asset_class_id"),
+            ("instrument", "instrument_id"),
+            ("timeframe", "timeframe_id"),
+        ):
+            value = (p.get(param) or "").strip()
+            if value:
+                try:
+                    qs = qs.filter(**{field: value})
+                except (ValueError, ValidationError):
+                    return qs.none()
+
+        direction = (p.get("direction") or "").strip().upper()
+        if direction in ("BUY", "SELL"):
+            qs = qs.filter(direction=direction)
+
+        symbol = (p.get("symbol") or "").strip()
+        if symbol:
+            qs = qs.filter(instrument__symbol__icontains=symbol)
+
+        outcome = (p.get("outcome") or "").strip().lower()
+        if outcome == "profit":
+            qs = qs.filter(is_win=True)
+        elif outcome == "loss":
+            qs = qs.filter(is_loss=True)
+        elif outcome == "neutral":
+            qs = qs.filter(is_neutral=True)
+
+        for param, lookup in (("date_from", "created_at__date__gte"), ("date_to", "created_at__date__lte")):
+            raw = (p.get(param) or "").strip()
+            if raw:
+                try:
+                    qs = qs.filter(**{lookup: datetime.date.fromisoformat(raw)})
+                except ValueError:
+                    pass
+
+        search = (p.get("search") or p.get("q") or "").strip()
+        if search:
+            qs = qs.filter(
+                Q(instrument__symbol__icontains=search)
+                | Q(instrument__name__icontains=search)
+                | Q(asset_class__name__icontains=search)
+                | Q(timeframe__code__icontains=search)
+                | Q(timeframe__name__icontains=search)
+                | Q(analyst_note__icontains=search)
+                | Q(analyst__name__icontains=search)
+                | Q(analyst__email__icontains=search)
+            )
+        return qs.order_by("-created_at")
+
+
 def _get_trader_visible_signals_queryset(user):
     """
     Return queryset of signals the trader is allowed to see (and thus apply).
@@ -862,6 +1035,97 @@ def _get_trader_visible_signals_queryset(user):
     return TradingSignal.active.filter(
         analyst_id__in=visible_analyst_ids
     ).select_related('analyst', 'asset_class', 'instrument', 'timeframe')
+
+
+class SignalFeedbackView(generics.GenericAPIView):
+    """
+    Vote on whether a CLOSED trade idea was favourable. Only traders who applied it can vote.
+
+    GET    signals/<signal_id>/feedback/  – counts + the viewer's state (any user who can see the signal)
+    POST/PUT                              – {"is_favorable": true|false} (or "vote": "favorable"|"unfavorable");
+                                            creates the vote or changes the existing one
+    DELETE                                – withdraw the vote
+
+    Errors: 404 unknown/deleted signal · 409 signal not closed · 403 not applied / analyst's own idea ·
+    400 bad body.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    @staticmethod
+    def _parse_vote(data):
+        value = data.get("is_favorable")
+        if value is None and data.get("vote") is not None:
+            value = {"favorable": True, "unfavorable": False}.get(str(data.get("vote")).strip().lower())
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str) and value.strip().lower() in ("true", "false"):
+            return value.strip().lower() == "true"
+        return None
+
+    def _signal(self, signal_id):
+        return TradingSignal.active.select_related("analyst").filter(pk=signal_id).first()
+
+    def _state(self, request, signal):
+        fb = build_feedback_map(request.user, [signal])[str(signal.pk)]
+        return {"signal_id": str(signal.pk), "is_applied": fb["applied"], "feedback": fb["feedback"]}
+
+    def get(self, request, signal_id):
+        signal = self._signal(signal_id)
+        if signal is None:
+            return Response({"error": "Signal not found."}, status=status.HTTP_404_NOT_FOUND)
+        return Response(self._state(request, signal))
+
+    def _check(self, request, signal):
+        if signal is None:
+            return Response({"error": "Signal not found.", "code": "not_found"}, status=status.HTTP_404_NOT_FOUND)
+        if signal.status != TradingSignal.Status.CLOSED:
+            return Response(
+                {"error": "You can vote only after the signal is closed.", "code": "signal_not_closed"},
+                status=status.HTTP_409_CONFLICT,
+            )
+        if signal.analyst_id == request.user.id or not AppliedSignal.objects.filter(
+            trader=request.user, signal=signal
+        ).exists():
+            return Response(
+                {"error": "Only traders who applied this signal can vote on it.", "code": "not_applied"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return None
+
+    def post(self, request, signal_id):
+        signal = self._signal(signal_id)
+        error = self._check(request, signal)
+        if error is not None:
+            return error
+        is_favorable = self._parse_vote(request.data)
+        if is_favorable is None:
+            return Response(
+                {"error": "Send is_favorable (true/false).", "code": "invalid_vote"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            with transaction.atomic():
+                SignalFeedback.objects.update_or_create(
+                    signal=signal, voter=request.user, defaults={"is_favorable": is_favorable},
+                )
+        except IntegrityError:
+            # Two simultaneous first votes: the other request created the row, so update it.
+            SignalFeedback.objects.filter(signal=signal, voter=request.user).update(
+                is_favorable=is_favorable, updated_at=timezone.now(),
+            )
+        audit("signal.feedback", request=request, signal=signal.pk, analyst=signal.analyst_id,
+              is_favorable=is_favorable)
+        return Response({"message": "Thanks for your feedback.", **self._state(request, signal)})
+
+    put = post
+
+    def delete(self, request, signal_id):
+        signal = self._signal(signal_id)
+        error = self._check(request, signal)
+        if error is not None:
+            return error
+        SignalFeedback.objects.filter(signal=signal, voter=request.user).delete()
+        return Response({"message": "Your vote was removed.", **self._state(request, signal)})
 
 
 class TraderApplySignalView(generics.GenericAPIView):

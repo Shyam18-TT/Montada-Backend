@@ -2,6 +2,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from rest_framework import serializers
 
+from .feedback import build_feedback_map
 from .models import TradingSignal, AssetClass, Instrument, Timeframe, AppliedSignal, PriceAlert
 
 
@@ -113,10 +114,27 @@ class AssetClassWithInstrumentsSerializer(serializers.ModelSerializer):
         return InstrumentNestedSerializer(active_instruments, many=True).data
 
 
+class TradingSignalListSerializer(serializers.ListSerializer):
+    """Computes applied/vote state for every row of a list in a constant number of queries."""
+
+    def to_representation(self, data):
+        items = list(data.all() if hasattr(data, "all") else data)
+        request = self.context.get("request")
+        self.context["feedback_map"] = build_feedback_map(getattr(request, "user", None), items)
+        return [self.child.to_representation(item) for item in items]
+
+
 class TradingSignalSerializer(serializers.ModelSerializer):
     """
-    Serializer for TradingSignal model
+    Serializer for TradingSignal model.
+
+    Viewer-specific extras: ``is_applied`` (viewer applied this signal), ``is_polled`` (viewer
+    already voted on it) and, for CLOSED signals only, ``feedback`` with the vote counts, the
+    viewer's own vote and ``can_vote``.
     """
+    is_applied = serializers.SerializerMethodField()
+    is_polled = serializers.SerializerMethodField()
+    feedback = serializers.SerializerMethodField()
     analyst_name = serializers.CharField(source='analyst.name', read_only=True)
     analyst_email = serializers.EmailField(source='analyst.email', read_only=True)
     asset_class_name = serializers.CharField(source='asset_class.name', read_only=True)
@@ -153,12 +171,35 @@ class TradingSignalSerializer(serializers.ModelSerializer):
             'confidence_level', 'analyst_note',
             'status', 'is_win', 'is_loss', 'is_neutral',
             'close_outcome', 'is_entered', 'entry_triggered_at',
+            'is_applied', 'is_polled', 'feedback',
             'is_active', 'created_at', 'updated_at'
         )
         read_only_fields = (
             'id', 'analyst', 'created_at', 'updated_at',
             'close_outcome', 'is_entered', 'entry_triggered_at',
+            'is_applied', 'is_polled', 'feedback',
         )
+        list_serializer_class = TradingSignalListSerializer
+
+    def _viewer_state(self, obj):
+        fmap = self.context.get("feedback_map")
+        state = fmap.get(str(obj.pk)) if fmap else None
+        if state is None:
+            request = self.context.get("request")
+            state = build_feedback_map(getattr(request, "user", None), [obj])[str(obj.pk)]
+        return state
+
+    def get_is_applied(self, obj):
+        return self._viewer_state(obj)["applied"]
+
+    def get_is_polled(self, obj):
+        fb = self._viewer_state(obj)["feedback"]
+        if self._viewer_state(obj)["applied"] is None:
+            return None
+        return fb["has_voted"] if fb else False
+
+    def get_feedback(self, obj):
+        return self._viewer_state(obj)["feedback"]
 
     def get_close_outcome(self, obj):
         """How the analyst closed the signal (matches is_win / is_loss / is_neutral)."""

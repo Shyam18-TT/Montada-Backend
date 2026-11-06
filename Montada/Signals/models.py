@@ -268,6 +268,13 @@ class TradingSignal(models.Model):
         help_text="When the signal was closed. Set automatically in save(); analytics bucket closed signals by it.",
     )
 
+    feedback_requested_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When applied traders were asked to vote on this closed signal. Claimed atomically so the "
+                  "request is sent once per close; cleared when the signal is reopened.",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -304,12 +311,21 @@ class TradingSignal(models.Model):
         # edits, Django admin) and clear it if the signal is reopened. Later edits to a
         # closed signal keep the original close time, unlike updated_at.
         is_closed = self.status == self.Status.CLOSED
+        reopened = False
         if is_closed != (self.closed_at is not None):
             self.closed_at = timezone.now() if is_closed else None
+            extra = {"closed_at"}
+            if not is_closed:
+                # Reopened: votes belong to the previous close, and the next close must ask again.
+                reopened = not self._state.adding
+                self.feedback_requested_at = None
+                extra.add("feedback_requested_at")
             update_fields = kwargs.get("update_fields")
             if update_fields is not None:
-                kwargs["update_fields"] = {*update_fields, "closed_at"}
+                kwargs["update_fields"] = {*update_fields, *extra}
         super().save(*args, **kwargs)
+        if reopened:
+            SignalFeedback.objects.filter(signal_id=self.pk).delete()
 
     def soft_delete(self):
         """Soft delete the signal by setting deleted_at timestamp"""
@@ -368,6 +384,35 @@ class AppliedSignal(models.Model):
 
     def __str__(self):
         return f"{self.trader} applied {self.signal}"
+
+
+class SignalFeedback(models.Model):
+    """
+    A trader's vote on whether a CLOSED trade idea turned out favourable.
+    Only traders who applied the signal can vote; one vote per trader per signal (changeable).
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    signal = models.ForeignKey(
+        TradingSignal,
+        on_delete=models.CASCADE,
+        related_name="feedback_votes",
+    )
+    voter = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="signal_feedback_votes",
+    )
+    is_favorable = models.BooleanField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["signal", "voter"], name="unique_signal_feedback_per_voter"),
+        ]
+
+    def __str__(self):
+        return f"{self.voter_id} -> {self.signal_id}: {'favorable' if self.is_favorable else 'unfavorable'}"
 
 
 class PriceAlert(models.Model):

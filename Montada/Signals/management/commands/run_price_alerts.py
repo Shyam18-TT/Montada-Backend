@@ -400,6 +400,13 @@ def _close_signal_and_notify(signal, hit_type, current_price):
     audit("signal.auto_closed", actor="system", signal=signal.pk, analyst=signal.analyst_id,
           hit=hit_type, symbol=symbol, price=current_price, is_win=is_win, is_loss=is_loss)
 
+    # Ask traders who applied this signal whether it was favourable (sent once per close).
+    try:
+        from Signals.views import notify_applied_traders_to_vote
+        notify_applied_traders_to_vote(signal)
+    except Exception:
+        logger.exception("Signal %s: vote request to applied traders failed.", signal.id)
+
     title = f"{label} reached – {symbol}"
     message = (
         f"Price reached {label.lower()} for {symbol} at {current_price}. "
