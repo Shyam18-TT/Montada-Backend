@@ -140,7 +140,20 @@ CHANNEL_LAYERS = {
     "default": {
         "BACKEND": "channels_redis.core.RedisChannelLayer",
         "CONFIG": {
-            "hosts": [("127.0.0.1", 6379)],
+            "hosts": [ {
+                    "address": ("127.0.0.1", 6379),
+
+                    # Important for Redis Python 8.x
+                    "socket_timeout": None,
+
+                    # Connection establishment timeout
+                    "socket_connect_timeout": 5,
+                }],
+                 # Isolate Montada's channel-layer keys
+            "prefix": "montada",
+
+            "expiry": 60,
+            "group_expiry": 86400,
         },
     },
 }
