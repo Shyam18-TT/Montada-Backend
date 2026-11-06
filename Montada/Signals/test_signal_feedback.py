@@ -13,6 +13,7 @@ from Signals.models import (
     Timeframe,
     TradingSignal,
 )
+from Signals.feedback import analyst_feedback_stats
 from Signals.views import _notify_signal_closed, notify_applied_traders_to_vote
 
 User = get_user_model()
@@ -205,3 +206,80 @@ class AnalystFollowerFeedbackTests(_FeedbackBase):
         row = c.get("/api/signals/following-analysts-signals/?status=CLOSED").json()["results"][0]
         self.assertTrue(row["is_applied"])
         self.assertTrue(row["is_polled"])
+
+
+class FeedbackStatsTests(_FeedbackBase):
+    """Per-signal win/loss perspective and the analyst-level community_feedback stats."""
+
+    def _make(self, outcome, votes):
+        s = TradingSignal.objects.create(
+            analyst=self.analyst, asset_class=self.signal.asset_class, instrument=self.instrument,
+            timeframe=self.timeframe, direction="BUY", entry_price="1.1", stop_loss="1.0",
+            take_profit="1.2", confidence_level=60, status="CLOSED",
+            is_win=outcome == "profit", is_loss=outcome == "loss", is_neutral=outcome == "neutral",
+        )
+        for i, v in enumerate(votes):
+            u = _user(f"v{s.pk.hex[:6]}{i}")
+            SignalFeedback.objects.create(signal=s, voter=u, is_favorable=v)
+        return s
+
+    def test_per_signal_breakdown_and_alignment(self):
+        from Signals.feedback import vote_breakdown
+        b = vote_breakdown("profit", 3, 1, my_vote=True)
+        self.assertEqual((b["favorable_pct"], b["unfavorable_pct"]), (75.0, 25.0))
+        self.assertEqual((b["aligned_votes"], b["contrary_votes"], b["alignment_pct"]), (3, 1, 75.0))
+        self.assertEqual((b["community_verdict"], b["my_vote_matches_outcome"]), ("favorable", True))
+        b = vote_breakdown("loss", 3, 1, my_vote=True)
+        self.assertEqual((b["aligned_votes"], b["my_vote_matches_outcome"]), (1, False))
+        b = vote_breakdown("neutral", 1, 1, my_vote=True)
+        self.assertEqual((b["community_verdict"], b["alignment_pct"], b["my_vote_matches_outcome"]), ("split", None, None))
+        b = vote_breakdown("profit", 0, 0)
+        self.assertEqual((b["favorable_pct"], b["community_verdict"], b["alignment_pct"]), (None, None, None))
+
+    def test_analyst_stats_calculation(self):
+        self._make("profit", [True, True, False])   # majority favourable, 2/3 aligned
+        self._make("loss", [False, False])           # majority unfavourable, 2/2 aligned
+        self._make("loss", [True])                   # favourable, 0/1 aligned
+        self._make("neutral", [True, False])         # tied, excluded from alignment
+        self._make("profit", [])                     # closed, unpolled
+        stats = analyst_feedback_stats(self.analyst)
+        self.assertEqual(stats["closed_signals"], 5)
+        self.assertEqual((stats["polled_signals"], stats["unpolled_signals"]), (4, 1))
+        self.assertEqual(stats["poll_participation_rate"], 80.0)
+        self.assertEqual((stats["total_votes"], stats["favorable_votes"], stats["unfavorable_votes"]), (8, 4, 4))
+        self.assertEqual(stats["favorable_vote_rate"], 50.0)
+        self.assertEqual((stats["favorable_signals"], stats["unfavorable_signals"], stats["tied_signals"]), (2, 1, 1))
+        self.assertEqual(stats["favorable_signal_rate"], 50.0)
+        # profit/loss votes: 6; aligned = 2 (profit fav) + 2 (loss unfav) + 0 = 4
+        self.assertEqual(stats["alignment_rate"], round(4 / 6 * 100, 2))
+        self.assertEqual(stats["by_outcome"]["profit"]["favorable_votes"], 2)
+        self.assertEqual(stats["by_outcome"]["loss"]["unfavorable_votes"], 2)
+        self.assertEqual(stats["by_outcome"]["neutral"]["total_votes"], 2)
+        self.assertEqual(stats["by_outcome"]["profit"]["closed_signals"], 2)
+
+    def test_stats_empty_analyst_uses_null_rates(self):
+        stats = analyst_feedback_stats(self.analyst)
+        self.assertEqual(stats["closed_signals"], 0)
+        self.assertIsNone(stats["favorable_vote_rate"])
+        self.assertIsNone(stats["alignment_rate"])
+
+    def test_dashboard_and_profile_include_section_and_open_or_deleted_excluded(self):
+        s = self._make("profit", [True])
+        s.soft_delete()
+        self._make("profit", [True, False])
+        ca = APIClient()
+        ca.force_authenticate(self.analyst)
+        data = ca.get("/api/dashboard/performance/").json()
+        self.assertEqual(data["community_feedback"]["total_votes"], 2)
+        self.assertEqual(data["community_feedback"]["closed_signals"], 1)
+        prof = self.c1.get(f"/api/followers/analysts/{self.analyst.id}/profile/")
+        self.assertEqual(prof.status_code, 200)
+        self.assertEqual(prof.json()["community_feedback"]["total_votes"], 2)
+
+    def test_signal_feedback_has_perspective_fields(self):
+        self._close()
+        self.c1.post(self.url, {"is_favorable": True}, format="json")
+        fb = self.c1.get(self.url).json()["feedback"]
+        self.assertEqual(fb["close_outcome"], "profit")
+        self.assertEqual((fb["favorable_pct"], fb["alignment_pct"]), (100.0, 100.0))
+        self.assertTrue(fb["my_vote_matches_outcome"])

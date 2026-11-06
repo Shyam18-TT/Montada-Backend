@@ -27,6 +27,7 @@ except ImportError:
 
 try:
     from Signals.models import TradingSignal
+    from Signals.feedback import analyst_feedback_stats
 except ImportError:
     TradingSignal = None
 
@@ -1271,6 +1272,7 @@ class AnalystPublicProfileView(APIView):
                     "total_followers": total_followers,
                     "total_applied":   total_applied,
                 },
+                "community_feedback": analyst_feedback_stats(analyst),
                 "review_stats": {
                     "average_rating": average_rating_out,
                     "total_reviews": total_review_count,
