@@ -141,7 +141,10 @@ CHANNEL_LAYERS = {
         "BACKEND": "channels_redis.core.RedisChannelLayer",
         "CONFIG": {
             "hosts": [ {
-                    "address": ("127.0.0.1", 6379),
+                    # "address" must be a redis:// URL string; a (host, port) tuple crashes
+                    # channels_redis 4.2 (urlparse on a tuple). Use host/port keys instead.
+                    "host": "127.0.0.1",
+                    "port": 6379,
 
                     # Important for Redis Python 8.x
                     "socket_timeout": None,

@@ -891,6 +891,17 @@ class SubscribedAnalystSignalsListView(generics.ListAPIView):
             )
             for row in response.data["results"]:
                 row["is_applied"] = str(row["id"]) in applied_signal_ids
+
+            # The analyst viewing their own signals also sees how many traders applied each.
+            if request.user.id == analyst.id:
+                counts = {
+                    str(row["signal_id"]): row["n"]
+                    for row in AppliedSignal.objects.filter(signal_id__in=signal_ids)
+                    .values("signal_id")
+                    .annotate(n=Count("id"))
+                }
+                for row in response.data["results"]:
+                    row["applied_count"] = counts.get(str(row["id"]), 0)
         return response
 
     def get_queryset(self):
