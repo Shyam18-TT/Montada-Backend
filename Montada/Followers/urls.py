@@ -27,6 +27,10 @@ urlpatterns = [
 
     # Analyst public profile (for traders)
     path("analysts/<uuid:analyst_id>/profile/", views.AnalystPublicProfileView.as_view(), name="analyst_public_profile"),
+    # Per-analyst notification switches (trade ideas / articles / chat)
+    path("analysts/<uuid:analyst_id>/notifications/", views.AnalystNotificationSettingsView.as_view(), name="analyst_notification_settings"),
+    path("analysts/<uuid:analyst_id>/notifications/mute/", views.AnalystNotificationMuteView.as_view(), name="analyst_notification_mute"),
+    path("analysts/<uuid:analyst_id>/notifications/unmute/", views.AnalystNotificationUnmuteView.as_view(), name="analyst_notification_unmute"),
     # Analyst reviews (rating + text)
     path("reviews/", views.AnalystReviewSubmitView.as_view(), name="analyst_review_submit"),
 ]

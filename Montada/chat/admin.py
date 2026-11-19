@@ -9,7 +9,9 @@ class ConversationParticipantInline(admin.TabularInline):
 
 @admin.register(Conversation)
 class ConversationAdmin(admin.ModelAdmin):
-    list_display = ("id", "created_at", "updated_at")
+    list_display = ("id", "is_group", "name", "created_by", "is_active", "created_at", "updated_at")
+    list_filter = ("is_group", "is_active", "only_admins_can_send")
+    search_fields = ("name",)
     inlines = [ConversationParticipantInline]
 
 

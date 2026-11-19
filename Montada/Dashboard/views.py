@@ -21,6 +21,7 @@ from Mainapp.audit import audit
 from Mainapp.models import ActivityLog, UserNotification
 from Followers.models import Follow
 from Signals.models import TradingSignal, AssetClass, Timeframe
+from Signals.feedback import analyst_feedback_stats
 from Signals.views import IsAnalystPermission
 from Subscriptions.access import check_active_subscription
 
@@ -73,6 +74,7 @@ class AnalystPerformanceOverviewView(APIView):
             'win_count': win_count,
             'loss_count': loss_count,
             'active_signals_count': active_signals_count,
+            'community_feedback': analyst_feedback_stats(request.user),
         }, status=status.HTTP_200_OK)
 
 

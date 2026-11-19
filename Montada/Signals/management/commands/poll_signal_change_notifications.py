@@ -76,6 +76,15 @@ DEFAULT_STATE_TTL_SECONDS = 60 * 60 * 24 * 7
 DEFAULT_LOCK_TTL_SECONDS = 60
 # Market snapshot prices older than this fall back to the polled quote's bid.
 MARKET_SNAPSHOT_MAX_AGE_SECONDS = 300
+# run_market_data_stream runs on a different server, so its snapshot file is not on this
+# machine. Live ticks are read from the market-data websocket instead (override in settings).
+DEFAULT_MARKET_DATA_WS_URL = "ws://3.67.6.113:43544/ws/signals/market-data/"
+# How long each poll listens to the websocket. The stream pushes ticks every ~250 ms.
+MARKET_WS_LISTEN_SECONDS = 4
+MARKET_WS_CONNECT_TIMEOUT_SECONDS = 5
+# Last known digits per symbol survive here for symbols that did not tick in the window.
+MARKET_DIGITS_CACHE_KEY = "signals:poll_market_digits"
+MARKET_DIGITS_CACHE_TTL_SECONDS = 60 * 60 * 24 * 7
 # Max signal ids sent in the FCM data payload (keeps the payload well under FCM's 4KB limit).
 MAX_PUSH_SIGNAL_IDS = 20
 # While waiting for the next poll, check this often whether the admin changed the config.
@@ -539,7 +548,109 @@ class Command(BaseCommand):
         )
 
     def _load_market_prices(self):
-        """Latest ticks written by run_market_data_stream, keyed by normalized symbol."""
+        """
+        Latest MT5 ticks keyed by normalized symbol. Sources, later ones win:
+        local snapshot file (only fresh if the stream ran on this machine), last known digits
+        from the cache, then live ticks from the market-data websocket.
+        """
+        prices = self._load_market_prices_from_file()
+
+        try:
+            cached_digits = cache.get(MARKET_DIGITS_CACHE_KEY) or {}
+        except Exception:
+            cached_digits = {}
+        for symbol, digits in cached_digits.items():
+            if symbol in prices:
+                if prices[symbol].get("digits") is None:
+                    prices[symbol] = {**prices[symbol], "digits": digits}
+            else:
+                prices[symbol] = {"symbol": symbol, "bid": None, "digits": digits}
+
+        live = self._load_market_prices_from_websocket()
+        if live:
+            for symbol, tick in live.items():
+                if tick.get("digits") is None and prices.get(symbol, {}).get("digits") is not None:
+                    tick = {**tick, "digits": prices[symbol]["digits"]}
+                prices[symbol] = tick
+            try:
+                digits_by_symbol = {
+                    symbol: tick["digits"] for symbol, tick in prices.items() if tick.get("digits") is not None
+                }
+                cache.set(MARKET_DIGITS_CACHE_KEY, digits_by_symbol, MARKET_DIGITS_CACHE_TTL_SECONDS)
+            except Exception:
+                logger.debug("Could not cache market digits.", exc_info=True)
+        return prices
+
+    def _load_market_prices_from_websocket(self):
+        """Listen briefly to the market-data websocket; returns {normalized symbol: tick}."""
+        from django.conf import settings
+
+        url = getattr(settings, "MARKET_DATA_WS_URL", DEFAULT_MARKET_DATA_WS_URL)
+        if not url:
+            return {}
+        try:
+            import websocket  # websocket-client
+        except ImportError:
+            logger.warning("websocket-client is not installed; market ticks unavailable.")
+            return {}
+
+        prices = {}
+        started = time.monotonic()
+        deadline = started + MARKET_WS_LISTEN_SECONDS
+        ws = None
+        try:
+            ws = websocket.create_connection(url, timeout=MARKET_WS_CONNECT_TIMEOUT_SECONDS)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                ws.settimeout(remaining)
+                try:
+                    raw = ws.recv()
+                except websocket.WebSocketTimeoutException:
+                    break
+                try:
+                    message = json.loads(raw)
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(message, dict):
+                    continue
+                if message.get("type") not in ("market.ticks", "market.tick", "market.snapshot"):
+                    continue
+                ticks = message.get("ticks") or ([message["tick"]] if message.get("tick") else [])
+                for tick in ticks:
+                    if not isinstance(tick, dict) or tick.get("bid") is None:
+                        continue
+                    if message["type"] == "market.snapshot" and not self._is_fresh_tick(tick):
+                        continue  # initial snapshot comes from a file that may be stale
+                    symbol = _normalize_symbol(tick.get("symbol"))
+                    if symbol:
+                        prices[symbol] = tick
+        except Exception as exc:
+            logger.warning("Market-data websocket read failed (%s): %s", url, exc)
+        finally:
+            if ws is not None:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+        logger.info(
+            "Market-data websocket: %d symbol(s) in %.1fs.", len(prices), time.monotonic() - started
+        )
+        return prices
+
+    @staticmethod
+    def _is_fresh_tick(tick):
+        try:
+            received_at = parse_datetime(str(tick.get("received_at") or ""))
+        except ValueError:
+            return False
+        if received_at is None or timezone.is_naive(received_at):
+            return False
+        return (timezone.now() - received_at).total_seconds() <= MARKET_SNAPSHOT_MAX_AGE_SECONDS
+
+    def _load_market_prices_from_file(self):
+        """Ticks from the snapshot file, keyed by normalized symbol (empty if missing/stale)."""
         try:
             from Signals.market_stream import load_market_snapshot
 
@@ -947,6 +1058,17 @@ class Command(BaseCommand):
         # Every active user gets the in-app notification; push preferences are applied
         # in send_push_to_users.
         users = list(User.objects.filter(is_active=True).distinct())
+
+        # Users who turned this symbol (or its whole category) off in their market-move
+        # preferences get neither the in-app notification nor the push.
+        try:
+            from Signals.market_move_preferences import opted_out_user_ids
+
+            opted_out = opted_out_user_ids(symbol)
+            if opted_out:
+                users = [user for user in users if user.pk not in opted_out]
+        except Exception:
+            logger.exception("Could not apply market-move preferences for %s; notifying everyone.", symbol)
 
         # Limit users if specified
         if self.max_users_per_notification > 0:

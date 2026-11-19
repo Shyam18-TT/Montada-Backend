@@ -10,6 +10,8 @@ from .views import (
     TimeframeListView,
     TraderSignalListView,
     SubscribedAnalystSignalsListView,
+    FollowedAnalystsSignalsListView,
+    SignalFeedbackView,
     TraderApplySignalView,
     TraderAppliedSignalsListView,
     AnalystFollowedSignalsListView,
@@ -19,6 +21,13 @@ from .views import (
     PriceAlertCreateView,
     PriceAlertListView,
     PriceAlertDestroyView,
+)
+
+from .market_move_views import (
+    MarketMoveCategoriesView,
+    MarketMovePreferencesView,
+    MarketMoveSymbolDetailView,
+    MarketMoveSymbolsView,
 )
 
 app_name = 'Signals'
@@ -34,6 +43,7 @@ urlpatterns = [
     path('assets-instruments/', AssetClassWithInstrumentsView.as_view(), name='assets_instruments'),
 
     path('view-signals/', TraderSignalListView.as_view(), name='trader_signals_list'),
+    path('following-analysts-signals/', FollowedAnalystsSignalsListView.as_view(), name='followed_analysts_signals'),
     path(
         'analyst/<uuid:analyst_id>/signals/',
         SubscribedAnalystSignalsListView.as_view(),
@@ -48,11 +58,18 @@ urlpatterns = [
     path('following/apply-signal/', AnalystApplySignalView.as_view(), name='analyst_apply_signal'),
     path('following/apply-signal/<uuid:signal_id>/', AnalystApplySignalView.as_view(), name='analyst_apply_signal_by_id'),
     path('following/applied-signals/', AnalystAppliedSignalsListView.as_view(), name='analyst_applied_signals_list'),
+    path('<uuid:signal_id>/feedback/', SignalFeedbackView.as_view(), name='signal_feedback'),
     path('<str:pk>/notify/', SignalPushNotificationView.as_view(), name='signal_push_notify'),
 
     # User price alerts (market alerts)
     path('price-alerts/', PriceAlertListView.as_view(), name='price_alert_list'),
     path('price-alerts/create/', PriceAlertCreateView.as_view(), name='price_alert_create'),
     path('price-alerts/<uuid:pk>/', PriceAlertDestroyView.as_view(), name='price_alert_destroy'),
+
+    # Which instruments send market-move alerts (thresholds stay admin-managed)
+    path('market-move-preferences/', MarketMovePreferencesView.as_view(), name='market_move_preferences'),
+    path('market-move-preferences/categories/', MarketMoveCategoriesView.as_view(), name='market_move_categories'),
+    path('market-move-preferences/symbols/', MarketMoveSymbolsView.as_view(), name='market_move_symbols'),
+    path('market-move-preferences/symbols/<str:symbol>/', MarketMoveSymbolDetailView.as_view(), name='market_move_symbol'),
 ]
 

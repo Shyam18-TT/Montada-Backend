@@ -141,7 +141,23 @@ CHANNEL_LAYERS = {
     "default": {
         "BACKEND": "channels_redis.core.RedisChannelLayer",
         "CONFIG": {
-            "hosts": [("127.0.0.1", 6379)],
+            "hosts": [ {
+                    # "address" must be a redis:// URL string; a (host, port) tuple crashes
+                    # channels_redis 4.2 (urlparse on a tuple). Use host/port keys instead.
+                    "host": "127.0.0.1",
+                    "port": 6379,
+
+                    # Important for Redis Python 8.x
+                    "socket_timeout": None,
+
+                    # Connection establishment timeout
+                    "socket_connect_timeout": 5,
+                }],
+                 # Isolate Montada's channel-layer keys
+            "prefix": "montada",
+
+            "expiry": 60,
+            "group_expiry": 86400,
         },
     },
 }
@@ -160,19 +176,19 @@ CACHES = {
 DATABASES = {
         'default': {
 
-        # 'ENGINE': 'mssql',
-        # 'NAME': 'MontadaApp',
-        # 'USER': 'sa',
-        # 'PASSWORD': 'Montada@1234',
-        # 'HOST': '13.236.73.211',
-        # 'PORT': '1433',
-
         'ENGINE': 'mssql',
         'NAME': 'MontadaApp',
         'USER': 'sa',
         'PASSWORD': 'Montada@1234',
-        'HOST': '127.0.0.1',
+        'HOST': '13.236.73.211',
         'PORT': '1433',
+
+        # 'ENGINE': 'mssql',
+        # 'NAME': 'MontadaApp',
+        # 'USER': 'sa',
+        # 'PASSWORD': 'Montada@1234',
+        # 'HOST': '127.0.0.1',
+        # 'PORT': '1433',
 
         # 'OPTIONS': {
         #     'driver': 'ODBC Driver 18 for SQL Server',
@@ -189,10 +205,10 @@ DATABASES = {
         'HOST': '213.175.205.19',
         'PORT': '1433',
 
-        #  'OPTIONS': {
-        #     'driver': 'ODBC Driver 18 for SQL Server',
-        #     'extra_params': 'Encrypt=no;TrustServerCertificate=yes;',
-        # },
+         'OPTIONS': {
+            'driver': 'ODBC Driver 18 for SQL Server',
+            'extra_params': 'Encrypt=no;TrustServerCertificate=yes;',
+        },
        
         
     },
@@ -200,7 +216,7 @@ DATABASES = {
 
 
 CSRF_TRUSTED_ORIGINS = [
-    "https://api.themontada.com",
+    "https://uat.themontada.com",
     "https://uat.themontada.com",
     "https://www.uat.themontada.com",
     "http://localhost:8080",
@@ -294,7 +310,7 @@ SIMPLE_JWT = {
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 # Base URL for absolute media URLs in API responses (e.g. article featured_image)
-PUBLIC_MEDIA_BASE_URL = 'https://api.themontada.com'
+PUBLIC_MEDIA_BASE_URL = 'https://uat.themontada.com'
 
 # Marketaux API for market/finance news (https://www.marketaux.com/documentation). Sign up for a free token.
 MARKETAUX_API_TOKEN = "vIWcnrrYFI0FBaNnAgD0DAeiQ2prDE7QakmniN9h"

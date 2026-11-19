@@ -190,6 +190,22 @@ class TradingSignal(models.Model):
     take_profit = models.DecimalField(
         max_digits=12,
         decimal_places=5
+    )  # Target Price 1 (TP1): win/loss and TP-hit detection use this field only.
+
+    take_profit_2 = models.DecimalField(
+        max_digits=12,
+        decimal_places=5,
+        null=True,
+        blank=True,
+        help_text="Target Price 2 (TP2). Optional; requires take_profit.",
+    )
+
+    take_profit_3 = models.DecimalField(
+        max_digits=12,
+        decimal_places=5,
+        null=True,
+        blank=True,
+        help_text="Target Price 3 (TP3). Optional; requires take_profit_2.",
     )
 
     timeframe = models.ForeignKey(
@@ -252,6 +268,13 @@ class TradingSignal(models.Model):
         help_text="When the signal was closed. Set automatically in save(); analytics bucket closed signals by it.",
     )
 
+    feedback_requested_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When applied traders were asked to vote on this closed signal. Claimed atomically so the "
+                  "request is sent once per close; cleared when the signal is reopened.",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -288,12 +311,21 @@ class TradingSignal(models.Model):
         # edits, Django admin) and clear it if the signal is reopened. Later edits to a
         # closed signal keep the original close time, unlike updated_at.
         is_closed = self.status == self.Status.CLOSED
+        reopened = False
         if is_closed != (self.closed_at is not None):
             self.closed_at = timezone.now() if is_closed else None
+            extra = {"closed_at"}
+            if not is_closed:
+                # Reopened: votes belong to the previous close, and the next close must ask again.
+                reopened = not self._state.adding
+                self.feedback_requested_at = None
+                extra.add("feedback_requested_at")
             update_fields = kwargs.get("update_fields")
             if update_fields is not None:
-                kwargs["update_fields"] = {*update_fields, "closed_at"}
+                kwargs["update_fields"] = {*update_fields, *extra}
         super().save(*args, **kwargs)
+        if reopened:
+            SignalFeedback.objects.filter(signal_id=self.pk).delete()
 
     def soft_delete(self):
         """Soft delete the signal by setting deleted_at timestamp"""
@@ -352,6 +384,35 @@ class AppliedSignal(models.Model):
 
     def __str__(self):
         return f"{self.trader} applied {self.signal}"
+
+
+class SignalFeedback(models.Model):
+    """
+    A trader's vote on whether a CLOSED trade idea turned out favourable.
+    Only traders who applied the signal can vote; one vote per trader per signal (changeable).
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    signal = models.ForeignKey(
+        TradingSignal,
+        on_delete=models.CASCADE,
+        related_name="feedback_votes",
+    )
+    voter = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="signal_feedback_votes",
+    )
+    is_favorable = models.BooleanField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["signal", "voter"], name="unique_signal_feedback_per_voter"),
+        ]
+
+    def __str__(self):
+        return f"{self.voter_id} -> {self.signal_id}: {'favorable' if self.is_favorable else 'unfavorable'}"
 
 
 class PriceAlert(models.Model):
@@ -648,3 +709,62 @@ class PriceMoveLevelState(models.Model):
 
     def __str__(self):
         return f"{self.symbol} {self.direction} level {self.last_level} ({self.period})"
+
+
+class MarketMovePreference(models.Model):
+    """
+    One user's choice for market-move alerts ("EURUSD up 0.5%") on a category or a symbol.
+    A missing row means "inherit": symbol -> category -> system default. Never holds a threshold.
+    """
+    class Scope(models.TextChoices):
+        CATEGORY = "category", "Category"
+        SYMBOL = "symbol", "Symbol"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="market_move_preferences",
+    )
+    scope = models.CharField(max_length=10, choices=Scope.choices)
+    key = models.CharField(
+        max_length=50,
+        help_text="Category key (forex, metals, ...) or normalized symbol (EURUSD).",
+    )
+    enabled = models.BooleanField()
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ("user", "scope", "key")
+        indexes = [
+            models.Index(fields=["scope", "key"]),
+        ]
+
+    def __str__(self):
+        return f"{self.user_id} {self.scope}:{self.key}={'on' if self.enabled else 'off'}"
+
+
+class SignalStopLossChange(models.Model):
+    """History of stop-loss moves made through POST /signals/<id>/notify/ (move_sl_to_* categories)."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    signal = models.ForeignKey(
+        TradingSignal,
+        on_delete=models.CASCADE,
+        related_name="stop_loss_changes",
+    )
+    category = models.CharField(max_length=30)
+    previous_stop_loss = models.DecimalField(max_digits=12, decimal_places=5)
+    new_stop_loss = models.DecimalField(max_digits=12, decimal_places=5)
+    analyst = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="signal_stop_loss_changes",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["signal", "-created_at"])]
+
+    def __str__(self):
+        return f"{self.signal_id} {self.category}: {self.previous_stop_loss} -> {self.new_stop_loss}"
