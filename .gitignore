@@ -27,3 +27,4 @@ Montada/logs/*.log
 Montada/runtime/
 Montada/bases/*.dat
 Montada/bases/**/*.dat
+Montada/logs/*
