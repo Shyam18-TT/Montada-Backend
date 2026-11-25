@@ -316,7 +316,7 @@ SIMPLE_JWT = {
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 # Base URL for absolute media URLs in API responses (e.g. article featured_image)
-PUBLIC_MEDIA_BASE_URL = 'https://uat.themontada.com'
+PUBLIC_MEDIA_BASE_URL = 'https://api.themontada.com'
 
 # Marketaux API for market/finance news (https://www.marketaux.com/documentation). Sign up for a free token.
 MARKETAUX_API_TOKEN = "vIWcnrrYFI0FBaNnAgD0DAeiQ2prDE7QakmniN9h"
