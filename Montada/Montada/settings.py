@@ -345,7 +345,8 @@ SUPPORT_EMAIL = "support@trusttc.com"
 # For other providers, adjust EMAIL_HOST, EMAIL_PORT, EMAIL_USE_TLS/EMAIL_USE_SSL accordingly
 
 # ForexNewsAPI (events / trending-headlines still use this provider unless overridden)
-FOREXNEWS_API_TOKEN    = "ix9zm1aqfxqzclsusns6cqsaufji9k3lpdcy0ybs"
+# Set FOREXNEWS_API_TOKEN in the environment when the key is renewed (no code change needed).
+FOREXNEWS_API_TOKEN    = os.environ.get("FOREXNEWS_API_TOKEN", "ix9zm1aqfxqzclsusns6cqsaufji9k3lpdcy0ybs")
 FOREXNEWS_EVENTS_URL   = "https://forexnewsapi.com/api/v1/events"
 FOREXNEWS_TRENDING_URL = "https://forexnewsapi.com/api/v1/trending-headlines"
 FOREXNEWS_CATEGORY_URL = "https://forexnewsapi.com/api/v1/category"

@@ -42,6 +42,7 @@ from django.shortcuts import get_object_or_404
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 
+from News.provider_errors import provider_error_response
 from News.views import eodhd_category_news_response_for_request
 from Dashboard.realtime import broadcast_notifications
 from Mainapp.audit import audit
@@ -3719,19 +3720,9 @@ class AdminEconomicCalendarView(APIView):
                 try:
                     raw = self._fetch_fallback_feed(params)
                 except Exception:
-                    body = exc.read().decode() if exc.fp else "{}"
-                    try:
-                        err_data = json.loads(body)
-                    except Exception:
-                        err_data = {"error": body or str(exc)}
-                    return Response(err_data, status=exc.code)
+                    return provider_error_response(exc, "Economic calendar provider")
             else:
-                body = exc.read().decode() if exc.fp else "{}"
-                try:
-                    err_data = json.loads(body)
-                except Exception:
-                    err_data = {"error": body or str(exc)}
-                return Response(err_data, status=exc.code)
+                return provider_error_response(exc, "Economic calendar provider")
         except urllib.error.URLError as exc:
             stale = self._get_cached_feed(allow_stale=True)
             if stale is not None:

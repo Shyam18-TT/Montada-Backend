@@ -28,7 +28,9 @@ from .serializers import (
     EconomicCalendarEventNotificationSerializer,
 )
 from Subscriptions.access import check_active_subscription
+from .provider_errors import provider_error_response, read_provider_error
 from Subscriptions.analyst_plan_access import analyst_subscription_free_access_enabled
+
 
 try:
     from Signals.views import IsAnalystPermission
@@ -528,11 +530,7 @@ class MarketNewsList(APIView):
             with urllib.request.urlopen(req, timeout=30) as resp:
                 data = json.loads(resp.read().decode())
         except urllib.error.HTTPError as e:
-            body = e.read().decode() if e.fp else "{}"
-            try:
-                err_data = json.loads(body)
-            except Exception:
-                err_data = {"error": body or str(e)}
+            err_data = read_provider_error(e)
             if "1010" in str(err_data.get("error", "")):
                 return Response(
                     {
@@ -541,7 +539,7 @@ class MarketNewsList(APIView):
                     },
                     status=status.HTTP_503_SERVICE_UNAVAILABLE,
                 )
-            return Response(err_data, status=e.code)
+            return provider_error_response(e, "Market news provider", err_data)
         except Exception as e:
             return Response(
                 {"error": "Failed to fetch market news.", "detail": str(e)},
@@ -621,12 +619,7 @@ class ForexEventsView(APIView):
             with urllib.request.urlopen(req, timeout=15) as resp:
                 raw = json.loads(resp.read().decode())
         except urllib.error.HTTPError as exc:
-            body = exc.read().decode() if exc.fp else "{}"
-            try:
-                err_data = json.loads(body)
-            except Exception:
-                err_data = {"error": body or str(exc)}
-            return Response(err_data, status=exc.code)
+            return provider_error_response(exc, "ForexNewsAPI")
         except urllib.error.URLError as exc:
             return Response(
                 {"error": "Could not reach ForexNewsAPI.", "detail": str(exc.reason)},
@@ -726,12 +719,7 @@ class ForexEventDetailView(APIView):
             with urllib.request.urlopen(req, timeout=15) as resp:
                 raw = json.loads(resp.read().decode())
         except urllib.error.HTTPError as exc:
-            body = exc.read().decode() if exc.fp else "{}"
-            try:
-                err_data = json.loads(body)
-            except Exception:
-                err_data = {"error": body or str(exc)}
-            return Response(err_data, status=exc.code)
+            return provider_error_response(exc, "ForexNewsAPI")
         except urllib.error.URLError as exc:
             return Response(
                 {"error": "Could not reach ForexNewsAPI.", "detail": str(exc.reason)},
@@ -826,12 +814,7 @@ class ForexTrendingHeadlinesView(APIView):
             with urllib.request.urlopen(req, timeout=15) as resp:
                 raw = json.loads(resp.read().decode())
         except urllib.error.HTTPError as exc:
-            body = exc.read().decode() if exc.fp else "{}"
-            try:
-                err_data = json.loads(body)
-            except Exception:
-                err_data = {"error": body or str(exc)}
-            return Response(err_data, status=exc.code)
+            return provider_error_response(exc, "ForexNewsAPI")
         except urllib.error.URLError as exc:
             return Response(
                 {"error": "Could not reach ForexNewsAPI.", "detail": str(exc.reason)},
@@ -994,12 +977,7 @@ def eodhd_category_news_response_for_request(request):
             token,
         )
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode() if exc.fp else "{}"
-        try:
-            err_data = json.loads(body)
-        except Exception:
-            err_data = {"error": body or str(exc)}
-        return Response(err_data, status=exc.code)
+        return provider_error_response(exc, "EODHD news provider")
     except urllib.error.URLError as exc:
         return Response(
             {"error": "Could not reach EODHD API.", "detail": str(exc.reason)},
