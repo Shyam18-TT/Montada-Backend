@@ -84,7 +84,13 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'Mainapp.middleware.RequestAuditMiddleware',
+    # Keeps the last N requests + responses in logs/recent_requests.log (see the module).
+    'Mainapp.recent_requests.RecentRequestsMiddleware',
 ]
+
+RECENT_REQUESTS_LOG_ENABLED = True
+RECENT_REQUESTS_LOG_LIMIT = 100
+RECENT_REQUESTS_BODY_LIMIT = 4000
 
 # CORS: allow localhost on any port + your web origins (no trailing slashes)
 CORS_ALLOWED_ORIGINS = [

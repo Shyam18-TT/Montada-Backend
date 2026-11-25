@@ -284,6 +284,7 @@ Logs written to `Montada/logs/` (auto-created):
 |------|---------|
 | `django_db.log` | DB query warnings |
 | `exception.log` | Request/server errors |
+| `recent_requests.log` | Last 100 requests + responses, one JSON per line, secrets redacted (`Mainapp/recent_requests.py`) |
 | `pm2-montada-<N>-out.log` | PM2 stdout per worker |
 | `pm2-montada-<N>-error.log` | PM2 stderr per worker |
 
