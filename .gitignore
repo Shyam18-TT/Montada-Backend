@@ -28,3 +28,4 @@ Montada/runtime/
 Montada/bases/*.dat
 Montada/bases/**/*.dat
 Montada/logs/*
+Montada/ecosystem.config.cjs
