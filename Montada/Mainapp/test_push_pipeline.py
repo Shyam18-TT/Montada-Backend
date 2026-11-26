@@ -514,6 +514,15 @@ class RecipientTests(TestCase):
         self.assertEqual(encoded["data"]["silent"], "true")
         self.assertEqual(PushDelivery.objects.filter(status="skipped_pref", user_id=muted.pk).count(), 1)
 
+    def test_every_push_carries_the_recipients_user_type(self):
+        analyst = make_user("analyst-recipient@example.com", user_type="analyst")
+        DeviceToken.objects.create(user=self.user, fcm_token="tok-trader", device_id="t")
+        DeviceToken.objects.create(user=analyst, fcm_token="tok-analyst", device_id="a")
+        with patch("firebase.messaging.send_each_for_multicast", return_value=ok_response("m1")) as send_each:
+            firebase.send_push_to_users([self.user, analyst], "t", "b", data={"type": "user_price_alert"})
+        user_types = {tuple(c.args[0].tokens): c.args[0].data["user_type"] for c in send_each.call_args_list}
+        self.assertEqual(user_types, {("tok-trader",): "trader", ("tok-analyst",): "analyst"})
+
     def test_rows_without_device_id_are_grouped_by_token(self):
         DeviceToken.objects.create(user=self.user, fcm_token="tok-1")
         DeviceToken.objects.create(user=self.user, fcm_token="tok-2")

@@ -247,6 +247,8 @@ send_push_to_tokens(tokens, title, body, data={}, image_url=None, sound=True, pl
   unregisters (works with an expired access token).
 - One push per physical device (newest `updated_at`); users who turned the category off are skipped,
   users on "silent" get the `_silent` channel and no sound (`Mainapp/notification_preferences.py`).
+- Every `send_push_to_users` push carries the recipient's `data["user_type"]` (`"trader"` / `"analyst"`);
+  devices are grouped per user type so each one gets its own value.
 - Sends use `send_each_for_multicast`; transient errors retry (max 3, backoff + jitter); dead tokens
   are deleted; payload / APNs-credential errors never delete a token. Every attempt is logged in
   `Mainapp.PushDelivery` (admin: filter by user id, kept 30 days).

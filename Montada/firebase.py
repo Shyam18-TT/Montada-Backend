@@ -113,6 +113,7 @@ class PushTarget:
     device_id: str
     user_id: object
     mode: str  # "sound" | "silent"
+    user_type: str = ""  # recipient's User.user_type: "trader" | "analyst"
 
 
 _RESOLVE_CHUNK = 1000  # keeps IN (...) lists under SQL Server's 2100-parameter limit
@@ -148,7 +149,10 @@ def _resolve_push_targets(users, preference_category=None):
                 user__is_soft_deleted=False,
             )
             .exclude(fcm_token="")
-            .values_list("fcm_token", "platform", "device_id", "user_id", "updated_at", "created_at", "id")
+            .values_list(
+                "fcm_token", "platform", "device_id", "user_id", "updated_at", "created_at", "id",
+                "user__user_type",
+            )
         )
     # Newest first, so the first row seen per device is the one to keep.
     rows.sort(key=lambda r: (r[4], r[5], str(r[6])), reverse=True)
@@ -165,7 +169,7 @@ def _resolve_push_targets(users, preference_category=None):
     seen_devices: set[str] = set()
     seen_tokens: set[str] = set()
     seen_installs: set[str] = set()
-    for token, platform, device_id, user_id, _updated, _created, _pk in rows:
+    for token, platform, device_id, user_id, _updated, _created, _pk, user_type in rows:
         token = str(token or "").strip()
         if not token or token in seen_tokens:
             continue
@@ -193,6 +197,7 @@ def _resolve_push_targets(users, preference_category=None):
             device_id=str(device_id or ""),
             user_id=user_id,
             mode=mode,
+            user_type=str(user_type or ""),
         ))
     return targets, skipped
 
@@ -708,30 +713,35 @@ def send_push_to_users(
 
     grouped: dict = {}
     for target in targets:
-        grouped.setdefault((target.mode != "silent", target.platform), []).append(target.token)
+        grouped.setdefault(
+            (target.mode != "silent", target.platform, target.user_type), []
+        ).append(target.token)
 
     result = dict(empty_result, failed_tokens=[], errors=[])
     sent_any = False
-    for sound in (True, False):
-        for platform in ("android", "ios", "unknown"):
-            group_tokens = grouped.get((sound, platform))
-            if not group_tokens:
-                continue
-            sent_any = True
-            group_result = send_push_to_tokens(
-                tokens=group_tokens,
-                title=title,
-                body=body,
-                data=data,
-                image_url=image_url,
-                sound=sound,
-                platform=platform,
-                dedupe=bool(event_id),
-            )
-            result["success_count"] += group_result.get("success_count", 0)
-            result["failure_count"] += group_result.get("failure_count", 0)
-            result["failed_tokens"].extend(group_result.get("failed_tokens", []))
-            result["errors"].extend(group_result.get("errors", []))
+    # Sorted so sends happen in a stable order: sound before silent, then platform, then user type.
+    for (sound, platform, user_type), group_tokens in sorted(
+        grouped.items(), key=lambda item: (not item[0][0], item[0][1], item[0][2])
+    ):
+        if not group_tokens:
+            continue
+        sent_any = True
+        # Every push tells the app which kind of account it was sent to.
+        group_data = dict(data, user_type=user_type)
+        group_result = send_push_to_tokens(
+            tokens=group_tokens,
+            title=title,
+            body=body,
+            data=group_data,
+            image_url=image_url,
+            sound=sound,
+            platform=platform,
+            dedupe=bool(event_id),
+        )
+        result["success_count"] += group_result.get("success_count", 0)
+        result["failure_count"] += group_result.get("failure_count", 0)
+        result["failed_tokens"].extend(group_result.get("failed_tokens", []))
+        result["errors"].extend(group_result.get("errors", []))
 
     if not sent_any:
         logger.info("FCM: no device tokens found for the given users – skipping.")
